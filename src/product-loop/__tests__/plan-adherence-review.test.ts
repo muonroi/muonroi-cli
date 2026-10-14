@@ -1,10 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { TaskRequest, ToolResult } from "../../types/index.js";
-import { runPlanAdherenceReview } from "../plan-adherence-review.js";
+import { type AdherenceVerdict, runPlanAdherenceReview } from "../plan-adherence-review.js";
 
-async function drain(
-  gen: AsyncGenerator<unknown, { rounds: number; adherent: boolean; deviations: string[] }, unknown>,
-) {
+async function drain(gen: AsyncGenerator<unknown, AdherenceVerdict, unknown>): Promise<AdherenceVerdict> {
   while (true) {
     const n = await gen.next();
     if (n.done) return n.value;
@@ -33,6 +31,7 @@ describe("runPlanAdherenceReview", () => {
     );
     expect(verdict.adherent).toBe(true);
     expect(verdict.rounds).toBe(1);
+    expect(verdict.stopReason).toBe("approved");
     expect(calls).toHaveLength(1); // review only, no fix
     expect(calls[0].modelId).toBe("leader-pro");
   });
@@ -60,9 +59,12 @@ describe("runPlanAdherenceReview", () => {
       await vi.advanceTimersByTimeAsync(61_000);
       const verdict = await p;
       // Hung reviewer → treated as no parseable verdict → leave the verify +
-      // criteria gate to decide, instead of wedging the sprint.
+      // criteria gate to decide, instead of wedging the sprint. `adherent`
+      // stays true (unchanged gate behaviour); `stopReason` distinguishes
+      // this from a real reviewer approval for anyone reading the record.
       expect(verdict.adherent).toBe(true);
       expect(verdict.rounds).toBe(1);
+      expect(verdict.stopReason).toBe("no_verdict");
     } finally {
       if (prev === undefined) delete process.env.MUONROI_IDEAL_ISOLATED_TASK_MS;
       else process.env.MUONROI_IDEAL_ISOLATED_TASK_MS = prev;
@@ -101,14 +103,20 @@ describe("runPlanAdherenceReview", () => {
     );
     expect(verdict.adherent).toBe(true);
     expect(verdict.rounds).toBe(2);
+    expect(verdict.stopReason).toBe("approved");
     // review(1) → fix(1) → review(2)
     expect(calls.map((c) => c.modelId)).toEqual(["leader-pro", "cheap-flash", "leader-pro"]);
   });
 
   it("stops at maxRounds with deviations left for the hard gates", async () => {
+    // Deviation text differs each round so the no-progress check (identical
+    // deviations twice in a row) never trips — this test is specifically
+    // about the maxRounds ceiling, not the no-progress stop.
+    let reviewRound = 0;
     const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {
       if (req.description.includes("review")) {
-        return { success: true, output: '{"adherent": false, "deviations": ["still wrong"]}' };
+        reviewRound++;
+        return { success: true, output: `{"adherent": false, "deviations": ["still wrong (round ${reviewRound})"]}` };
       }
       return { success: true, output: "tried" };
     };
@@ -126,7 +134,8 @@ describe("runPlanAdherenceReview", () => {
     );
     expect(verdict.adherent).toBe(false);
     expect(verdict.rounds).toBe(2);
-    expect(verdict.deviations).toContain("still wrong");
+    expect(verdict.deviations).toContain("still wrong (round 2)");
+    expect(verdict.stopReason).toBe("round_cap");
   });
 
   it("skips cleanly when there is no diff", async () => {
@@ -149,5 +158,71 @@ describe("runPlanAdherenceReview", () => {
     expect(verdict.adherent).toBe(true);
     expect(verdict.rounds).toBe(0);
     expect(called).toBe(false);
+    // `adherent` is unchanged (nothing to review); `stopReason` must not say
+    // "approved" — no reviewer ever looked at anything.
+    expect(verdict.stopReason).toBe("no_diff");
+  });
+
+  it("skips cleanly for an empty plan synthesis, without touching adherent", async () => {
+    let called = false;
+    const runIsolatedTask = async (): Promise<ToolResult> => {
+      called = true;
+      return { success: true, output: "{}" };
+    };
+    const verdict = await drain(
+      runPlanAdherenceReview({
+        sprintN: 5,
+        planSynthesis: "   ",
+        cwd: "/tmp",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        runIsolatedTask,
+        diffProvider: okDiff,
+      }),
+    );
+    expect(verdict.adherent).toBe(true);
+    expect(verdict.rounds).toBe(0);
+    expect(called).toBe(false);
+    expect(verdict.stopReason).toBe("empty_plan");
+  });
+
+  // Small fix #5 (acceptance review): pin the exact no-tasks review prompt so
+  // an accidental edit to `baseReviewPrompt` (plan-adherence-review.ts) is
+  // caught here rather than silently drifting — this is the SAME text a
+  // task-aware call's prompt is built on top of (S3b's `taskAwareReviewPrompt`
+  // = `baseReviewPrompt` + an addition), so protecting it here protects both.
+  it("pins the exact none-mode (no tasks) review prompt text", async () => {
+    const plan = "## Agreed Architecture\n\nBuild src/foo.ts.";
+    const diff = "diff --git a/src/foo.ts b/src/foo.ts\n+export const foo = 1;\n";
+    let capturedPrompt = "";
+    const runIsolatedTask = async (req: TaskRequest): Promise<ToolResult> => {
+      capturedPrompt = req.prompt;
+      return { success: true, output: '{"adherent": true, "deviations": []}' };
+    };
+
+    await drain(
+      runPlanAdherenceReview({
+        sprintN: 99,
+        planSynthesis: plan,
+        cwd: "/tmp",
+        reviewModelId: "leader-pro",
+        fixModelId: "cheap-flash",
+        runIsolatedTask,
+        diffProvider: () => diff,
+      }),
+    );
+
+    const expectedPrompt =
+      `You are a SENIOR code reviewer. Judge whether the implementation faithfully ` +
+      `follows the APPROVED PLAN below — both its file_edits (right files, right ` +
+      `approach: e.g. pass-through vs re-implementation, correct operation/API) and ` +
+      `its acceptance_criteria. Be strict and specific.\n\n` +
+      `=== APPROVED PLAN ===\n${plan}\n\n` +
+      `=== ACTUAL GIT DIFF ===\n${diff}\n\n` +
+      `Return ONLY JSON: {"adherent": boolean, "deviations": [{"where":"<file/symbol>",` +
+      `"issue":"<what diverges from the plan>","fix":"<concrete instruction to conform>"}]}. ` +
+      `adherent=true ONLY if there are no material deviations.`;
+
+    expect(capturedPrompt).toBe(expectedPrompt);
   });
 });

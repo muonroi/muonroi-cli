@@ -49,17 +49,30 @@ export interface PointToExistingFormCardProps {
   state: PointToExistingFormState;
   terminalCols: number;
   theme: Theme;
+  /**
+   * True when this card is the modal that owns the keyboard (see
+   * src/ui/modal-focus.ts). Mirrored to the Semantic node's `focus` flag so a
+   * harness driver can read `tui.query "focus"` and learn which of several
+   * stacked cards its keypresses will reach.
+   */
+  focused?: boolean;
 }
 
 const MAX_CARD_COLS = 90;
 const FALLBACK_THRESHOLD = 60;
 
-export function PointToExistingFormCard({ state, terminalCols, theme: t }: PointToExistingFormCardProps) {
+export function PointToExistingFormCard({ state, terminalCols, theme: t, focused }: PointToExistingFormCardProps) {
   const fallback = terminalCols < FALLBACK_THRESHOLD;
   const width = fallback ? terminalCols : Math.min(terminalCols - 2, MAX_CARD_COLS);
 
   return (
-    <Semantic id="point-to-existing-form" role="dialog" name="Point to existing project">
+    <Semantic
+      id="point-to-existing-form"
+      role="dialog"
+      name="Point to existing project"
+      focus={focused || undefined}
+      isModal
+    >
       <box flexDirection="column" marginBottom={1}>
         <box
           width={width}

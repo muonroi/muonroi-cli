@@ -74,14 +74,24 @@ describe("ideal halt recovery card E2E", () => {
     expect(opts[2]?.name).toBe("Continue as council brainstorm");
   });
 
-  it("first option is selected by default", () => {
+  it("point_to_existing is pre-selected by default — never the destructive init_new", () => {
+    // Contract since f70968ec ("derive the halt card's default instead of
+    // pre-selecting a scaffold"): the cursor opens on
+    // `deriveHaltRecommendation(halt).index`, not index 0. init_new scaffolds
+    // into the cwd (DESTRUCTIVE_RECOVERY_OPTION_IDS) and is never the default.
+    // The --inject-halt chunk carries no `advice`, so the pick is
+    // "safest-available": point_to_existing is pre-selected but NOT tagged
+    // "recommended" (no offered option is claimed to carry out a fix).
     const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
-    expect(opts[0]?.selected).toBe(true);
-    expect(opts[1]?.selected).toBeFalsy();
+    expect(opts[0]?.selected).toBeFalsy();
+    expect(opts[1]?.selected).toBe(true);
     expect(opts[2]?.selected).toBeFalsy();
+    expect(opts[0]?.props?.destructive).toBe(true);
+    expect(opts[1]?.props?.preselected).toBe(true);
+    expect(opts[1]?.props?.recommended).toBe(false);
   });
 
-  it("Down arrow moves selection to second option", async () => {
+  it("Down arrow moves selection to third option", async () => {
     driver.press("Down");
     // Sticky-poll the snapshot: wait_for({selector...selected}) can resolve
     // momentarily during React's re-render cycle when only the listitem with
@@ -94,7 +104,7 @@ describe("ideal halt recovery card E2E", () => {
     let opts: ReturnType<typeof driver.queryAll> = [];
     while (Date.now() < deadline) {
       opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
-      if (opts.length === 3 && opts[0]?.selected !== true && opts[1]?.selected === true) {
+      if (opts.length === 3 && opts[1]?.selected !== true && opts[2]?.selected === true) {
         stable++;
         if (stable >= 3) break;
       } else {
@@ -103,7 +113,8 @@ describe("ideal halt recovery card E2E", () => {
       await new Promise((r) => setTimeout(r, 50));
     }
     expect(opts[0]?.selected).toBeFalsy();
-    expect(opts[1]?.selected).toBe(true);
+    expect(opts[1]?.selected).toBeFalsy();
+    expect(opts[2]?.selected).toBe(true);
   });
 
   it("Escape dismisses the halt card", async () => {

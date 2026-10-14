@@ -2,9 +2,10 @@ import { stat } from "fs/promises";
 import path from "path";
 import { ripgrep } from "ripgrep";
 import type { ToolResult } from "../types/index";
+import { normalizeMsysDrivePath } from "./write-scope.js";
 
-const MAX_MATCHES = 100;
-const MAX_LINE_LENGTH = 2000;
+const MAX_MATCHES = Number(process.env.MUONROI_GREP_MAX_MATCHES ?? 100);
+const MAX_LINE_LENGTH = Number(process.env.MUONROI_GREP_MAX_LINE_LENGTH ?? 2000);
 
 interface GrepParams {
   pattern: string;
@@ -88,11 +89,36 @@ async function getFileMtimes(files: string[], cwd: string): Promise<Map<string, 
 }
 
 export async function executeGrep(params: GrepParams, cwd: string): Promise<ToolResult> {
-  if (!params.pattern) {
-    return { success: false, error: "pattern is required" };
+  // The bare "pattern is required" was what a stalled sub-agent read 71 times
+  // in a row without ever recovering (session 2026-09-08): it names the fault
+  // but not the fix. Keyless calls are stopped upstream by the executor guard
+  // (src/tools/arg-guard.ts); this covers a present-but-blank pattern, and says
+  // what a working call looks like.
+  if (typeof params.pattern !== "string" || params.pattern.trim() === "") {
+    return {
+      success: false,
+      error: 'grep requires a non-empty "pattern" string. Example: {"pattern":"TODO","include":"*.ts"}',
+    };
   }
 
-  const searchPath = params.path ? (path.isAbsolute(params.path) ? params.path : path.join(cwd, params.path)) : cwd;
+  // An MSYS drive spelling (`/d/src`) is what the bash tool PRINTS on Windows, so
+  // the model hands it straight back here. `path.isAbsolute` is true for it on
+  // win32, so it used to be taken as already-absolute and `stat` then tested the
+  // current-drive resolution (`D:\d\src`) — which does not exist, dropping into
+  // the catch below and handing ripgrep the unresolvable spelling as its target.
+  // Measured before the fix: a search whose native spelling returned
+  // `Found 1 matches in 320ms` could balloon to 7s once the MSYS → real-path
+  // failure shape a search tool has.
+  //
+  // Normalised ONCE here, so the search root and the fallback target below can
+  // never disagree about what the caller's path means. `write-scope.ts` owns the
+  // function; this module imports the fact rather than restating it.
+  const requestedPath = params.path === undefined ? undefined : normalizeMsysDrivePath(params.path);
+  const searchPath = requestedPath
+    ? path.isAbsolute(requestedPath)
+      ? requestedPath
+      : path.join(cwd, requestedPath)
+    : cwd;
 
   let searchCwd: string;
   let searchTarget: string | undefined;
@@ -106,7 +132,7 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
     }
   } catch {
     searchCwd = cwd;
-    searchTarget = params.path;
+    searchTarget = requestedPath;
   }
 
   const args = buildArgs({ ...params, path: searchTarget });
@@ -168,9 +194,9 @@ export async function executeGrep(params: GrepParams, cwd: string): Promise<Tool
     }
 
     if (truncated) {
-      output.push("");
-      output.push(
-        `(Results truncated: showing ${MAX_MATCHES} of ${total} matches. Consider using a more specific path or pattern.)`,
+      console.warn(
+        `[grep] results truncated: showing ${MAX_MATCHES} of ${total} matches — ` +
+          `consider a more specific path or pattern`,
       );
     }
 

@@ -1,3 +1,17 @@
+# Archived project-state narrative (from `.planning/STATE.md`, 2026-09)
+
+`.planning/STATE.md` is written by the GSD runtime on **every turn**
+(`syncWorkflowContext` -> `setStateField`, `src/gsd/workflow-engine.ts:32`,
+`src/gsd/native-state.ts:40`), so it was untracked — see `docs/planning/README.md`.
+
+It also carried hand-written project history that people actually read. That
+narrative is preserved verbatim below, exactly as it stood at commit `80f31d4f`.
+The machine-owned extension-table rows (`Depth`, `Phase`, `Workflow Kind`,
+`Ideal Run`, `Plan Verified`) are kept only so the snapshot is faithful; the
+live values now live in the untracked `.planning/STATE.md`.
+
+---
+
 # Project State — muonroi-cli
 
 **Last updated:** 2026-05-25 (Phase 5 SHIPPED — all 5 fixes deployed, awaiting user verify)

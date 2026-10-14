@@ -183,6 +183,32 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   // --- Command channel (in stream → handlers) ------------------------------
   const commandHandlers: Array<(cmd: unknown) => void> = [];
 
+  /**
+   * Pre-mount command buffer.
+   *
+   * The ONLY production consumer of `onCommand` is the React input bridge
+   * (`input-bridge.tsx` → `useAgentInputBridge`), which registers from a
+   * `useEffect` and therefore exists only AFTER the app mounts. The transport,
+   * by contrast, is listening — and on Windows the handshake that unblocks the
+   * parent has already been written — within ~120 ms of process start.
+   *
+   * Measured on this repo (probe on `feat/drivability-referee`, 3 runs):
+   *   in-stream listening   t=116-118 ms
+   *   onCommand registered  t=562-860 ms
+   * i.e. a 445-745 ms window on a warm dev box, wider under load. In that
+   * window `for (const h of commandHandlers) h(cmd)` iterated an EMPTY array:
+   * the command vanished with no queue, no error, no event, and no signal back
+   * to the driver, which believed it had landed. That is the same failure class
+   * this branch exists to remove (docs/agent-first/SELF-IMPROVEMENT-PLAN.md §1).
+   *
+   * Commands arriving in the window are buffered here IN ORDER and replayed
+   * into the first handler at registration. The buffer is bounded: if no
+   * handler ever registers it must not grow without limit.
+   */
+  const MAX_PENDING_COMMANDS = 256;
+  const pendingCommands: unknown[] = [];
+  let droppedCommands = 0;
+
   const splitter = createLineSplitter((line) => {
     try {
       const cmd = JSON.parse(line);
@@ -192,6 +218,24 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
       // resolve because no frame write happens to mark activity (e.g., when
       // the input changes textarea state but no Semantic field is mirrored).
       idle.markActivity();
+      if (commandHandlers.length === 0) {
+        if (pendingCommands.length >= MAX_PENDING_COMMANDS) {
+          // Overflow. Reject the NEWEST rather than evicting the oldest: the
+          // buffer then stays a contiguous prefix of what the driver sent, so
+          // an ordered burst ("type abc" → "press Enter") is never replayed
+          // with a hole in the middle. Loud on stderr AND counted into the
+          // `dropped` field of the `input-ready` event, so the driver learns
+          // over the wire that input was lost — never silently.
+          droppedCommands++;
+          process.stderr.write(
+            `[agent-mode] pre-mount command buffer full (${MAX_PENDING_COMMANDS}) — dropped command ` +
+              `#${droppedCommands}; the input bridge has not registered yet: ${line.slice(0, 200)}\n`,
+          );
+          return;
+        }
+        pendingCommands.push(cmd);
+        return;
+      }
       for (const h of commandHandlers) h(cmd);
     } catch {
       // Malformed JSONL from host — ignore silently.
@@ -230,7 +274,39 @@ export async function startAgentMode(opts: AgentModeOptions): Promise<AgentModeR
   };
 
   const onCommand = (h: (cmd: unknown) => void): void => {
+    const isFirst = commandHandlers.length === 0;
     commandHandlers.push(h);
+    if (!isFirst) return;
+
+    // First handler registered == the input bridge is live. Replay the
+    // pre-mount buffer into it, in arrival order, BEFORE announcing readiness
+    // so a driver that wakes on `input-ready` already sees the effect.
+    const queued = pendingCommands.splice(0, pendingCommands.length);
+    for (const cmd of queued) {
+      try {
+        h(cmd);
+      } catch (err) {
+        process.stderr.write(
+          `[agent-mode] replaying buffered command into the input bridge failed: ` +
+            `${err instanceof Error ? `${err.name}: ${err.message}` : String(err)}\n`,
+        );
+      }
+    }
+
+    // Readiness signal. `wait_for({idle:true})` cannot answer "is this TUI
+    // ready for input?" — it is captured-start based and routinely resolves on
+    // an empty pre-mount frame (measured: ok 82 ms after start, and in the
+    // probe above the first idle fired ~330 ms BEFORE this registration). A
+    // one-shot event can: `wait_for({event:"input-ready"})` is replay-safe
+    // because the driver scans its own event ring, so it resolves whether the
+    // caller subscribed before or after the event arrived.
+    emitEvent({
+      t: "event",
+      kind: "input-ready",
+      flushed: queued.length,
+      dropped: droppedCommands,
+      ts: now(),
+    });
   };
 
   const attachRenderer = (renderer: RendererLike): void => {

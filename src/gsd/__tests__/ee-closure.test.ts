@@ -17,7 +17,7 @@ describe("ee-closure", () => {
   let tmp: string;
 
   afterEach(() => {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.clearAllMocks();
   });
 

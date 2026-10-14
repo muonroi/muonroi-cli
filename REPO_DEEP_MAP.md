@@ -545,6 +545,19 @@ This is the `runAssessor` callback passed into `assessComplexity({...})` at `mes
 
 ---
 
+### Crash diagnostics (added 2026-09-09 after an untraced `/ideal` death)
+
+| File | Role |
+|---|---|
+| `src/council/crash-breadcrumb.ts` | Append-only **synchronous** JSONL trail at `~/.muonroi-cli/council-breadcrumbs.jsonl` (single rollover at 4 MiB → `.1.jsonl`). Every line carries ISO ts, ms-since-start, marker, pid, sessionId and `process.memoryUsage()`. `beginCouncilCall()` arms a 5s heartbeat while a call is in flight. Kill switch `MUONROI_COUNCIL_BREADCRUMBS=0`; path override `MUONROI_COUNCIL_BREADCRUMB_FILE`; period `MUONROI_COUNCIL_BREADCRUMB_HEARTBEAT_MS`. Inert under vitest unless the file override is set. |
+| `src/utils/stderr-mirror.ts` | Tees JS-level `process.stderr.write` to `~/.muonroi-cli/tui-stderr.log` while the TUI is mounted (installed from `setTuiActive` in `src/index.ts`). **Does NOT see a native V8/JSC fatal** — that is written to fd 2 from native code. `MUONROI_TUI_STDERR_MIRROR=0` disables. |
+
+Emission points: `tracedGenerate` / `tracedAsync` (`council.phase.enter` / `.exit`), `tracedGenerateWithFallback` (`council.candidate.start` / `.ok` / `.failed`, `council.fallback.exhausted`), and `src/index.ts` (`process.exit`, `process.signal`).
+
+`CouncilLLM.generate` takes a trailing `onDiagnostics` sink (`CouncilGenerateDiagnostics` in `src/council/types.ts`) reporting `requestIssued` / `sdkAttempts` / `streamedChars` / `rawTextChars` / `finishReason` / abort state, so an `empty-completion` fallback record can distinguish "the provider returned nothing" from "we never called the provider". **Any new `CouncilLLM` wrapper MUST forward that 7th parameter** — `withCouncilSignal` (`council/index.ts`) and `createProductLlm` (`product-loop/sprint-runner.ts`) do.
+
+---
+
 ### `llm.ts` — CRITICAL for reuse
 
 **Signature** (`llm.ts:341-346`):

@@ -27,7 +27,19 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 20
+    # Windows gets 30, the others keep 20 — measured, not guessed. The unit
+    # config runs files SERIALLY (vitest.config.ts `fileParallelism: false`), so
+    # the job is ~960 file boots back to back, and a file boot costs ~2.2x more
+    # on windows-latest than on macos-latest (per-file wall time from the CI
+    # logs of the 2026-10-14 runs: 1122 s vs 500 s over the same 829 files).
+    # That run was cancelled at 20 min with 133 files still to go (~67 s more).
+    # After removing the avoidable waits (atomic-io's real 10 s step timeouts,
+    # visible-retry's real 2 s backoffs, a real pyright booted by
+    # msys-drive-path, the verify floor's timeout that did not kill a forked
+    # gate on win32) the projection is ~18 min of vitest + ~1.3 min of
+    # install/typecheck — ~97% of a 20 min budget, which no runner variance
+    # survives. macOS ran the whole suite in 535 s, so 20 stays honest there.
+    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 20 }}
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2

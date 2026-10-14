@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { alignCriteriaDeferred, alignCriteriaMet } from "../debate.js";
+import { alignCriteriaDeferred, alignCriteriaEvidence, alignCriteriaMet } from "../debate.js";
 
 describe("alignCriteriaMet (B3: grade rounds against pinned criteria)", () => {
   const pinned = ["Renders without OCR", "Colors captured", "No mojibake"];
@@ -67,5 +67,80 @@ describe("alignCriteriaDeferred (criteria a debate cannot close)", () => {
       false,
       false,
     ]);
+  });
+});
+
+describe("C2b — carry-forward for a criterion this round's reply never touched", () => {
+  const pinned = ["Renders without OCR", "Colors captured", "No mojibake"];
+
+  it("alignCriteriaMet: carries a MET prior verdict forward when the criterion is omitted (count mismatch)", () => {
+    // Only "Colors captured" is reported this round (simulating perRoundFocus
+    // narrowing the leader's reply to one item) — the other two are omitted,
+    // not echoed.
+    const status = [{ criterion: "colors captured", met: false }];
+    const priorMet = [true, true, false]; // criterion 0 and 1 were MET last round
+    expect(alignCriteriaMet(pinned, status, priorMet)).toEqual([
+      true, // omitted -> carried from priorMet[0]
+      false, // matched this round -> fresh verdict wins (downgrade honored)
+      false, // omitted -> carried from priorMet[2]
+    ]);
+  });
+
+  it("alignCriteriaMet: never upgrades an unmet criterion via carry-forward", () => {
+    const status = [{ criterion: "colors captured", met: true }];
+    const priorMet = [false, false, false];
+    expect(alignCriteriaMet(pinned, status, priorMet)).toEqual([
+      false, // omitted, prior was unmet -> stays unmet, not upgraded
+      true, // matched this round, leader explicitly grants it -> fresh verdict wins
+      false, // omitted, prior was unmet -> stays unmet
+    ]);
+  });
+
+  it("alignCriteriaMet: a criterion matched this round always uses the fresh verdict, never the carried value", () => {
+    // Count-matched (index-aligned) path: every pinned criterion is treated as
+    // addressed, so a prior value must never leak through even when supplied.
+    const status = [
+      { criterion: "renders w/o ocr", met: false },
+      { criterion: "colors", met: false },
+      { criterion: "mojibake", met: false },
+    ];
+    const priorMet = [true, true, true];
+    expect(alignCriteriaMet(pinned, status, priorMet)).toEqual([false, false, false]);
+  });
+
+  it("alignCriteriaMet: round 1 (no prior) behaves exactly as today — omitted criteria default to not-met", () => {
+    const status = [{ criterion: "colors captured", met: true }];
+    expect(alignCriteriaMet(pinned, status)).toEqual([false, true, false]);
+    expect(alignCriteriaMet(pinned, status, undefined)).toEqual([false, true, false]);
+  });
+
+  it("alignCriteriaMet: an empty prior array (nothing pinned was ever graded) behaves like no prior", () => {
+    const status = [{ criterion: "colors captured", met: true }];
+    expect(alignCriteriaMet(pinned, status, [])).toEqual([false, true, false]);
+  });
+
+  it("alignCriteriaDeferred: carries a prior deferred flag forward when the criterion is omitted", () => {
+    const status = [{ criterion: "colors captured", deferred: false }];
+    const priorDeferred = [true, true, false];
+    expect(alignCriteriaDeferred(pinned, status, priorDeferred)).toEqual([
+      true, // omitted -> carried
+      false, // matched this round -> fresh verdict wins
+      false, // omitted -> carried
+    ]);
+  });
+
+  it("alignCriteriaEvidence: carries prior evidence text forward when the criterion is omitted", () => {
+    const status = [{ criterion: "colors captured", evidence: "round2: confirmed under test" }];
+    const priorEvidence = ["round1: verified visually", "round1: not yet argued", ""];
+    expect(alignCriteriaEvidence(pinned, status, priorEvidence)).toEqual([
+      "round1: verified visually", // omitted -> carried
+      "round2: confirmed under test", // matched this round -> fresh evidence wins
+      "", // omitted, nothing to carry (prior was already empty)
+    ]);
+  });
+
+  it("alignCriteriaEvidence: round 1 (no prior) still defaults an unmatched criterion to empty evidence", () => {
+    const status = [{ criterion: "colors captured", evidence: "round1: confirmed" }];
+    expect(alignCriteriaEvidence(pinned, status)).toEqual(["", "round1: confirmed", ""]);
   });
 });

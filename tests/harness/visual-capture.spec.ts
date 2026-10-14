@@ -21,18 +21,22 @@ describe("visual-capture E2E", () => {
   it("snapshots the real rendered cell grid with colors", async () => {
     const ctx = await spawnHarness({});
     try {
-      await ctx.driver.wait_for({ idle: true, timeoutMs: 15_000 });
+      // `input-ready` (not `idle`) is the readiness signal: idle can fire on the
+      // empty pre-mount frame — see agent-mode.ts.
+      await ctx.driver.wait_for({ event: "input-ready", timeoutMs: 15_000 });
       // Mount guard: ensure the tree has painted at least once.
       await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 10_000 });
 
       // Type into the composer so the grid has non-trivial content to render.
       ctx.driver.type("hello visual world");
-      // Poll briefly for the visual frame — it rides the next semantic change.
-      let vf: VisualFrame | null = null;
-      for (let i = 0; i < 40 && !vf; i++) {
-        vf = ctx.driver.snapshot_visual();
-        if (!vf) await new Promise((r) => setTimeout(r, 100));
-      }
+      // The splash already produced a VisualFrame, so "a visual frame exists"
+      // is true BEFORE the keystrokes land — the old poll loop exited on it
+      // and asserted against the splash. Wait for the composer to hold the
+      // text, then for the rendered grid (emitted right after that semantic
+      // frame, on the same render pass) to show it.
+      await ctx.driver.wait_for({ selector: 'id=composer value="hello visual world"', timeoutMs: 10_000 });
+      await ctx.driver.wait_for({ visualText: "hello visual world", timeoutMs: 5_000 });
+      const vf: VisualFrame | null = ctx.driver.snapshot_visual();
 
       expect(vf, "a VisualFrame should be emitted once the renderer is attached").not.toBeNull();
       const frame = vf as VisualFrame;

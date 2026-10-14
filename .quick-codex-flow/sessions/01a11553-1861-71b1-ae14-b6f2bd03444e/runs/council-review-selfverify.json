@@ -1,0 +1,147 @@
+{
+  "scenarios": [
+    {
+      "id": "smoke-boot",
+      "description": "CLI boots and reaches idle within budget",
+      "derivedFrom": {
+        "files": [
+          ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+          ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/runs/context-quality.md",
+          "src/council/__tests__/synthesis-retry-budget.test.ts",
+          "src/council/index.ts",
+          "src/council/planner.ts",
+          "src/council/prompts.ts",
+          "src/gsd/__tests__/mutation-gate.test.ts",
+          "src/gsd/__tests__/workflow-tools.test.ts",
+          "src/gsd/loop-host.ts",
+          "src/gsd/mutation-gate.ts",
+          "src/gsd/plan-council.ts",
+          "src/gsd/verify-council.ts",
+          "src/gsd/workflow-tools.ts",
+          "src/orchestrator/__tests__/nested-council-stall.test.ts",
+          "src/orchestrator/orchestrator.ts",
+          "src/orchestrator/stream-runner.ts",
+          "src/orchestrator/tool-engine.ts",
+          "src/tools/registry.ts"
+        ],
+        "semanticIds": []
+      },
+      "steps": [
+        {
+          "op": "wait_for",
+          "idle": true,
+          "timeoutMs": 60000
+        }
+      ],
+      "expectations": [
+        {
+          "kind": "idleReached",
+          "withinMs": 60000
+        },
+        {
+          "kind": "noErrorToast"
+        }
+      ],
+      "budgetMs": 90000
+    }
+  ],
+  "runs": [
+    {
+      "scenario": {
+        "id": "smoke-boot",
+        "description": "CLI boots and reaches idle within budget",
+        "derivedFrom": {
+          "files": [
+            ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+            ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/runs/context-quality.md",
+            "src/council/__tests__/synthesis-retry-budget.test.ts",
+            "src/council/index.ts",
+            "src/council/planner.ts",
+            "src/council/prompts.ts",
+            "src/gsd/__tests__/mutation-gate.test.ts",
+            "src/gsd/__tests__/workflow-tools.test.ts",
+            "src/gsd/loop-host.ts",
+            "src/gsd/mutation-gate.ts",
+            "src/gsd/plan-council.ts",
+            "src/gsd/verify-council.ts",
+            "src/gsd/workflow-tools.ts",
+            "src/orchestrator/__tests__/nested-council-stall.test.ts",
+            "src/orchestrator/orchestrator.ts",
+            "src/orchestrator/stream-runner.ts",
+            "src/orchestrator/tool-engine.ts",
+            "src/tools/registry.ts"
+          ],
+          "semanticIds": []
+        },
+        "steps": [
+          {
+            "op": "wait_for",
+            "idle": true,
+            "timeoutMs": 60000
+          }
+        ],
+        "expectations": [
+          {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          {
+            "kind": "noErrorToast"
+          }
+        ],
+        "budgetMs": 90000
+      },
+      "events": [],
+      "finalFrame": {
+        "mode": "live",
+        "version": "0.4.0",
+        "seq": 0,
+        "ts": 1791450759707,
+        "nodes": []
+      },
+      "startedAt": 1791450758445,
+      "endedAt": 1791450759769,
+      "timedOut": false,
+      "crashed": false,
+      "idleObserved": 1,
+      "syncTimeouts": [],
+      "mounted": true,
+      "childAlive": true,
+      "stderrTail": "[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\council.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\default.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\discovery-model.json (provider=mock, modelId=mock-discovery)\n"
+    }
+  ],
+  "results": [
+    {
+      "verdict": "pass",
+      "scenarioId": "smoke-boot",
+      "durationMs": 1324,
+      "checks": [
+        {
+          "expectation": {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          "passed": true,
+          "reason": "Idle reached in 1324ms after 1 idle sentinel(s) (budget 60000ms)"
+        },
+        {
+          "expectation": {
+            "kind": "noErrorToast"
+          },
+          "passed": true,
+          "reason": "No error-level toasts observed"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "inconclusive": 0,
+    "passRate": 1
+  },
+  "skipped": [],
+  "emittedSpecs": [],
+  "durationMs": 1468
+}

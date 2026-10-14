@@ -164,10 +164,23 @@ describe("role-registry resolution", () => {
       ]);
     expect(inventoryWith5Models.length).toBe(5);
 
+    // Behaviour change, deliberate: this used to refuse `single_provider_too_few`
+    // at `providers.size === 1 && inventory.length <= 5`. That threshold is gone.
+    // It was only ever satisfied for the real single-provider user because the
+    // pool was padded with non-text (audio/image) rows, and a refusal is not
+    // survivable: it becomes an empty Map in resolveRoleAssignments, and
+    // done-gate's runCustomerDebate then returns `missing_roles` forever.
+    // Five models fill six slots by REUSING one — which runCustomerDebate
+    // already handles, since it refuses only on an identical PO/Customer pair.
     const result = await resolveRoles({ inventory: inventoryWith5Models });
-    expect(result.kind).toBe("refuse");
-    if (result.kind === "refuse") {
-      expect(result.reason).toBe("single_provider_too_few");
+    expect(result.kind).toBe("ok");
+    if (result.kind !== "ok") return;
+    expect(Object.keys(result.roles)).toHaveLength(6);
+    expect(result.roles.PO.model).not.toBe(result.roles.Customer.model);
+    // Exactly one model is reused: 6 slots over a 5-model pool.
+    expect(new Set(Object.values(result.roles).map((r) => r.model)).size).toBe(5);
+    for (const r of Object.values(result.roles)) {
+      expect(inventoryWith5Models.map((m) => m.id)).toContain(r.model);
     }
   });
 

@@ -1,0 +1,15 @@
+[
+  {
+    "interactive": false,
+    "pipelineBudgetMs": 25,
+    "elapsedMs": 40,
+    "state": "resolved",
+    "fallbackReason": "pipeline-timeout"
+  },
+  {
+    "interactive": true,
+    "pipelineBudgetMs": 25,
+    "elapsedMs": 150,
+    "state": "still_pending_at_external_deadline"
+  }
+]

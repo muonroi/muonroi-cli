@@ -48,18 +48,22 @@ export function sparkline(values: number[]): string {
 }
 
 export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): React.ReactNode {
-  const sprintPct = clampPct(data.sprintN, data.totalSprints);
-  const costPct = clampPct(data.costSpent, data.costCap);
+  // `/ideal` has no spend cap and no sprint ceiling unless the user typed one
+  // (user decision: no limits), so the card shows progress and MEASURED spend
+  // rather than "x of a budget".
+  const sprintCeiling = typeof data.totalSprints === "number" && data.totalSprints > 0 ? data.totalSprints : null;
+  const sprintPct = sprintCeiling === null ? 0 : clampPct(data.sprintN, sprintCeiling);
   const totalCriteria = data.criteriaMet + data.criteriaPartial + data.criteriaUnmet;
-  const costColor = costPct > 80 ? t.diffRemovedFg : t.accent;
+  const costColor = t.accent;
 
   // Sparkline = met / total ratio per sprint. Higher is better.
   const criteriaSpark = data.criteriaHistory?.length
     ? sparkline(data.criteriaHistory.map((h) => (h.total > 0 ? h.met / h.total : 0)))
     : "";
-  // Cost burn = cumulative / cap ratio. Caller supplies cumulative.
+  // Cost burn = cumulative spend per sprint, scaled to the largest value seen.
+  const peakUsd = Math.max(0, ...(data.costHistory ?? []).map((h) => h.cumulativeUsd));
   const costSpark = data.costHistory?.length
-    ? sparkline(data.costHistory.map((h) => (data.costCap > 0 ? h.cumulativeUsd / data.costCap : 0)))
+    ? sparkline(data.costHistory.map((h) => (peakUsd > 0 ? h.cumulativeUsd / peakUsd : 0)))
     : "";
 
   return (
@@ -69,19 +73,24 @@ export function ProductStatusCard({ data, theme: t }: ProductStatusCardProps): R
           <text fg={t.accent}>{`▶ Product Loop · ${data.currentStage}`}</text>
         </box>
         <Semantic id={`ideal-phase-sprint`} role="listitem" name="Sprint">
-          <box>
-            <text fg={t.textMuted}>{"Sprint:   "}</text>
-            <text fg={t.text}>{`${data.sprintN}/${data.totalSprints} `}</text>
-            <text fg={t.accent}>{bar(sprintPct)}</text>
-            <text fg={t.textDim}>{` ${sprintPct.toFixed(0)}%`}</text>
-          </box>
+          {sprintCeiling === null ? (
+            <box>
+              <text fg={t.textMuted}>{"Sprint:   "}</text>
+              <text fg={t.text}>{`${data.sprintN}`}</text>
+            </box>
+          ) : (
+            <box>
+              <text fg={t.textMuted}>{"Sprint:   "}</text>
+              <text fg={t.text}>{`${data.sprintN}/${sprintCeiling} `}</text>
+              <text fg={t.accent}>{bar(sprintPct)}</text>
+              <text fg={t.textDim}>{` ${sprintPct.toFixed(0)}%`}</text>
+            </box>
+          )}
         </Semantic>
         <Semantic id={`ideal-phase-cost`} role="listitem" name="Cost">
           <box>
             <text fg={t.textMuted}>{"Cost:     "}</text>
-            <text fg={t.text}>{`$${data.costSpent.toFixed(2)}/$${data.costCap.toFixed(2)} `}</text>
-            <text fg={costColor}>{bar(costPct)}</text>
-            <text fg={t.textDim}>{` ${costPct.toFixed(0)}%`}</text>
+            <text fg={costColor}>{`$${data.costSpent.toFixed(2)} spent`}</text>
           </box>
         </Semantic>
         {costSpark && (

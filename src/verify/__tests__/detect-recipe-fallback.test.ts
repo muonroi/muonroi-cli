@@ -43,7 +43,7 @@ describe("deterministic verify-recipe fallback (CB-3 existing-repo rescue)", () 
     dir = await mktmp();
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("rescues a node repo with a test script → recipe trusted, CB-3 does NOT halt on sprint 1", async () => {

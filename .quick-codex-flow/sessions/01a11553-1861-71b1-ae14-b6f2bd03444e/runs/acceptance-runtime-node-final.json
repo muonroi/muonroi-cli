@@ -1,0 +1,45 @@
+{
+  "runtime": "node",
+  "cases": [
+    {
+      "scenario": "slow",
+      "passed": true,
+      "jsonPassed": true,
+      "elapsedMs": 3059,
+      "mainCalls": 1,
+      "receipt": true,
+      "content": "MAIN_FINAL",
+      "errors": ""
+    },
+    {
+      "scenario": "retry",
+      "passed": true,
+      "jsonPassed": true,
+      "elapsedMs": 10932,
+      "mainCalls": 2,
+      "receipt": true,
+      "content": "MAIN_FINAL",
+      "errors": ""
+    },
+    {
+      "scenario": "unresponsive",
+      "passed": true,
+      "jsonPassed": true,
+      "elapsedMs": 20939,
+      "mainCalls": 2,
+      "receipt": true,
+      "content": "",
+      "errors": "Model not responding — no output received within the stall timeout. The provider may be out of balance, rate-limited, or unreachable. Tune MUONROI_PROVIDER_STALL_TIMEOUT_MS (0 disables) or switch model/provider."
+    },
+    {
+      "scenario": "cancel",
+      "passed": true,
+      "jsonPassed": true,
+      "elapsedMs": 476,
+      "mainCalls": 1,
+      "receipt": true,
+      "content": "\n\n[Cancelled]",
+      "errors": ""
+    }
+  ]
+}

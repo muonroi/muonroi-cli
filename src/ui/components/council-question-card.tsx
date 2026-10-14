@@ -33,6 +33,21 @@ export interface CouncilQuestionCardProps {
    * Width of the freetext input row. Defaults to 60. Card itself flexes.
    */
   freetextInputWidth?: number;
+  /**
+   * True when this card is the modal that owns the keyboard (see
+   * src/ui/modal-focus.ts). Mirrored to the Semantic node's `focus` flag so a
+   * harness driver can read `tui.query "focus"` and learn which of several
+   * stacked cards its keypresses will reach.
+   */
+  focused?: boolean;
+  /**
+   * Semantic node id. Defaults to "askcard" (the documented driver handle).
+   * The pre-flight instance passes "askcard-preflight" so that two cards on
+   * screen at once cannot collide on one registry key — a Map keyed by id
+   * would otherwise keep whichever registered last, making the published
+   * `focus` flag indeterminate.
+   */
+  semanticId?: string;
 }
 
 /**
@@ -44,7 +59,14 @@ export interface CouncilQuestionCardProps {
  * kind:"chat" submits a sentinel string that callers can use to pause and
  * resume the council loop.
  */
-export function CouncilQuestionCard({ question, theme: t, state, freetextInputWidth = 60 }: CouncilQuestionCardProps) {
+export function CouncilQuestionCard({
+  question,
+  theme: t,
+  state,
+  freetextInputWidth = 60,
+  focused,
+  semanticId = "askcard",
+}: CouncilQuestionCardProps) {
   const options = question.options && question.options.length > 0 ? question.options : legacyFallback(question);
   const idx = clampIndex(state.idx, options.length);
   const hasRecommendation = typeof question.defaultIndex === "number";
@@ -54,7 +76,7 @@ export function CouncilQuestionCard({ question, theme: t, state, freetextInputWi
   const counter = formatQuestionCounter(question);
 
   return (
-    <Semantic id="askcard" role="dialog" name={question.question} isModal>
+    <Semantic id={semanticId} role="dialog" name={question.question} focus={focused || undefined} isModal>
       <box
         flexDirection="column"
         flexShrink={0}

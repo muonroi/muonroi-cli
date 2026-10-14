@@ -1,0 +1,230 @@
+{
+  "workspace": "D:\\sources\\Core\\muonroi-cli",
+  "startedAt": "2026-10-08T03:49:04.913Z",
+  "start": {
+    "runId": "571c8122-396f-4617-9a33-05d12ad68c57"
+  },
+  "status": {
+    "runId": "571c8122-396f-4617-9a33-05d12ad68c57",
+    "status": "done",
+    "kind": "tier1",
+    "startedAt": 1791431346213,
+    "finishedAt": 1791431347711,
+    "elapsedMs": 1498,
+    "logTail": [
+      "[self-verify] Planned 2 scenario(s): 1 drivable, 1 skipped",
+      "[self-verify]   skipped dialog-provider-key-prompt — no registered opener for modal 'provider-key-prompt'",
+      "[self-qa] → smoke-boot: CLI boots and reaches idle within budget",
+      "[self-verify] Summary: 1/1 passed, 0 failed, 0 inconclusive, 1 skipped"
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "result": {
+    "scenarios": [
+      {
+        "id": "smoke-boot",
+        "description": "CLI boots and reaches idle within budget",
+        "derivedFrom": {
+          "files": [
+            ".muonroi-flow/decisions.md",
+            "README.md",
+            "services/catalog-api/README.md",
+            "services/catalog-api/main.py",
+            "services/catalog-api/test_main.py",
+            "src/cli/config/screen-providers.ts",
+            "src/cli/keys.ts",
+            "src/models/__tests__/registry.test.ts",
+            "src/models/catalog-client.ts",
+            "src/models/catalog.README.md",
+            "src/models/catalog.json",
+            "src/orchestrator/__tests__/council-manager.test.ts",
+            "src/orchestrator/__tests__/delegations.test.ts",
+            "src/orchestrator/__tests__/sub-session-delegation.test.ts",
+            "src/orchestrator/__tests__/sub-session-realdb.test.ts",
+            "src/orchestrator/council-manager.ts",
+            "src/orchestrator/delegations.test.ts",
+            "src/orchestrator/delegations.ts",
+            "src/orchestrator/message-processor.ts",
+            "src/orchestrator/orchestrator.ts",
+            "src/orchestrator/preprocessor.ts",
+            "src/orchestrator/tool-engine.ts",
+            "src/pil/discovery-types.ts",
+            "src/pil/discovery.ts",
+            "src/pil/pipeline.ts",
+            "src/pil/timeout.ts",
+            "src/product-loop/__tests__/cost-preview.test.ts",
+            "src/product-loop/cost-preview.ts",
+            "src/providers/__tests__/capabilities-provider-options.test.ts",
+            "src/providers/capabilities.ts",
+            "src/providers/pricing.ts",
+            "src/providers/strategies/anthropic.strategy.ts",
+            "src/storage/transcript.ts",
+            "src/tools/__tests__/git-effect-guard.test.ts",
+            "src/tools/registry.ts",
+            "src/types/index.ts",
+            "src/ui/modals/model-picker-modal.tsx",
+            "src/ui/use-app-logic.tsx",
+            "src/usage/estimator.ts",
+            "src/utils/llm-deadline.ts",
+            "src/utils/settings.ts",
+            "tests/harness/helpers.ts"
+          ],
+          "semanticIds": []
+        },
+        "steps": [
+          {
+            "op": "wait_for",
+            "idle": true,
+            "timeoutMs": 60000
+          }
+        ],
+        "expectations": [
+          {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          {
+            "kind": "noErrorToast"
+          }
+        ],
+        "budgetMs": 90000
+      }
+    ],
+    "runs": [
+      {
+        "scenario": {
+          "id": "smoke-boot",
+          "description": "CLI boots and reaches idle within budget",
+          "derivedFrom": {
+            "files": [
+              ".muonroi-flow/decisions.md",
+              "README.md",
+              "services/catalog-api/README.md",
+              "services/catalog-api/main.py",
+              "services/catalog-api/test_main.py",
+              "src/cli/config/screen-providers.ts",
+              "src/cli/keys.ts",
+              "src/models/__tests__/registry.test.ts",
+              "src/models/catalog-client.ts",
+              "src/models/catalog.README.md",
+              "src/models/catalog.json",
+              "src/orchestrator/__tests__/council-manager.test.ts",
+              "src/orchestrator/__tests__/delegations.test.ts",
+              "src/orchestrator/__tests__/sub-session-delegation.test.ts",
+              "src/orchestrator/__tests__/sub-session-realdb.test.ts",
+              "src/orchestrator/council-manager.ts",
+              "src/orchestrator/delegations.test.ts",
+              "src/orchestrator/delegations.ts",
+              "src/orchestrator/message-processor.ts",
+              "src/orchestrator/orchestrator.ts",
+              "src/orchestrator/preprocessor.ts",
+              "src/orchestrator/tool-engine.ts",
+              "src/pil/discovery-types.ts",
+              "src/pil/discovery.ts",
+              "src/pil/pipeline.ts",
+              "src/pil/timeout.ts",
+              "src/product-loop/__tests__/cost-preview.test.ts",
+              "src/product-loop/cost-preview.ts",
+              "src/providers/__tests__/capabilities-provider-options.test.ts",
+              "src/providers/capabilities.ts",
+              "src/providers/pricing.ts",
+              "src/providers/strategies/anthropic.strategy.ts",
+              "src/storage/transcript.ts",
+              "src/tools/__tests__/git-effect-guard.test.ts",
+              "src/tools/registry.ts",
+              "src/types/index.ts",
+              "src/ui/modals/model-picker-modal.tsx",
+              "src/ui/use-app-logic.tsx",
+              "src/usage/estimator.ts",
+              "src/utils/llm-deadline.ts",
+              "src/utils/settings.ts",
+              "tests/harness/helpers.ts"
+            ],
+            "semanticIds": []
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "idle": true,
+              "timeoutMs": 60000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            {
+              "kind": "noErrorToast"
+            }
+          ],
+          "budgetMs": 90000
+        },
+        "events": [],
+        "finalFrame": {
+          "mode": "live",
+          "version": "0.4.0",
+          "seq": 0,
+          "ts": 1791431347647,
+          "nodes": []
+        },
+        "startedAt": 1791431346393,
+        "endedAt": 1791431347710,
+        "timedOut": false,
+        "crashed": false,
+        "idleObserved": 1,
+        "syncTimeouts": [],
+        "mounted": true,
+        "childAlive": true,
+        "stderrTail": "[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\council.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\default.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\discovery-model.json (provider=mock, modelId=mock-discovery)\n"
+      }
+    ],
+    "results": [
+      {
+        "verdict": "pass",
+        "scenarioId": "smoke-boot",
+        "durationMs": 1317,
+        "checks": [
+          {
+            "expectation": {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            "passed": true,
+            "reason": "Idle reached in 1317ms after 1 idle sentinel(s) (budget 60000ms)"
+          },
+          {
+            "expectation": {
+              "kind": "noErrorToast"
+            },
+            "passed": true,
+            "reason": "No error-level toasts observed"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "skipped": [
+      {
+        "id": "dialog-provider-key-prompt",
+        "reason": "no registered opener for modal 'provider-key-prompt'"
+      }
+    ],
+    "emittedSpecs": [],
+    "durationMs": 1487
+  },
+  "stderrTail": "",
+  "finishedAt": "2026-10-08T03:49:08.231Z"
+}

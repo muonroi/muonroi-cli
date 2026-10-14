@@ -15,6 +15,20 @@ import type { ClarifiedSpec, DebateStance } from "./types.js";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
+/**
+ * How the leader model for this run was arrived at. Mirrors `LeaderResolution`
+ * (src/council/leader.ts:165) — the caller passes what the resolver returned, it
+ * is never re-derived here.
+ */
+export interface DecisionsLockLeader {
+  /** The model id that actually led, as used. Never a hardcoded literal. */
+  modelId: string;
+  /** Set when a configured leader was auto-promoted to a higher tier. */
+  promotedFrom?: { modelId: string; tier?: string };
+  /** Set when no leader was configured and `pickCatalogLeader` chose by tier. */
+  defaulted?: boolean;
+}
+
 export interface DecisionsLockInput {
   runId: string;
   /** The run directory, typically <flowDir>/runs/<runId> */
@@ -22,8 +36,18 @@ export interface DecisionsLockInput {
   spec: ClarifiedSpec;
   /** ISO timestamp from the synthesis step */
   timestamp: string;
-  /** Final positions array from debateState.active */
-  participants: Array<{ role: string; stance?: DebateStance; position: string }>;
+  /**
+   * The leader model as resolved for this run, and how. Absent only when the
+   * caller genuinely has no resolution to report — the rendered section then
+   * says so rather than going missing.
+   */
+  leader?: DecisionsLockLeader;
+  /**
+   * Final positions array from debateState.active. `model` is the model that
+   * actually served that role this run (`CouncilParticipant.model`) — the pairing
+   * that the billing table cannot reconstruct.
+   */
+  participants: Array<{ role: string; model?: string; stance?: DebateStance; position: string }>;
   /** Readable summary from the synthesizer */
   synthesisExcerpt: string;
   /**
@@ -190,6 +214,51 @@ export function detectOutOfStackProposals(synthesisText: string, spec: Clarified
  * Render the decisions.lock.md content from structured inputs.
  * Pure string formatting — no I/O or LLM calls.
  */
+/**
+ * Render the `## Panel (role → model)` section: which model served which council
+ * role this run, and how the leader was picked.
+ *
+ * Why this is on the lock file and not left to the billing table: on one measured
+ * run `usage_events` showed `step-5-preview` serving 15 council calls (1,357,702
+ * input tokens, $0.4073 — 24% of the run's spend) with no artifact naming the
+ * role, so the only available reading was "the expensive model must be the
+ * leader". It was not. All four stepfun text models declare
+ * `roles: ["leader", …]`, so `pickCatalogLeader` (leader.ts:257) broke the
+ * premium tie by catalog LINE ORDER and the leader was `step-3.7-flash`;
+ * `step-5-preview` came from the panel-role assignment. Both facts — the pairing
+ * and the tie-break — now live on the artifact.
+ *
+ * The section is always emitted, including when nothing was passed: an absent
+ * section is indistinguishable from "this run had no panel", which is the
+ * ambiguity that produced the wrong conclusion.
+ */
+function panelSection(input: DecisionsLockInput): string {
+  const lines: string[] = ["## Panel (role → model)"];
+
+  if (input.leader) {
+    const { modelId, promotedFrom, defaulted } = input.leader;
+    let how = "configured leader";
+    if (promotedFrom) {
+      const tier = promotedFrom.tier ? `, tier ${promotedFrom.tier}` : "";
+      how = `auto-promoted from \`${promotedFrom.modelId}\`${tier}`;
+    } else if (defaulted) {
+      how = "no leader configured — picked by catalog tier, catalog line order breaks a tie";
+    }
+    lines.push(`- leader → \`${modelId}\` (${how})`);
+  } else {
+    lines.push("- leader → _(not recorded — no leader resolution reached this artifact)_");
+  }
+
+  for (const p of input.participants) {
+    lines.push(p.model ? `- ${p.role} → \`${p.model}\`` : `- ${p.role} → _(not recorded)_`);
+  }
+  if (input.participants.length === 0) {
+    lines.push("- _(no panel participants recorded)_");
+  }
+
+  return lines.join("\n");
+}
+
 export function renderDecisionsLock(input: DecisionsLockInput): string {
   const stack = extractStackFromSpec(input.spec);
 
@@ -247,6 +316,8 @@ export function renderDecisionsLock(input: DecisionsLockInput): string {
   return [
     `# Locked Decisions — Run ${input.runId}`,
     `> Generated from council_summary at ${input.timestamp}`,
+    "",
+    panelSection(input),
     "",
     stackSection,
     "",

@@ -128,7 +128,19 @@ describe("withVisibleRetry — 1210 only retries once despite 6-attempt budget",
   it("stops after the second 1210 (latched non-transient), not 6 attempts", async () => {
     const err = apiError(400, "Invalid API parameter");
     const fn = vi.fn().mockRejectedValue(err);
-    await expect(withVisibleRetry(fn)).rejects.toThrow("Invalid API parameter");
+    // The one retry's default 2 s backoff runs on the fake clock — the contract
+    // here is the attempt COUNT, and the real sleep was 2 s of CI wall time.
+    vi.useFakeTimers();
+    try {
+      const outcome = withVisibleRetry(fn).then(
+        () => null,
+        (e: unknown) => e,
+      );
+      await vi.runAllTimersAsync();
+      expect(String(await outcome)).toContain("Invalid API parameter");
+    } finally {
+      vi.useRealTimers();
+    }
     // First call flips the latch + transient. Second call is non-transient → break.
     expect(fn).toHaveBeenCalledTimes(2);
   });

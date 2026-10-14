@@ -20,8 +20,27 @@
  *
  * Modelled on sprint-runner's proven `withImplIdleWatchdog`, generalised so any
  * turn generator can be guarded without coupling to the product loop.
+ *
+ * Round 6 (G8 HIGH A): each call to `withTurnWatchdog` marks the start of a
+ * new turn generation (`turn-progress.ts`'s `beginTurnGeneration`) — this is
+ * what lets a `startPeriodicTurnProgressPing` pinger tell "my turn is still
+ * active" from "my turn has ended, I am orphaned, stop pinging". Without it,
+ * an interval left running by a killed/finished turn could keep writing
+ * `lastPingMs` forever and mask a LATER turn's genuine idleness.
+ *
+ * Round 7: paired with `endTurnGeneration` in this function's own `finally`
+ * (below), so the generation is popped on EVERY exit path — normal
+ * completion, a thrown/rethrown `TurnStallError`, or early abandonment via
+ * the caller's own `.return()`/`break`. Push-on-entry/pop-in-finally is what
+ * makes NESTING safe: `orchestrator.ts`'s council-continuation path calls
+ * `withTurnWatchdog` again on `this.processMessage(...)` from INSIDE an
+ * outer turn already wrapped by it — the outer generation stays pushed the
+ * whole time the inner one is active, so the outer turn's own pinger is
+ * never mistaken for orphaned just because a nested turn began.
  */
+import { isProviderBackoffActive } from "../providers/rate-limit-backoff.js";
 import type { StreamChunk } from "../types/index.js";
+import { beginTurnGeneration, endTurnGeneration } from "./turn-progress.js";
 
 export class TurnStallError extends Error {
   constructor(
@@ -64,11 +83,26 @@ export interface TurnWatchdogOptions {
   hasProgressSince?: (sinceMs: number) => boolean;
 }
 
+/**
+ * Whether an idle timer armed at `armedAt` for `idleMs` is firing late enough
+ * that the event loop must have been blocked for a large part of the window.
+ * Half the window (min 25 ms) keeps ordinary timer jitter from counting, and
+ * at the production idle (minutes) only a block of tens of seconds qualifies.
+ */
+export function firedLate(armedAt: number, idleMs: number, now: number = Date.now()): boolean {
+  const lateBy = now - armedAt - idleMs;
+  return lateBy > Math.max(idleMs / 2, 25);
+}
+
 export async function* withTurnWatchdog(
   gen: AsyncGenerator<StreamChunk, void, unknown>,
   opts: TurnWatchdogOptions,
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const { idleMs, totalMs, label, shouldSuppressFire, hasProgressSince } = opts;
+  // New turn generation, pushed for the duration of this call — popped in
+  // the `finally` below on every exit path (see turn-progress.ts's module
+  // doc comment and beginTurnGeneration/endTurnGeneration).
+  const myTurnGeneration = beginTurnGeneration();
   const it = gen[Symbol.asyncIterator]();
 
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
@@ -107,11 +141,26 @@ export async function* withTurnWatchdog(
                 // demands a fresh signal, so this cannot stall forever.
                 const armedAt = Date.now();
                 idleTimer = setTimeout(() => {
-                  if (shouldSuppressFire?.()) {
+                  // A provider rate-limit backoff is a known, announced silence
+                  // (rate-limit-backoff.ts) — not a hung turn. Only the IDLE
+                  // guard defers to it; the total ceiling stays absolute.
+                  if (shouldSuppressFire?.() || isProviderBackoffActive()) {
                     armIdle();
                     return;
                   }
                   if (hasProgressSince?.(armedAt)) {
+                    armIdle();
+                    return;
+                  }
+                  // The timer fired LATE: this process's own event loop was
+                  // blocked (module loading, a large synchronous parse, a slow
+                  // CI runner) for part of the window, so the window did not
+                  // measure the turn's silence — it measured our own busy time.
+                  // A turn genuinely hung on an await never blocks the loop, so
+                  // its timer fires on time and is still caught below. Observed
+                  // on windows-latest: a 150 ms test window fired 180 ms late
+                  // during sub-session setup and killed a healthy turn.
+                  if (firedLate(armedAt, idleMs)) {
                     armIdle();
                     return;
                   }
@@ -154,5 +203,6 @@ export async function* withTurnWatchdog(
     }
   } finally {
     if (totalTimer) clearTimeout(totalTimer);
+    endTurnGeneration(myTurnGeneration);
   }
 }

@@ -8,8 +8,8 @@ import { routeModel as eeRouteModel } from "../ee/bridge.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
 import { readArtifact } from "../flow/artifact-io.js";
 import { parseResumeDigest, readSprintOutcomes } from "../flow/run-artifacts.js";
-import { createRun, loadRun } from "../flow/run-manager.js";
-import { getModelsForProvider } from "../models/registry.js";
+import { createRun, getActiveRunId, loadRun } from "../flow/run-manager.js";
+import { getTextModelsForProvider } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { ALL_PROVIDER_IDS } from "../providers/types.js";
@@ -17,7 +17,16 @@ import { defaultResolveChannelId, maybeAutoFire } from "../reporter/auto-fire.js
 import { clearWorkspaceFocus, setWorkspaceFocus } from "../state/active-run.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
 import type { ModelInfo, StreamChunk, VerifyRecipe } from "../types/index.js";
-import { markIterationCrashed, readIterations, readManifest, writeManifest } from "./artifact-io.js";
+import { logger } from "../utils/logger.js";
+import { isProviderDisabled } from "../utils/settings.js";
+import {
+  claimActiveRunSlot,
+  inspectManifest,
+  markIterationCrashed,
+  readIterations,
+  readManifest,
+  writeManifest,
+} from "./artifact-io.js";
 import { buildBacklog } from "./backlog-builder.js";
 import { readBacklog, writeBacklog } from "./backlog-store.js";
 import { formatCostPreview, previewRunCost } from "./cost-preview.js";
@@ -25,20 +34,27 @@ import { composeRunTranscript, extractRunToEE } from "./cross-run-memory.js";
 import { buildContinueFeedback, type ContinueFeedback } from "./feedback-routing.js";
 import { type DriverContext, type DriverResult, runLoopDriver } from "./loop-driver.js";
 import { resolveRoles } from "./role-registry.js";
+import { readRunSpendUsd } from "./run-spend.js";
+import { deriveRunVerdict, describeVerdictFailure, runIsTerminal } from "./run-verdict.js";
 import { polishDelivery } from "./ship-polish.js";
 import { applySprintAssignments, planSprints } from "./sprint-planner.js";
+import { createSprintProgressTracker } from "./sprint-progress.js";
 import { runSprint } from "./sprint-runner.js";
 import { readSprintPlan, setActiveSprint, writeSprintPlan } from "./sprint-store.js";
+import { runSprintTracked } from "./sprint-tracking.js";
 import type { ImplementationPlanArtifact, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { enforceUndebatedCriteriaGate, undebatedHaltDetail } from "./undebated-criteria-gate.js";
 
 export interface ProductLoopFlags {
-  maxCost: number;
-  maxSprints: number;
+  /** @deprecated Ignored — `/ideal` has no spend cap (user decision). Still accepted so callers type-check. */
+  maxCost?: number;
+  /** Sprint ceiling only when the user typed `--max-sprints N`; absent = none. */
+  maxSprints?: number;
   doneThreshold: number;
   stack?: string;
   /** P2.7: when true, always run full council debate even for low-complexity ideas. */
   forceCouncil?: boolean;
-  /** If set, halt when total tokens exceed this limit. */
+  /** @deprecated Ignored — `/ideal` has no token budget (user decision). */
   budgetTokens?: number;
 }
 
@@ -64,6 +80,7 @@ export interface ProductLoopOptions {
   /** Isolated bounded task-runner bridge — see DriverContext.runIsolatedTask. */
   runIsolatedTask?: (
     request: import("../types/index.js").TaskRequest,
+    opts?: { abortSignal?: AbortSignal; onActivity?: (detail: string) => void },
   ) => Promise<import("../types/index.js").ToolResult>;
   detectVerifyRecipe?: () => Promise<VerifyRecipe | null>;
   /** Test hook: pre-resolved role assignments so the harness can pin model ids. */
@@ -116,6 +133,8 @@ export interface ProductLoopOptions {
    * sessions.id; passing runId there silently fails FK on STRICT bun:sqlite.
    */
   sessionId?: string;
+  /** S4 — see `DriverContext.abortSignal` (product-loop/types.ts). Forwarded through to every ctx build below. */
+  abortSignal?: AbortSignal;
 }
 
 export interface ProductLoopResult extends DriverResult {
@@ -139,14 +158,143 @@ export async function* runProductLoop(
   opts: ProductLoopOptions,
 ): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const sub = opts.subcommand ?? "start";
+  // Filled in by whichever path calls createRun / starts a sprint, so the
+  // terminal event can name the run AND its sprint count even on the two exits
+  // that never produce a result.
+  const runIdSink: RunIdSink = { runId: opts.runId ?? "", sprintsRun: 0 };
+  let announced = false;
 
+  try {
+    const result = yield* dispatchProductLoop(opts, sub, runIdSink);
+    announced = true;
+    emitRunFinished({
+      runId: result.runId || runIdSink.runId,
+      subcommand: sub,
+      outcome: outcomeFromResult(result),
+      success: !!result.success,
+      reason: result.reason ?? "",
+      // The sink is the fallback, not 0: runPhasesPath (the DEFAULT driver)
+      // returns results that carry no `sprintsRun`, so `?? 0` reported a clean
+      // multi-sprint run as zero sprints.
+      sprintsRun: result.sprintsRun ?? runIdSink.sprintsRun,
+      shipped: !!result.shipped,
+    });
+    return result;
+  } catch (err) {
+    announced = true;
+    emitRunFinished({
+      runId: runIdSink.runId,
+      subcommand: sub,
+      outcome: "threw",
+      success: false,
+      reason: (err as Error)?.message ?? "unknown error",
+      // Measured on run mtv9v1xu7615: this arm reported `sprintsRun: 0` after
+      // three sprints had run (sprint_stage rows at 08:59 / 09:31 / 09:43).
+      // Nothing skipped a counter — the arm had none to read, because the
+      // exception escaped before a result existed, and it filled the gap with a
+      // literal. It now reads the sink the sprint drivers publish to.
+      sprintsRun: runIdSink.sprintsRun,
+      shipped: false,
+    });
+    throw err;
+  } finally {
+    // Reached un-announced ONLY when the consumer stopped pulling — a
+    // `gen.return()` from Escape/abort, or a `for await` that broke out. That is
+    // failure-class instance 2's exact shape ("the TUI tore the generator down
+    // silently"), so it gets a named outcome instead of silence. Nothing is
+    // yielded or awaited here: a `yield` inside this `finally` would be
+    // swallowed by a consumer that has already stopped iterating.
+    if (!announced) {
+      emitRunFinished({
+        runId: runIdSink.runId,
+        subcommand: sub,
+        outcome: "abandoned",
+        success: false,
+        reason: "consumer stopped iterating before the run returned",
+        sprintsRun: runIdSink.sprintsRun,
+        shipped: false,
+      });
+    }
+  }
+}
+
+/**
+ * Mutable holder for the run id, so `runProductLoop`'s terminal event can name
+ * the run on exits that never produce a `ProductLoopResult` (an exception
+ * escaping, or the consumer tearing the generator down). `runId: ""` means the
+ * id was genuinely never observed — it is never back-filled with a guess.
+ *
+ * `sprintsRun` rides here for exactly the same reason: those two exits have no
+ * result to read a count from, and both used to report a hardcoded 0. It counts
+ * sprints STARTED, which is what the `sprint_stage` rows record — a sprint that
+ * died mid-implementation has to appear in its own post-mortem, and run
+ * mtv9v1xu7615 is precisely a run whose LAST sprint is the one that failed.
+ */
+type RunIdSink = { runId: string; sprintsRun: number };
+
+/** How a `/ideal` run ended, as carried by the `run-finished` harness event. */
+type RunFinishedOutcome = "approved" | "halted" | "error" | "threw" | "abandoned";
+
+function outcomeFromResult(result: ProductLoopResult): RunFinishedOutcome {
+  if (result.stage === "approved") return "approved";
+  if (result.stage === "halted") return "halted";
+  if (result.stage === "error") return "error";
+  // A non-terminal stage escaping as a returned result is a bug elsewhere, but
+  // the driver must still be told the run ended. Report it by the success flag
+  // rather than inventing a stage it did not report.
+  return result.success ? "approved" : "error";
+}
+
+/**
+ * Emit the `run-finished` terminal event (agent-mode only; a no-op otherwise).
+ *
+ * `docs/agent-first/SELF-IMPROVEMENT-PLAN.md` §6.0 open item 3: after Phase 0 a
+ * FAILING `/ideal` run announces itself (`sprint-halt reason=…`,
+ * `announceDriverBail`), but a run that finished FINE emitted nothing at all —
+ * so an agent watching the event stream could not tell "approved" from "hung".
+ * This is the success counterpart, emitted once per run from the single choke
+ * point every subcommand returns through, carrying the outcome so the driver
+ * can name it from the event alone. It is not keep-alive chatter: one event, at
+ * one boundary, only when a run ends.
+ */
+function emitRunFinished(payload: {
+  runId: string;
+  subcommand: string;
+  outcome: RunFinishedOutcome;
+  success: boolean;
+  reason: string;
+  sprintsRun: number;
+  shipped: boolean;
+}): void {
+  try {
+    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    _ar?.emitEvent({ t: "event", kind: "run-finished", ...payload, ts: Date.now() });
+  } catch (err) {
+    // Never let the announcement break the run it is announcing — but never
+    // swallow it either (repo No Silent Catch Rule): a lost terminal event is
+    // exactly the blindness this emit exists to remove, so it must be greppable.
+    console.error(
+      `[ideal] run-finished emit failed (outcome=${payload.outcome}, runId=${payload.runId || "<unobserved>"}): ${
+        (err as Error)?.message
+      }`,
+    );
+  }
+}
+
+async function* dispatchProductLoop(
+  opts: ProductLoopOptions,
+  sub: NonNullable<ProductLoopOptions["subcommand"]>,
+  runIdSink: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   switch (sub) {
     case "status":
       return yield* runStatus(opts);
     case "review":
       return yield* runReview(opts);
     case "resume":
-      return yield* runResume(opts);
+      return yield* runResume(opts, runIdSink);
     case "abort":
       return yield* runAbort(opts);
     case "ship":
@@ -159,7 +307,7 @@ export async function* runProductLoop(
       //   4. Auto-detect: verify recipe present in cwd → Mode C
       //   5. Otherwise               → Mode A
       if (opts.mode === "maintain") {
-        return yield* runMaintain(opts);
+        return yield* runMaintain(opts, runIdSink);
       }
       // `--force-council` must bypass the recipe auto-detect. Without this,
       // ANY recipe-bearing repo (package.json/*.csproj/…) routes to runMaintain
@@ -180,7 +328,7 @@ export async function* runProductLoop(
         try {
           const recipe = await opts.detectVerifyRecipe();
           if (recipe) {
-            return yield* runMaintain(opts);
+            return yield* runMaintain(opts, runIdSink);
           }
         } catch {
           // Detection failure is non-fatal — fall through to Mode A.
@@ -207,7 +355,7 @@ export async function* runProductLoop(
           ...opts,
           flags: { ...opts.flags, forceCouncil: true },
         };
-        return yield* runStart(forcedOpts);
+        return yield* runStart(forcedOpts, runIdSink);
       }
       // Existing repo + complexity≠high + well-specified → hot-path. The leader
       // can grep the source instead of interviewing the user. Two things still
@@ -223,12 +371,12 @@ export async function* runProductLoop(
         !(opts.needsClarification && opts.complexity !== "low") &&
         !opts.flags.forceCouncil
       ) {
-        return yield* runHotPath(opts);
+        return yield* runHotPath(opts, runIdSink);
       }
       if (opts.complexity === "low" && !opts.flags.forceCouncil) {
-        return yield* runHotPath(opts);
+        return yield* runHotPath(opts, runIdSink);
       }
-      return yield* runStart(opts);
+      return yield* runStart(opts, runIdSink);
     }
   }
 }
@@ -265,7 +413,10 @@ async function detectExistingRepoBypass(opts: ProductLoopOptions): Promise<boole
  * Skips Council debate + scoping. Goes straight from idea → single sprint → ship.
  * extractRunToEE still fires so cross-run memory continues to build.
  */
-async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runHotPath(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, flags } = opts;
   if (!idea?.trim()) {
     yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
@@ -274,14 +425,24 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
-    maxSprints: 1, // hot-path always caps at 1 sprint
+    maxSprints: 1, // hot-path: a trivial task is routed to one pass by design (a route, not a budget)
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
+  });
+
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
   });
 
   if (opts.cwd) {
@@ -397,6 +558,7 @@ async function* runHotPath(opts: ProductLoopOptions): AsyncGenerator<StreamChunk
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
     conversationContext: opts.conversationContext,
+    abortSignal: opts.abortSignal,
   };
 
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
@@ -555,7 +717,10 @@ export function buildDefaultAcceptanceCriteria(idea: string): string[] {
  * follow-up), gathers codebase intel, runs the 5-stage task cycle,
  * builds a PR, optionally invokes `gh pr create`.
  */
-async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runMaintain(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, cwd, processMessageFn, detectVerifyRecipe, respondToPreflight, sessionModelId } =
     opts;
   if (!idea?.trim()) {
@@ -577,14 +742,24 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
-    maxSprints: 1,
+    maxSprints: 1, // Mode C: one task → one PR by design (a route, not a budget)
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
+  });
+
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
   });
 
   yield { type: "content", content: "\n> Mode C: single-task maintenance flow\n" } as StreamChunk;
@@ -659,7 +834,7 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
     codebaseIntel: intel,
     ctx,
     leaderModelId: sessionModelId,
-    costAware: true,
+    costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
   });
 
   if (taskResult.status !== "done") {
@@ -679,7 +854,7 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
       result: taskResult,
       cwd,
       leaderModelId: sessionModelId,
-      costAware: true,
+      costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
       llm: { generate: ctx.llm.generate },
     });
   } catch (err) {
@@ -721,8 +896,43 @@ async function* runMaintain(opts: ProductLoopOptions): AsyncGenerator<StreamChun
   return { runId, stage: "approved", success: true, reason: "pr_ready", sprintsRun: 1, shipped: true };
 }
 
+/**
+ * Announce a non-approved loop-driver outcome before returning it.
+ *
+ * `runLoopDriver` signals every non-approved terminal state by RETURNING a
+ * `DriverResult` — it does not throw — so the `catch` arms at both call sites
+ * never see one. Before this helper existed both sites did a bare
+ * `return { ...driverResult }`, yielding nothing: the orchestrator's `for await`
+ * ended normally, the TUI got no error chunk, no toast and no terminal event,
+ * and the run was indistinguishable from a hang.
+ *
+ * Measured on run `mtmrm9c667d4` (2026-09-04): scoping's `JSON.parse` threw on a
+ * synthesis completion truncated at the provider's 4096-token output ceiling,
+ * the driver returned `failed_to_synthesize_spec`, and the session emitted zero
+ * further chunks, events or LLM calls for 32 minutes while the UI still showed
+ * `loop:scoping` active. Every bail reason now routes through here.
+ */
+function* announceDriverBail(result: DriverResult | undefined, runId: string): Generator<StreamChunk> {
+  const detail = result?.detail ?? result?.reason ?? "unknown reason";
+  if (!result || result.stage === "error") {
+    yield {
+      type: "error",
+      error: true,
+      content: `/ideal run ${runId} stopped before sprints: ${detail}`,
+    } as unknown as StreamChunk;
+    return;
+  }
+  yield {
+    type: "content",
+    content: `\n> /ideal run ${runId} stopped before sprints: ${detail}\n`,
+  } as StreamChunk;
+}
+
 /** start: createRun → loop-driver (gather/research/scoping) → sprint loop → done|halted. */
-async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+async function* runStart(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   const { idea, flowDir, llm, flags, respondToQuestion, respondToPreflight } = opts;
   if (!idea?.trim()) {
     yield { type: "content", content: "error: /ideal start requires an idea" } as StreamChunk;
@@ -731,14 +941,24 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
 
   const runState = await createRun(flowDir);
   const runId = runState.id;
+  // Publish the id immediately so a throw / teardown after this point still
+  // produces a `run-finished` that names the run (see RunIdSink).
+  if (runIdSink) runIdSink.runId = runId;
 
   await writeManifest(flowDir, runId, {
     idea,
-    capUsd: flags.maxCost,
     maxSprints: flags.maxSprints,
     doneThreshold: flags.doneThreshold,
     stack: flags.stack,
     createdAt: new Date(),
+  });
+
+  // This run has an idea, so it owns the workspace focus. Conditional: it only
+  // displaces a holder that has NO usable manifest (the session-boot skeleton
+  // from `Orchestrator._initFlow`), never another real run. See
+  // `claimActiveRunSlot` for the measured `qa-platform` case this closes.
+  await claimActiveRunSlot(flowDir, runId).catch((err) => {
+    console.error(`[ideal] could not claim the Active Run pointer for ${runId}: ${(err as Error)?.message}`);
   });
 
   if (opts.cwd) {
@@ -757,14 +977,12 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     }
   }
 
-  // Surface a cost-vs-cap preview before the loop kicks off so $50 isn't
-  // an arbitrary number — show predicted spend per sprint × max-sprints
-  // against the configured cap, with a recommended max-sprints if it
-  // would exceed. Falls back gracefully for unknown-pricing models.
+  // Surface a cost ESTIMATE before the loop kicks off — for information only.
+  // `/ideal` has no spend cap (user decision), so nothing is compared against one
+  // and nothing recommends shrinking the run. Unknown-pricing models say so.
   const preview = previewRunCost({
     sessionModelId: opts.sessionModelId,
     maxSprints: flags.maxSprints,
-    capUsd: flags.maxCost,
   });
   yield { type: "content", content: `\n${formatCostPreview(preview)}\n` } as StreamChunk;
 
@@ -814,6 +1032,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     skipPriorContext: opts.skipPriorContext,
     sufficiencyMissing: opts.sufficiencyMissing,
     conversationContext: opts.conversationContext,
+    abortSignal: opts.abortSignal,
   };
 
   // Phase 1: outer FSM (gather → research → scoping → approved | halted).
@@ -853,6 +1072,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
   }
 
   if (!driverResult?.success || driverResult.stage !== "approved") {
+    yield* announceDriverBail(driverResult, runId);
     return { ...driverResult!, runId };
   }
 
@@ -909,7 +1129,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
   if (process.env.MUONROI_PHASE_MODE !== "0") {
-    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments, runIdSink });
     if (phaseResult !== null) return phaseResult;
     // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
   }
@@ -920,6 +1140,7 @@ async function* runStart(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
     roleAssignments,
     history: [],
     flags,
+    runIdSink,
   });
 }
 
@@ -941,10 +1162,14 @@ async function buildBacklogAndSprintPlan(args: {
   productSpec: ProductSpec;
   ctx: DriverContext;
   sessionModelId: string;
-  maxSprints: number;
+  /** Only sizes the synthetic fallback plan when no real plan could be built — never a ceiling. */
+  maxSprints?: number;
   onChunk: (chunk: StreamChunk) => void;
 }): Promise<{ sprintCount: number; sprintIds: string[] }> {
-  const { flowDir, runId, productSpec, ctx, sessionModelId, maxSprints } = args;
+  const { flowDir, runId, productSpec, ctx, sessionModelId } = args;
+  // Size of the synthetic plan used only when no real plan could be built. One
+  // sprint when the user set no ceiling — the loop itself decides how many run.
+  const maxSprints = typeof args.maxSprints === "number" && args.maxSprints >= 1 ? args.maxSprints : 1;
 
   // ── Check idempotency ──────────────────────────────────────────────────────
   const existingBacklog = await readBacklog(flowDir, runId).catch(() => null);
@@ -998,7 +1223,7 @@ async function buildBacklogAndSprintPlan(args: {
         implementationPlan,
         llm: ctx.llm,
         leaderModelId,
-        costAware: true,
+        costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
       });
       await writeBacklog(flowDir, runId, backlog);
     } catch (err) {
@@ -1020,7 +1245,7 @@ async function buildBacklogAndSprintPlan(args: {
         backlog,
         llm: ctx.llm,
         leaderModelId,
-        costAware: true,
+        costAware: false, // /ideal: no spend-driven model downshift (user decision: no limits)
         targetEffortPerSprint: 8,
       });
       await writeSprintPlan(flowDir, runId, plan);
@@ -1059,33 +1284,35 @@ async function* drainSprints(args: {
   roleAssignments: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
   history: IterationState[];
   flags: ProductLoopFlags;
+  runIdSink?: RunIdSink;
 }): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
-  const { ctx, productSpec, roleAssignments, flags } = args;
+  const { ctx, productSpec, roleAssignments, flags, runIdSink } = args;
   const history = args.history.slice();
   let carryOver: ContinueFeedback | undefined;
   let sprintsRun = 0;
 
-  for (let sprintN = history.length + 1; sprintN <= flags.maxSprints; sprintN++) {
+  // No sprint ceiling unless the user typed `--max-sprints N`, and no token budget:
+  // `/ideal` has no limits (user decision). The loop ends when a sprint ships,
+  // halts or throws — or when sprints stop making progress (sprint-progress.ts).
+  const sprintCeiling =
+    typeof flags.maxSprints === "number" && Number.isFinite(flags.maxSprints)
+      ? flags.maxSprints
+      : Number.POSITIVE_INFINITY;
+  const progress = createSprintProgressTracker();
+  for (let sprintN = history.length + 1; sprintN <= sprintCeiling; sprintN++) {
     let iter: IterationState;
-    // Check token budget
-    if (flags.budgetTokens) {
-      const { getProductTotalTokens } = await import("../usage/product-ledger.js");
-      const totalTokens = await getProductTotalTokens(ctx.runId);
-      if (totalTokens > flags.budgetTokens) {
-        yield {
-          type: "halt",
-          haltChunk: {
-            type: "halt",
-            reason: "budget_exhausted",
-            detail: `Token budget exceeded: used ${totalTokens} > limit ${flags.budgetTokens}`,
-            recovery_options: [],
-          },
-        } as StreamChunk;
-        return { runId: ctx.runId, stage: "halted", success: false, reason: "budget exhausted" };
-      }
-    }
+    // Counted at START, not on completion. The sprint that MATTERS most to a
+    // post-mortem is the one that died, and a post-completion increment reports
+    // it as never having happened — run mtv9v1xu7615 lost its sprint 3 that way
+    // (three `sprint_stage` rows, `sprintsRun: 0` in `run-finished`).
+    sprintsRun++;
+    if (runIdSink) runIdSink.sprintsRun = sprintsRun;
     try {
-      const sprintGen = runSprint({
+      // S1: runSprintTracked wraps runSprint verbatim (every yielded chunk,
+      // including halt, is forwarded unchanged) and registers the sprint in
+      // sprint-plan.json + moves tasks.json statuses around it — see
+      // sprint-tracking.ts.
+      const sprintGen = runSprintTracked({
         sprintN,
         ctx,
         productSpec,
@@ -1181,7 +1408,6 @@ async function* drainSprints(args: {
     }
 
     history.push(iter);
-    sprintsRun++;
 
     // B2: auto-fire sprint-done when judgment stage completes.
     // Compute overall pct from current iteration state.
@@ -1271,20 +1497,46 @@ async function* drainSprints(args: {
       };
     }
 
-    // Build continue-feedback for next iteration. The DoneVerdict is not
-    // surfaced from sprint-runner directly, but the iteration state encodes
-    // enough — derive a synthetic verdict from criteria counts.
+    // Build continue-feedback for next iteration. Prefer the detailed focus
+    // sprint-runner already built (`iter.nextFocus` — verify detail + cause,
+    // S5/S6 must-fix items, residual plan deviations, S3b unfinished tasks;
+    // see sprint-runner.ts Step 9) so the next sprint is not blind to WHY the
+    // previous one failed. Only fall back to the bare summary string when
+    // nextFocus is absent or empty — parity with the phase-orchestrated path
+    // (`carryOver: prevSprint?.nextFocus ? { focus: prevSprint.nextFocus } :
+    // undefined` above), which already threads nextFocus correctly.
     carryOver = {
       focus:
-        iter.lastVerifyResult === "PASS"
-          ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
-          : `fix verify failures (last result: ${iter.lastVerifyResult})`,
+        iter.nextFocus && iter.nextFocus.trim().length > 0
+          ? iter.nextFocus
+          : iter.lastVerifyResult === "PASS"
+            ? `improve criteria coverage: met=${iter.criteriaMet}, partial=${iter.criteriaPartial}, unmet=${iter.criteriaUnmet}`
+            : `fix verify failures (last result: ${iter.lastVerifyResult})`,
     };
+
+    // The replacement for the removed sprint ceiling: sprints that stop moving the
+    // criteria or the score end the loop (sprint-progress.ts).
+    const progressVerdict = progress.record({ criteriaMet: iter.criteriaMet ?? 0, scoreAfter: iter.scoreAfter ?? 0 });
+    if (progressVerdict.stop) {
+      yield {
+        type: "content",
+        content: `\n> ${progressVerdict.streak} consecutive sprint(s) made no progress on the criteria or score — stopping without satisfying Definition-of-Done.\n`,
+      } as StreamChunk;
+      clearWorkspaceFocus();
+      return {
+        runId: ctx.runId,
+        stage: "halted",
+        success: false,
+        reason: "no_progress",
+        sprintsRun,
+      };
+    }
   }
 
+  // Reached only when the user typed `--max-sprints N` and all N sprints ran.
   yield {
     type: "content",
-    content: `\n> Reached max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
+    content: `\n> Reached --max-sprints (${flags.maxSprints}) without satisfying Definition-of-Done.\n`,
   } as StreamChunk;
   // B1: clear active-run when max-sprints reached.
   clearWorkspaceFocus();
@@ -1298,10 +1550,20 @@ async function* drainSprints(args: {
 }
 
 function chatEnvConfig(): { client: import("../chat/types.js").ChatClient } | null {
-  // Lazy load to avoid circular imports
-  const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
-  const client = readChatProvider();
-  return client ? { client } : null;
+  // Lazy load to avoid circular imports. The CJS `require` is unavailable in
+  // some ESM hosts, and a resolution failure here used to propagate out of
+  // runPhasesPath and abort the whole run — chat broadcasting is optional, so a
+  // missing chat provider must degrade to "no chat", never kill the loop.
+  try {
+    const { readChatProvider } = require("../chat/factory.js") as typeof import("../chat/factory.js");
+    const client = readChatProvider();
+    return client ? { client } : null;
+  } catch (err) {
+    console.error(
+      `[product-loop] chatEnvConfig: chat provider unavailable, continuing without chat: ${(err as Error)?.message}`,
+    );
+    return null;
+  }
 }
 
 /**
@@ -1356,12 +1618,15 @@ async function* runPhasesPath(args: {
   ctx: DriverContext;
   productSpec: ProductSpec;
   roleAssignments: Map<RoleSlot, { modelId: string; provider: string; tier?: string }>;
+  runIdSink?: RunIdSink;
 }): AsyncGenerator<StreamChunk, ProductLoopResult | null, unknown> {
-  const { ctx, productSpec, roleAssignments } = args;
+  const { ctx, productSpec, roleAssignments, runIdSink } = args;
+  // This path returned NO `sprintsRun` on any exit, so every phase-orchestrated
+  // run — the default — reported `undefined ?? 0` in `run-finished`.
+  let sprintsRun = 0;
 
   // Load prerequisites: projectContext and manifest.
   const { readProjectContext } = await import("./discovery-persistence.js");
-  const { getProductSpentUsd } = await import("../usage/product-ledger.js");
   const { runPhases } = await import("./phase-runner.js");
 
   const projectContext = await readProjectContext(ctx.flowDir, ctx.runId);
@@ -1405,6 +1670,14 @@ async function* runPhasesPath(args: {
       phaseScope?: { criteria: string[]; scope: string };
     };
 
+    // Counted here, at the top of the adapter, because this generator has NO
+    // try/catch: an implementation-stage throw (e.g. the isolated-impl deadline)
+    // escapes runPhases and runPhasesPath entirely and lands in
+    // runProductLoop's `catch`, which never sees a result. That is run
+    // mtv9v1xu7615's exact exit.
+    sprintsRun++;
+    if (runIdSink) runIdSink.sprintsRun = sprintsRun;
+
     // Reset history when a new phase begins.
     if ((sc.phaseId ?? null) !== currentPhaseId) {
       currentPhaseId = sc.phaseId ?? null;
@@ -1417,7 +1690,11 @@ async function* runPhasesPath(args: {
     // drainSprints path. Without this the phase-orchestrated loop dropped the
     // feedback-routing focus between sprints.
     const prevSprint = sprintHistory[sprintHistory.length - 1];
-    const inner = runSprint({
+    // S1: runSprintTracked wraps runSprint verbatim (every yielded chunk,
+    // including halt, is forwarded unchanged) and registers the sprint in
+    // sprint-plan.json + moves tasks.json statuses around it — see
+    // sprint-tracking.ts. Shared with the legacy drainSprints call site above.
+    const inner = runSprintTracked({
       sprintN: sc.sprintN,
       ctx,
       productSpec,
@@ -1511,16 +1788,16 @@ async function* runPhasesPath(args: {
       channelId: ch.channelId,
       client: chatClient,
       leader,
-      capUsd: manifest.capUsd,
-      remainingUsd: async () => {
-        const { getProductSpentUsd } = await import("../usage/product-ledger.js");
-        const spent = await getProductSpentUsd(verdictArgs.runId);
-        return Math.max(0, manifest.capUsd - spent);
-      },
       reviewSummary: verdictArgs.reviewSummary,
       fallback: terminalFallback,
     });
   };
+
+  // No spend gate here. CB-0 (halt when the spend gauge is unreadable) and the
+  // `remainingUsd` headroom that phase-plan, review/retro/standup and the verdict
+  // resolver used to read all existed to enforce `--max-cost`; `/ideal` has no
+  // spend cap (user decision). Spend is still MEASURED per phase (phase-budget.ts)
+  // and per sprint (sprint-runner.ts), and an unreadable gauge is still reported.
 
   const phaseGen = runPhases({
     flowDir: ctx.flowDir,
@@ -1530,8 +1807,6 @@ async function* runPhasesPath(args: {
     projectContext,
     leader: leader as any,
     leaderModelId,
-    capUsd: manifest.capUsd,
-    remainingUsd: async () => Math.max(0, manifest.capUsd - (await getProductSpentUsd(ctx.runId))),
     awaitCustomerVerdict,
     sprintRunner,
     projectCwd: ctx.cwd,
@@ -1571,23 +1846,46 @@ async function* runPhasesPath(args: {
     yield chunk;
   }
 
-  if (!phaseOutcome.pass) {
-    return {
-      runId: ctx.runId,
-      stage: "halted",
-      success: false,
-      reason: phaseOutcome.reason ?? "phase-orchestrator-halt",
-    };
-  }
+  // The run-level verdict is DERIVED from the sprint outcomes this run actually
+  // recorded — never asserted. It was previously a hardcoded
+  // `{pass:true, score:1, reason:"phases_complete"}` written whenever the phase
+  // orchestrator returned, so a run whose every sprint failed its engineering
+  // floor still marked itself passed AND stamped `doneAt`, which made it
+  // permanently unresumable (findLatestIncompleteRun skips any manifest with
+  // doneAt set).
+  const sprintOutcomes = await readSprintOutcomes(ctx.flowDir, ctx.runId).catch((e) => {
+    console.error(
+      `[product-loop] run verdict: readSprintOutcomes failed for ${ctx.runId}: ${(e as Error)?.message}` +
+        " — treating as no outcomes, which cannot pass",
+    );
+    return [];
+  });
+  const runVerdict = deriveRunVerdict({
+    outcomes: sprintOutcomes,
+    phasesPassed: phaseOutcome.pass,
+    phaseReason: phaseOutcome.reason,
+  });
 
-  // All phases done — write final manifest.
+  // Persist the derived verdict on every path, pass or fail, so `/ideal status`
+  // reports the truth. `doneAt` is stamped ONLY for a terminal (passing) run;
+  // a failed run stays resumable.
   const finalManifest = await readManifest(ctx.flowDir, ctx.runId);
   if (finalManifest) {
     await writeManifest(ctx.flowDir, ctx.runId, {
       ...finalManifest,
-      doneAt: new Date(),
-      verdict: { pass: true, score: 1, failedCondition: undefined as any, reason: "phases_complete" },
+      ...(runIsTerminal(runVerdict) ? { doneAt: new Date() } : {}),
+      verdict: runVerdict,
     });
+  }
+
+  if (!runVerdict.pass) {
+    return {
+      runId: ctx.runId,
+      stage: "halted",
+      success: false,
+      reason: runVerdict.reason ?? phaseOutcome.reason ?? "phase-orchestrator-halt",
+      sprintsRun,
+    };
   }
   // P1.3: extract run artifacts to EE for cross-run memory. Non-fatal —
   // EE client absorbs failures into the offline queue.
@@ -1612,7 +1910,8 @@ async function* runPhasesPath(args: {
     runId: ctx.runId,
     stage: "approved",
     success: true,
-    reason: "phases_complete",
+    reason: runVerdict.reason ?? "phases_complete",
+    sprintsRun,
     shipped: true,
   };
 }
@@ -1663,24 +1962,43 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
   const runsRoot = path.join(opts.flowDir, "runs");
   let entries: string[] = [];
   try {
-    entries = await fs.readdir(runsRoot);
-  } catch {
+    // Directories only. `readdir` also returns stray files (`.DS_Store`,
+    // `Thumbs.db`), and each one used to inflate the "Active runs (N)" count
+    // with something that can never have a row.
+    entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      console.error(`[product-loop] status: cannot list ${runsRoot}: ${(err as Error)?.message}`);
+      yield { type: "content", content: `Cannot read ${runsRoot}: ${(err as Error)?.message}\n` } as StreamChunk;
+      return { runId: "", stage: "error", success: false, reason: "runs_dir_unreadable" };
+    }
     yield { type: "content", content: "No runs found.\n" } as StreamChunk;
     return { runId: "", stage: "approved", success: true };
   }
 
   if (opts.runId) {
-    const m = await readManifest(opts.flowDir, opts.runId);
+    const inspection = await inspectManifest(opts.flowDir, opts.runId);
+    const m = inspection.manifest;
     if (!m) {
-      yield { type: "content", content: `Run not found: ${opts.runId}\n` } as StreamChunk;
-      return { runId: opts.runId, stage: "error", success: false, reason: "not_found" };
+      // "Run not found" was said for a run that plainly exists on disk. Name
+      // what was actually wrong, and what can be done instead.
+      const exists = entries.includes(opts.runId);
+      const head = exists
+        ? `Run ${opts.runId} cannot be read: ${inspection.defect?.detail ?? "manifest unusable"}`
+        : `Run not found: ${opts.runId}`;
+      const lines = [head];
+      if (exists && inspection.createdAt) lines.push(`  Created: ${inspection.createdAt.toISOString()}`);
+      lines.push(await describeResumableAlternatives(opts.flowDir, opts.runId));
+      yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
+      return { runId: opts.runId, stage: "error", success: false, reason: exists ? "manifest_missing" : "not_found" };
     }
     const iters = await readIterations(opts.flowDir, opts.runId);
     const digest = await readResumeDigest(opts.flowDir, opts.runId);
     const outcomes = await readSprintOutcomes(opts.flowDir, opts.runId).catch(() => []);
     const lines = [
       `Run ${opts.runId}: ${m.idea}`,
-      `Cap: $${m.capUsd}  MaxSprints: ${m.maxSprints}  DoneThreshold: ${m.doneThreshold}`,
+      `MaxSprints: ${m.maxSprints ?? "none"}  DoneThreshold: ${m.doneThreshold}`,
       `Iterations: ${iters.length}  Aborted: ${m.aborted ?? false}  DoneAt: ${m.doneAt?.toISOString() ?? "—"}`,
     ];
     if (digest) {
@@ -1699,25 +2017,106 @@ async function* runStatus(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       for (const o of outcomes) {
         lines.push(
           `  #${o.sprintN}  ${o.pass ? "✓ pass" : "✗ fail"}  score=${o.score.toFixed(2)}  verify=${o.verify}` +
-            (o.failedCondition ? `  (${o.failedCondition})` : ""),
+            // F9 - name the cause, not just the condition. `engineering_floor`
+            // alone leaves four possible causes and identifies none of them.
+            (describeVerdictFailure(o) ? `  (${describeVerdictFailure(o)})` : ""),
         );
       }
     }
+    // Measured spend per phase (no cap to show it against — `/ideal` has none).
+    // This replaces the old "Cap: $N" line; the measurement is what stays.
+    const { renderPhaseSpendSummary } = await import("./phase-budget.js");
+    lines.push("", "Phase spend:", await renderPhaseSpendSummary(opts.flowDir, opts.runId));
     yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
     return { runId: opts.runId, stage: "approved", success: true };
   }
 
-  const lines: string[] = [`Active runs (${entries.length}):`];
+  // The header used to count `entries` while the loop `continue`d past any run
+  // whose manifest would not parse — so the number promised rows that never
+  // appeared, and the run it dropped was BY DEFINITION the one with a problem
+  // (observed: "Active runs (2):" above a single row, the missing one being the
+  // run the user had just asked about). The count is now DERIVED from the rows,
+  // so the two cannot disagree again, and an unreadable run gets a row that says
+  // what is known about it and why the rest is not.
+  const rows: string[] = [];
   for (const id of entries) {
-    const m = await readManifest(opts.flowDir, id).catch(() => null);
-    const iters = await readIterations(opts.flowDir, id).catch(() => []);
-    if (!m) continue;
-    const digest = await readResumeDigest(opts.flowDir, id).catch(() => null);
+    const inspection = await inspectManifest(opts.flowDir, id);
+    const iters = await readIterations(opts.flowDir, id).catch((err) => {
+      console.error(`[product-loop] status: iterations.md unreadable for run ${id}: ${(err as Error)?.message}`);
+      return [];
+    });
+    const digest = await readResumeDigest(opts.flowDir, id).catch((err) => {
+      console.error(`[product-loop] status: resume digest unreadable for run ${id}: ${(err as Error)?.message}`);
+      return null;
+    });
     const stagePart = digest ? `  stage=${digest.stage}` : "";
-    lines.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}${stagePart}  aborted=${m.aborted ?? false}`);
+
+    if (!inspection.manifest) {
+      const created = inspection.createdAt ? `  created=${inspection.createdAt.toISOString()}` : "";
+      rows.push(
+        `  ${id}  <unreadable: ${inspection.defect?.detail ?? "manifest unusable"}>` +
+          `  sprints=${iters.length}${stagePart}${created}`,
+      );
+      continue;
+    }
+    const m = inspection.manifest;
+    rows.push(`  ${id}  ${m.idea.slice(0, 60)}  sprints=${iters.length}${stagePart}  aborted=${m.aborted ?? false}`);
   }
+
+  const lines: string[] = [`Active runs (${rows.length}):`, ...rows];
+
+  // The project's `## Active Run` can name a run none of the rows above can be
+  // used for (see `claimActiveRunSlot`). Saying so here is the difference
+  // between a visible zombie and an invisible one.
+  const activeHolder = await getActiveRunId(opts.flowDir).catch((err) => {
+    console.error(`[product-loop] status: cannot read Active Run pointer: ${(err as Error)?.message}`);
+    return null;
+  });
+  if (activeHolder) {
+    const held = await inspectManifest(opts.flowDir, activeHolder);
+    if (!held.manifest) {
+      lines.push(
+        "",
+        `Note: this project's Active Run is ${activeHolder}, which cannot be used ` +
+          `(${held.defect?.detail ?? "manifest unusable"}).`,
+        `  The next /ideal run takes the pointer over; ${activeHolder} is left on disk untouched.`,
+      );
+    }
+  }
+
   yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
   return { runId: "", stage: "approved", success: true };
+}
+
+/** Does `runs/<runId>/` exist? Distinguishes "wrong id" from "broken run". */
+async function runDirExists(flowDir: string, runId: string): Promise<boolean> {
+  try {
+    return (await fs.stat(path.join(flowDir, "runs", runId))).isDirectory();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      console.error(`[product-loop] runDirExists(${runId}) failed: ${(err as Error)?.message}`);
+    }
+    return false;
+  }
+}
+
+/**
+ * Name which runs the caller CAN resume, for a failure path that has already
+ * enumerated the flow directory and therefore already knows.
+ *
+ * It never picks a run for the user and never redirects: the ids are printed as
+ * ready-to-retype commands. `excludeRunId` drops the run that just failed, so
+ * the answer is never "try the thing that did not work".
+ */
+async function describeResumableAlternatives(flowDir: string, excludeRunId?: string): Promise<string> {
+  const candidates = (await listIncompleteRuns(flowDir)).filter((c) => c.id !== excludeRunId);
+  if (candidates.length === 0) return 'No resumable run in this project — start one with /ideal "<idea>".';
+  const shown = candidates
+    .slice(0, 5)
+    .map((c) => `  /ideal resume ${c.id}   ${c.idea.slice(0, 60)}`)
+    .join("\n");
+  const more = candidates.length > 5 ? `\n  …and ${candidates.length - 5} more (/ideal status)` : "";
+  return `Resumable ${candidates.length === 1 ? "run" : `runs (${candidates.length})`}:\n${shown}${more}`;
 }
 
 /**
@@ -1741,29 +2140,52 @@ async function* runReview(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     const runsRoot = path.join(opts.flowDir, "runs");
     let entries: string[] = [];
     try {
-      entries = await fs.readdir(runsRoot);
-    } catch {
+      entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.error(`[product-loop] review: cannot list ${runsRoot}: ${(err as Error)?.message}`);
+      }
       yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
       return { runId: "", stage: "error", success: false, reason: "no_runs" };
     }
     const dated: Array<{ id: string; createdAt: number }> = [];
+    const skipped: string[] = [];
     for (const id of entries) {
-      const m = await readManifest(opts.flowDir, id).catch(() => null);
-      if (!m) continue;
+      const inspection = await inspectManifest(opts.flowDir, id);
+      if (!inspection.manifest) {
+        skipped.push(`  ${id} — ${inspection.defect?.detail ?? "manifest unusable"}`);
+        continue;
+      }
+      const m = inspection.manifest;
       const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
       dated.push({ id, createdAt });
     }
     if (dated.length === 0) {
-      yield { type: "content", content: "No runs to review.\n" } as StreamChunk;
+      // "No runs to review" said over N run directories is the same lie
+      // `/ideal status` was telling: it hid exactly the runs with a problem.
+      const lines =
+        skipped.length === 0
+          ? ["No runs to review."]
+          : [
+              `No reviewable run — ${skipped.length} run director${skipped.length === 1 ? "y" : "ies"} exist but cannot be read:`,
+              ...skipped,
+            ];
+      yield { type: "content", content: `${lines.join("\n")}\n` } as StreamChunk;
       return { runId: "", stage: "error", success: false, reason: "no_runs" };
     }
     dated.sort((a, b) => b.createdAt - a.createdAt);
     resolvedRunId = dated[0]!.id;
   }
 
-  const manifest = await readManifest(opts.flowDir, resolvedRunId);
+  const reviewInspection = await inspectManifest(opts.flowDir, resolvedRunId);
+  const manifest = reviewInspection.manifest;
   if (!manifest) {
-    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    const detail = reviewInspection.defect;
+    const head =
+      detail?.code === "missing_file" && !(await runDirExists(opts.flowDir, resolvedRunId))
+        ? `Run not found: ${resolvedRunId}`
+        : `Run ${resolvedRunId} cannot be reviewed: ${detail?.detail ?? "manifest unusable"}`;
+    yield { type: "content", content: `${head}\n` } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
 
@@ -1784,12 +2206,12 @@ async function* runReview(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       "",
       "## Sprint scores",
       "",
-      "| Sprint | Result | Score | Verify | Failed condition |",
-      "|---|---|---|---|---|",
+      "| Sprint | Result | Score | Verify | Failed condition | Reason |",
+      "|---|---|---|---|---|---|",
     );
     for (const o of outcomes) {
       header.push(
-        `| ${o.sprintN} | ${o.pass ? "pass" : "fail"} | ${o.score.toFixed(2)} | ${o.verify} | ${o.failedCondition ?? "—"} |`,
+        `| ${o.sprintN} | ${o.pass ? "pass" : "fail"} | ${o.score.toFixed(2)} | ${o.verify} | ${o.failedCondition ?? "—"} | ${o.reason ?? "—"} |`,
       );
     }
   }
@@ -1860,45 +2282,55 @@ async function* runAbort(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, 
 }
 
 /**
- * B — Auto-detect the newest resumable run.
+ * Every resumable run, newest first.
  *
- * "Resumable" = a run that has a manifest (early pre-manifest crashes are not
- * replayable) AND is neither aborted nor terminal (`doneAt` is set on done-gate
- * pass / ship / abort). Sorted by manifest `createdAt` descending so a bare
- * `/ideal resume` continues the most recent incomplete run without the user
- * having to remember (or type) the runId.
+ * "Resumable" = a run with a USABLE manifest (one carrying an `Idea:`; a run
+ * that crashed before its idea was written cannot be replayed) AND neither
+ * aborted nor terminal (`doneAt` is set on done-gate pass / ship / abort).
+ * Sorted by manifest `createdAt` descending, so a bare `/ideal resume` continues
+ * the most recent incomplete run without the user having to remember the runId.
+ *
+ * This returns the whole list rather than just the newest because the failure
+ * paths in `runResume` / `runStatus` need to NAME the alternatives, not merely
+ * pick one — see `describeResumableAlternatives`.
  */
-async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+async function listIncompleteRuns(flowDir: string): Promise<Array<{ id: string; idea: string }>> {
   const runsRoot = path.join(flowDir, "runs");
   let entries: string[];
   try {
-    entries = await fs.readdir(runsRoot);
+    entries = (await fs.readdir(runsRoot, { withFileTypes: true })).filter((e) => e.isDirectory()).map((e) => e.name);
   } catch (err) {
     // No runs directory yet → nothing to resume. Not an error worth surfacing.
     if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
-      console.error(`[product-loop] findLatestIncompleteRun: readdir failed: ${(err as Error)?.message}`);
+      console.error(`[product-loop] listIncompleteRuns: readdir failed: ${(err as Error)?.message}`);
     }
-    return null;
+    return [];
   }
   const candidates: Array<{ id: string; idea: string; createdAt: number }> = [];
   for (const id of entries) {
     const m = await readManifest(flowDir, id).catch((e) => {
-      console.error(`[product-loop] findLatestIncompleteRun: manifest read failed for ${id}: ${e?.message}`);
+      console.error(`[product-loop] listIncompleteRuns: manifest read failed for ${id}: ${e?.message}`);
       return null;
     });
-    if (!m) continue; // no manifest → not resumable
+    if (!m) continue; // no usable manifest → not resumable
     if (m.aborted) continue; // hard-killed
     if (m.doneAt) continue; // terminal (done / shipped)
     const createdAt = m.createdAt instanceof Date && !Number.isNaN(m.createdAt.getTime()) ? m.createdAt.getTime() : 0;
     candidates.push({ id, idea: m.idea, createdAt });
   }
-  if (candidates.length === 0) return null;
   candidates.sort((a, b) => b.createdAt - a.createdAt);
-  const top = candidates[0]!;
-  return { id: top.id, idea: top.idea };
+  return candidates.map(({ id, idea }) => ({ id, idea }));
 }
 
-async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
+/** The newest resumable run, or null. See `listIncompleteRuns` for the rule. */
+async function findLatestIncompleteRun(flowDir: string): Promise<{ id: string; idea: string } | null> {
+  return (await listIncompleteRuns(flowDir))[0] ?? null;
+}
+
+async function* runResume(
+  opts: ProductLoopOptions,
+  runIdSink?: RunIdSink,
+): AsyncGenerator<StreamChunk, ProductLoopResult, unknown> {
   // B — bare `/ideal resume` (no runId): auto-detect the newest incomplete run.
   let resolvedRunId = opts.runId;
   if (!resolvedRunId) {
@@ -1916,20 +2348,56 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       content: `Resuming latest incomplete run ${resolvedRunId}: ${latest.idea.slice(0, 60)}\n`,
     } as StreamChunk;
   }
+  // Every one of the three dead ends below is reached AFTER the flow directory
+  // has been enumerated, so each one already knows which runs are resumable.
+  // Saying only "Manifest missing for <id>" threw that away: the user was left
+  // to guess, while the run they wanted sat one line away from being named.
+  // Nothing is auto-selected — the ids are printed for the user to retype.
   const run = await loadRun(opts.flowDir, resolvedRunId);
   if (!run) {
-    yield { type: "content", content: `Run not found: ${resolvedRunId}\n` } as StreamChunk;
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield { type: "content", content: `Run not found: ${resolvedRunId}\n${hint}\n` } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "not_found" };
   }
-  const manifest = await readManifest(opts.flowDir, resolvedRunId);
+  const inspection = await inspectManifest(opts.flowDir, resolvedRunId);
+  const manifest = inspection.manifest;
   if (!manifest) {
-    yield { type: "content", content: `Manifest missing for ${resolvedRunId}\n` } as StreamChunk;
+    const detail = inspection.defect?.detail ?? "manifest unusable";
+    const created = inspection.createdAt ? ` (run directory created ${inspection.createdAt.toISOString()})` : "";
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield {
+      type: "content",
+      content: `Cannot resume ${resolvedRunId}: ${detail}${created}.\n${hint}\n`,
+    } as StreamChunk;
     return { runId: resolvedRunId, stage: "error", success: false, reason: "manifest_missing" };
   }
   if (manifest.aborted) {
-    yield { type: "content", content: `Run ${resolvedRunId} was aborted; cannot resume.\n` } as StreamChunk;
+    const hint = await describeResumableAlternatives(opts.flowDir, resolvedRunId);
+    yield {
+      type: "content",
+      content: `Run ${resolvedRunId} was aborted; cannot resume.\n${hint}\n`,
+    } as StreamChunk;
     return { runId: resolvedRunId, stage: "halted", success: false, reason: "aborted" };
   }
+
+  // Past every guard above, so this run has a usable manifest and is not
+  // aborted — i.e. it owns the workspace focus exactly as a fresh run does.
+  //
+  // `runHotPath` (:444) and `runMaintain` (:761) already claimed the pointer;
+  // resume did NOT, and resume is the path a user takes when a session-boot
+  // skeleton is holding the slot. Measured on `qa-platform`: `/ideal status`
+  // reported "the next /ideal run takes the pointer over", the user then ran
+  // `/ideal resume muc2joffe506`, the run drove correctly for 12 minutes — and
+  // `.muonroi-flow/state.md` still read `muc126520fb1`, so every reader of the
+  // Active Run slot (pil/layer5-context.ts:67, orchestrator/flow-resume.ts:42,
+  // ui/slash/{compact,clear}.ts, flow/warning-persist.ts:65) kept seeing the
+  // skeleton. The claim is conditional in the same way, so resuming can never
+  // steal the slot from another real run.
+  await claimActiveRunSlot(opts.flowDir, resolvedRunId).catch((err) => {
+    console.error(
+      `[ideal] could not claim the Active Run pointer for ${resolvedRunId} on resume: ${(err as Error)?.message}`,
+    );
+  });
 
   // Surface the Resume Digest so the user sees where the run stopped and what
   // resuming will do — the whole point of giving the digest real content.
@@ -1988,6 +2456,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     processMessageFn: opts.processMessageFn,
     runIsolatedTask: opts.runIsolatedTask,
     detectVerifyRecipe: opts.detectVerifyRecipe,
+    abortSignal: opts.abortSignal,
   };
 
   // C-v2 cross-session debate resume — a persisted debate checkpoint means the
@@ -2020,6 +2489,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
       return { runId: resolvedRunId, stage: "error", success: false, reason: msg };
     }
     if (!driverResult?.success || driverResult.stage !== "approved") {
+      yield* announceDriverBail(driverResult, resolvedRunId);
       return { ...driverResult!, runId: resolvedRunId };
     }
     // Build the sprint plan now that the spec exists (idempotent — skips when
@@ -2040,12 +2510,60 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     } as StreamChunk;
   }
 
+  // F8b — the undebated-criteria gate, on the path a resume actually takes.
+  //
+  // Measured 2026-09-10: two `/ideal resume <runId>` runs produced sprint_stage
+  // rows from 02:38:04 and NOTHING else — zero phase_start, zero
+  // council_message. A resume never re-enters research→scoping, which is where
+  // the gate lived, so the gate could not fire on the path that schedules the
+  // sprints. That is not a theoretical hole: the sprint plan a resume re-enters
+  // is the one whose sprint 2 goal was built on the criterion the council had
+  // just reported nobody discussed.
+  //
+  // This sits after the interrupted-debate branch on purpose. That branch runs
+  // the loop-driver, which consults the same gate and records the answer; the
+  // call below then finds that answer and honours it instead of asking twice.
+  // Every route out of `runResume` into sprint work — phase-orchestrated and
+  // legacy alike — passes through here.
+  {
+    const gate = yield* enforceUndebatedCriteriaGate({
+      runDir,
+      respondToQuestion: opts.respondToQuestion,
+      audit: (data) => {
+        try {
+          logInteraction(opts.sessionId ?? resolvedRunId, "council", {
+            eventSubtype: "undebated_criteria_gate",
+            data: { phase: "resume", runId: resolvedRunId, ...data },
+          });
+        } catch (err) {
+          // Audit trail only — a broken DB must not stop the gate it is
+          // recording, but it must not vanish either (No Silent Catch).
+          console.error(`[product-loop] undebated gate audit failed: ${(err as Error)?.message}`);
+        }
+      },
+    });
+    if (!gate.proceed) {
+      const detail = undebatedHaltDetail(gate.undebated);
+      yield {
+        type: "content",
+        content: `\n> Stopping this resume — ${detail}. Take them back to a council before running sprints against them.\n`,
+      } as StreamChunk;
+      return {
+        runId: resolvedRunId,
+        stage: "halted",
+        success: false,
+        reason: "undebated_criteria",
+        sprintsRun: 0,
+      };
+    }
+  }
+
   const productSpec = await loadProductSpec(opts.flowDir, resolvedRunId, manifest.idea, manifest.stack);
   const roleAssignments = opts.roleAssignments ?? (await resolveRoleAssignments(opts.sessionModelId));
 
   // Subsystem E: phase-orchestrated path (default ON; set MUONROI_PHASE_MODE=0 for legacy).
   if (process.env.MUONROI_PHASE_MODE !== "0") {
-    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments });
+    const phaseResult = yield* runPhasesPath({ ctx, productSpec, roleAssignments, runIdSink });
     if (phaseResult !== null) return phaseResult;
     // phaseResult === null means runPhases prerequisites were unavailable; fall through to legacy.
   }
@@ -2056,6 +2574,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
     roleAssignments,
     history: iters.filter((i) => !i.crashed),
     flags: opts.flags,
+    runIdSink,
   });
 }
 
@@ -2071,7 +2590,7 @@ async function* runResume(opts: ProductLoopOptions): AsyncGenerator<StreamChunk,
  * #4 when score < 0.85) keeps early sprints unblocked, and the user-approval
  * gate (Cond #5) still runs so the loop can ship via /ship.
  */
-async function resolveRoleAssignments(
+export async function resolveRoleAssignments(
   sessionModelId: string,
 ): Promise<Map<RoleSlot, { modelId: string; provider: string; tier?: string }>> {
   const out = new Map<RoleSlot, { modelId: string; provider: string; tier?: string }>();
@@ -2081,12 +2600,25 @@ async function resolveRoleAssignments(
   const order: readonly ProviderId[] = ALL_PROVIDER_IDS.filter((p) => p !== "xai");
   const inventory: ModelInfo[] = [];
   for (const p of order) {
+    // Honour the user's disabled-provider list. This scan was the ONLY model
+    // selector in the codebase that read key presence without also consulting
+    // `isProviderDisabled` (compare council/leader.ts resolveParticipants:322/337/343
+    // and buildCouncilCandidatePool:388), so a stale key for a provider the user
+    // had switched OFF still won a role slot. Downstream that is fatal, not
+    // cosmetic: sprint-runner passes `roleAssignments.get("Architect").modelId`
+    // into `runCouncil` as its session model, and `resolveParticipants` returns
+    // `[]` for a DISABLED provider — so sprint 1 Planning bailed with "No
+    // reachable provider" on every run. Measured 2026-09-04: with
+    // disabledProviders ["xai","zai","opencode-go","deepseek"] and a stale
+    // opencode-go key present, Architect resolved to `opencode/glm-5.1` and
+    // resolveParticipants returned 0 participants.
+    if (isProviderDisabled(p)) continue;
     try {
       await loadKeyForProvider(p);
     } catch {
       continue;
     }
-    inventory.push(...getModelsForProvider(p));
+    inventory.push(...getTextModelsForProvider(p));
   }
   if (inventory.length === 0) return out;
 

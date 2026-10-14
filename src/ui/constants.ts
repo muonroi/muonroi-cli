@@ -1,4 +1,4 @@
-import type { PaymentChain, SandboxMode } from "../utils/settings.js";
+import type { SandboxMode } from "../utils/settings.js";
 import type { McpEditorField } from "./mcp-modal-types.js";
 import type { SandboxRow, WalletRow } from "./types.js";
 
@@ -184,27 +184,21 @@ export function getSandboxVisibleRows(mode: SandboxMode): SandboxRow[] {
 export const WALLET_ROWS: WalletRow[] = [
   {
     key: "enabled",
-    label: "Payments",
-    type: "toggle",
-    getDisplay: (s) => (s.enabled ? "enabled" : "disabled"),
-    getOptions: () => ["enabled", "disabled"],
-    apply: (_s, v) => ({ enabled: v === "enabled" }),
+    label: "Payments (coming soon)",
+    type: "readonly",
+    getDisplay: () => "Stripe billing pending",
   },
   {
     key: "chain",
     label: "Chain",
-    type: "toggle",
-    getDisplay: (s) => s.chain,
-    getOptions: () => ["base-sepolia", "base"] as PaymentChain[],
-    apply: (_s, v) => ({ chain: v as PaymentChain }),
+    type: "readonly",
+    getDisplay: () => "—",
   },
   {
     key: "autoApprove",
     label: "Auto-approve",
-    type: "toggle",
-    getDisplay: (s) => (s.approval.autoApprove ? "on" : "off"),
-    getOptions: () => ["off", "on"],
-    apply: (s, v) => ({ approval: { ...s.approval, autoApprove: v === "on" } }),
+    type: "readonly",
+    getDisplay: () => "—",
   },
   {
     key: "address",

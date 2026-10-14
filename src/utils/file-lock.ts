@@ -10,6 +10,12 @@ const inProcessLocks = new Map<string, Promise<void>>();
 export interface FileLockOptions {
   retryDelays?: number[];
   timeoutMs?: number;
+  /**
+   * Treat a lock file older than this many ms as abandoned (its holder crashed
+   * mid-critical-section) and break it. Off by default: only callers whose
+   * critical section is known to be short may opt in.
+   */
+  staleMs?: number;
 }
 
 export async function withFileLock<T>(filePath: string, fn: () => Promise<T>, opts: FileLockOptions = {}): Promise<T> {
@@ -55,6 +61,7 @@ async function acquireFileLock<T>(filePath: string, fn: () => Promise<T>, opts: 
     } catch (e: any) {
       // EEXIST = lock exists (POSIX); EPERM = lock exists and locked (Windows)
       if (e?.code !== "EEXIST" && e?.code !== "EPERM") throw e;
+      if (opts.staleMs !== undefined && (await breakStaleLock(lockPath, opts.staleMs))) continue;
       if (Date.now() - startedAt > timeoutMs) {
         throw new Error(`withFileLock: timed out waiting for ${lockPath}`);
       }
@@ -62,5 +69,18 @@ async function acquireFileLock<T>(filePath: string, fn: () => Promise<T>, opts: 
       attempt += 1;
       await new Promise((r) => setTimeout(r, delay));
     }
+  }
+}
+
+/** Remove `lockPath` when its mtime is older than `staleMs`. Returns whether it was removed. */
+async function breakStaleLock(lockPath: string, staleMs: number): Promise<boolean> {
+  try {
+    const { mtimeMs } = await fs.stat(lockPath);
+    if (Date.now() - mtimeMs < staleMs) return false;
+    await fs.unlink(lockPath);
+    return true;
+  } catch {
+    // Vanished between open and stat (released normally) — just retry the open.
+    return false;
   }
 }

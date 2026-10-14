@@ -1,40 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { VerifyRecipe } from "../../types/index.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
 
-describe("CB-1 Cost Projection", () => {
-  it("should calculate projection from baseline when history is empty", () => {
-    const result = CB1_costProjection([], 50, 0, 5);
-    expect(result.projection).toBe(6); // 5 * 1.2
-    expect(result.halt).toBe(false); // 6 < 50 * 1.5
-  });
-
-  it("should calculate projection from history using EWMA", () => {
-    // history: 10, 20, 30
-    // ewma = (10 * 0.7 + 20 * 0.3) = 13 (sprint 2)
-    // ewma = (13 * 0.7 + 30 * 0.3) = 9.1 + 9 = 18.1 (sprint 3)
-    // wait, the formula is: ewma = recent.reduce((avg, c) => avg * 0.7 + c * 0.3, recent[0])
-    // recent = [10, 20, 30]
-    // initial avg = 10
-    // iteration 1 (c=20): 10 * 0.7 + 20 * 0.3 = 7 + 6 = 13
-    // iteration 2 (c=30): 13 * 0.7 + 30 * 0.3 = 9.1 + 9 = 18.1
-    // projection = 18.1 * 1.2 = 21.72
-    const history = [{ actualCost: 10 }, { actualCost: 20 }, { actualCost: 30 }];
-    const result = CB1_costProjection(history, 100, 60);
-    expect(result.projection).toBeCloseTo(21.72);
-    expect(result.halt).toBe(false); // 21.72 < (100-60) * 1.5 = 60
-  });
-
-  it("should halt when projection exceeds 1.5x remaining budget", () => {
-    const history = [{ actualCost: 10 }];
-    // ewma = 10
-    // projection = 12
-    // remaining = 5
-    // 12 > 5 * 1.5 (7.5) -> true
-    const result = CB1_costProjection(history, 15, 10);
-    expect(result.halt).toBe(true);
-  });
-});
+// CB-1 (halt when projected spend exceeds the cap's headroom) was deleted along
+// with `/ideal`'s spend cap (user decision: no limits); its tests went with it.
 
 describe("CB-2 Oscillation", () => {
   it("should not halt before sprint 3", () => {

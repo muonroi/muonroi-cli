@@ -272,3 +272,222 @@ describe("ceilingForCall", () => {
     expect(ceilingForCall({} as any)).toBeUndefined();
   });
 });
+
+// ─── Request pacing (declared catalog rate limits, enforced at the gate) ─────
+
+const { __resetRateLimiterForTests, RATE_LIMIT_WINDOW_MS } = await import("./rate-limiter.js");
+
+/** Minimal LanguageModelV3-shaped stub whose doStream returns a real stream. */
+function streamModel(inner = vi.fn(async () => ({ stream: new ReadableStream({ start: (c) => c.close() }) }))) {
+  return {
+    model: {
+      specificationVersion: "v3" as const,
+      provider: "x",
+      modelId: "m1",
+      supportedUrls: {},
+      doGenerate: vi.fn(async () => ({})),
+      doStream: inner,
+    },
+    inner,
+  };
+}
+
+describe("wrapModelWithGate request pacing", () => {
+  const PACED = { concurrency: 5, requestsPerMinute: 2 };
+
+  afterEach(() => {
+    __resetRateLimiterForTests();
+    delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
+    delete process.env.MUONROI_RATE_LIMIT;
+  });
+
+  it("does not wrap or pace a model whose catalog declares no rate limits", async () => {
+    const { model, inner } = streamModel();
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    const wrapped = wrapModelWithGate(model as any, { stage: "main", modelId: "m1", sessionId: "s1" });
+    await wrapped.doStream({ prompt: [{ role: "user", content: "hi" }] });
+    expect(inner).toHaveBeenCalledTimes(1);
+  });
+
+  it("still paces when the METER is disabled — MUONROI_GATE=0 must not disarm rate limiting", () => {
+    process.env.MUONROI_GATE = "0";
+    const { model } = streamModel();
+    const paced = wrapModelWithGate(
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      model as any,
+      { stage: "main", modelId: "m1", providerId: "stepfun", rateLimits: PACED },
+    );
+    expect(paced).not.toBe(model); // wrapped for pacing even with the meter off
+    // ...whereas an unpaced model with the meter off is returned untouched.
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    expect(wrapModelWithGate(model as any, { stage: "main", modelId: "m1" })).toBe(model);
+  });
+
+  it("emits rate-limit-wait so a driver can tell a deliberate hold from a hang", async () => {
+    // Fake timers: the held call really would sleep a full window otherwise.
+    vi.useFakeTimers();
+    try {
+      const events: Array<Record<string, unknown>> = [];
+      (globalThis as Record<string, unknown>).__muonroiAgentRuntime = {
+        emitEvent: (e: unknown) => events.push(e as Record<string, unknown>),
+      };
+      const { model, inner } = streamModel();
+      const ctx = { stage: "main" as const, modelId: "m1", providerId: "stepfun", rateLimits: PACED };
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      const wrapped = wrapModelWithGate(model as any, ctx);
+      const p = [{ role: "user" as const, content: "hi" }];
+      await wrapped.doStream({ prompt: p });
+      await wrapped.doStream({ prompt: p });
+      expect(events).toHaveLength(0); // the first two fit the declared budget of 2
+      expect(inner).toHaveBeenCalledTimes(2);
+
+      const third = wrapped.doStream({ prompt: p });
+      // Let the pacer reach its sleep without advancing the clock.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The hold is announced IMMEDIATELY — before the call completes. If it were
+      // announced on release, the wait would be invisible for its whole duration,
+      // which is the "paced looks exactly like hung" failure this event exists to
+      // remove. And the request must NOT have been dispatched yet.
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        kind: "rate-limit-wait",
+        provider: "stepfun",
+        modelId: "m1",
+        stage: "main",
+        limitKind: "requests-per-minute",
+        limit: 2,
+        waitMs: RATE_LIMIT_WINDOW_MS,
+      });
+      expect(inner).toHaveBeenCalledTimes(2); // held, not sent
+
+      await vi.advanceTimersByTimeAsync(RATE_LIMIT_WINDOW_MS);
+      await third;
+      expect(inner).toHaveBeenCalledTimes(3); // released and dispatched
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("MUONROI_RATE_LIMIT=0 disables pacing", async () => {
+    process.env.MUONROI_RATE_LIMIT = "0";
+    const events: unknown[] = [];
+    (globalThis as Record<string, unknown>).__muonroiAgentRuntime = { emitEvent: (e: unknown) => events.push(e) };
+    const { model, inner } = streamModel();
+    const wrapped = wrapModelWithGate(
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      model as any,
+      { stage: "main", modelId: "m1", providerId: "stepfun", rateLimits: PACED },
+    );
+    const p = [{ role: "user" as const, content: "hi" }];
+    for (let i = 0; i < 6; i++) await wrapped.doStream({ prompt: p });
+    expect(inner).toHaveBeenCalledTimes(6);
+    expect(events).toHaveLength(0);
+  });
+});
+
+// ─── Provider 429 backstop (reactive: wait it out at the one choke point) ────
+
+const { APICallError } = await import("@ai-sdk/provider");
+const { ProviderRateLimitError } = await import("./rate-limit-backoff.js");
+
+function rateLimited(retryAfterMs: number) {
+  return new APICallError({
+    message: "Rate limit reached, please try again later.",
+    url: "https://provider.example.invalid/v1/chat/completions",
+    requestBodyValues: {},
+    statusCode: 429,
+    // Tiny provider hint so the test sleeps milliseconds on the real clock.
+    responseHeaders: { "retry-after-ms": String(retryAfterMs) },
+    isRetryable: true,
+  });
+}
+
+describe("wrapModelWithGate provider 429 backstop", () => {
+  const ctx = { stage: "subagent" as const, modelId: "m1", providerId: "acme", providerBackpressure: true };
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).__muonroiAgentRuntime;
+    delete process.env.MUONROI_RATE_LIMIT_RETRY_BUDGET_MS;
+  });
+
+  it("retries a 429 request rejection (any step) and announces the wait", async () => {
+    const events: Array<Record<string, unknown>> = [];
+    (globalThis as Record<string, unknown>).__muonroiAgentRuntime = {
+      emitEvent: (e: unknown) => events.push(e as Record<string, unknown>),
+    };
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const inner = vi
+        .fn()
+        .mockRejectedValueOnce(rateLimited(5))
+        .mockResolvedValueOnce({ stream: new ReadableStream({ start: (c) => c.close() }) });
+      const { model } = streamModel(inner);
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      const wrapped = wrapModelWithGate(model as any, ctx);
+      await wrapped.doStream({ prompt: [{ role: "user", content: "hi" }] });
+      expect(inner).toHaveBeenCalledTimes(2);
+      expect(events).toEqual([
+        expect.objectContaining({ kind: "stream-retry", attempt: 1, nextDelayMs: 5, errorName: "AI_APICallError" }),
+      ]);
+      const notice = stderr.mock.calls.map((c) => String(c[0])).find((l) => l.startsWith("[retry]"));
+      expect(notice).toContain("rate-limited by acme (429) on subagent call");
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("covers doGenerate too", async () => {
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const { model } = streamModel();
+      model.doGenerate = vi.fn().mockRejectedValueOnce(rateLimited(1)).mockResolvedValueOnce({ text: "ok" });
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      const wrapped = wrapModelWithGate(model as any, ctx);
+      await expect(wrapped.doGenerate({ prompt: [] })).resolves.toMatchObject({ text: "ok" });
+      expect(model.doGenerate).toHaveBeenCalledTimes(2);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("gives up with the actionable error once the budget is spent", async () => {
+    process.env.MUONROI_RATE_LIMIT_RETRY_BUDGET_MS = "25";
+    const stderr = vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+    try {
+      const inner = vi.fn().mockRejectedValue(rateLimited(15));
+      const { model } = streamModel(inner);
+      // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+      const wrapped = wrapModelWithGate(model as any, ctx);
+      const err = await wrapped.doStream({ prompt: [] }).catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ProviderRateLimitError);
+      expect((err as Error).message).toContain("shared by every muonroi agent");
+      expect(inner).toHaveBeenCalledTimes(2);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it("does not retry other errors, or when backpressure is not armed (mock models)", async () => {
+    const boom = new Error("boom");
+    const a = streamModel(vi.fn().mockRejectedValue(boom));
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    await expect(wrapModelWithGate(a.model as any, ctx).doStream({ prompt: [] })).rejects.toBe(boom);
+    expect(a.inner).toHaveBeenCalledTimes(1);
+
+    const limited = rateLimited(1);
+    const b = streamModel(vi.fn().mockRejectedValue(limited));
+    const unarmed = { ...ctx, providerBackpressure: false };
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    await expect(wrapModelWithGate(b.model as any, unarmed).doStream({ prompt: [] })).rejects.toBe(limited);
+    expect(b.inner).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays armed with the meter off — MUONROI_GATE=0 must not disarm the 429 backstop", () => {
+    process.env.MUONROI_GATE = "0";
+    const { model } = streamModel();
+    // biome-ignore lint/suspicious/noExplicitAny: test cast to a minimal model stub
+    expect(wrapModelWithGate(model as any, ctx)).not.toBe(model);
+  });
+});

@@ -107,7 +107,7 @@ describe("runPhases orchestrator (subsystem E)", () => {
     return {
       flowDir,
       runId,
-      manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
+      manifest: { idea: "X", maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
       clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
       projectContext: { context: {}, prefillSource: {}, version: 1 },
       leader: {
@@ -142,8 +142,6 @@ describe("runPhases orchestrator (subsystem E)", () => {
         }),
       },
       leaderModelId: "m1",
-      capUsd: 10,
-      remainingUsd: async () => 5,
       awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],
@@ -338,13 +336,11 @@ describe("resume protocol (subsystem E)", () => {
     return {
       flowDir,
       runId,
-      manifest: { idea: "X", capUsd: 10, maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
+      manifest: { idea: "X", maxSprints: 6, doneThreshold: 0.8, createdAt: new Date() },
       clarifiedSpec: { problemStatement: "p", constraints: [], successCriteria: ["A", "B"], scope: "s", rawQA: [] },
       projectContext: { context: {}, prefillSource: {}, version: 1 },
       leader: { generate: vi.fn().mockResolvedValue({ content: "fallback", costUsd: 0 }) },
       leaderModelId: "m1",
-      capUsd: 10,
-      remainingUsd: async () => 5,
       awaitCustomerVerdict: async (_args: unknown) => ({ verdict: "accept" as const }),
       suppressPush: true,
       backoffDelays: [1, 1, 1],

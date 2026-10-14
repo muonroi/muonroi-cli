@@ -1,6 +1,9 @@
 import { runPreflight } from "../council/preflight.js";
+import { logger } from "../utils/logger.js";
 import { blockingAssumptions, readLedger } from "./assumption-ledger.js";
+import { classifyCoverage, isVerifiedZeroCoverage } from "./coverage-signal.js";
 import { evidenceLooksValid } from "./reality-anchor.js";
+import { classifyTestCommands } from "./test-command-signal.js";
 import type { Criterion, DoneGateContext, DoneVerdict } from "./types.js";
 import { parseVerifyResult } from "./verify-result.js";
 
@@ -13,21 +16,124 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
   const score = calculateScore(ctx.criteria);
 
   // 1. Engineering floor
-  // floor = recipe !== null && testCommands.length > 0 && coverage > 0 && lastVerify === "PASS"
-  const hasTests = (ctx.recipe?.testCommands?.length ?? 0) > 0;
-  const hasCoverage = (ctx.recipe?.coverage ?? 0) > 0;
-  const verifyPassed = ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) === "PASS" : false;
+  // floor = recipe !== null && testCommands.length > 0 && coverage is not a
+  //         MEASURED zero && lastVerify === "PASS"
+  //
+  // The coverage term used to be `(ctx.recipe?.coverage ?? 0) > 0`, which read
+  // "nobody measured coverage" as "coverage is zero". Since the only producer of
+  // the number is a figure the verify sub-agent hand-writes into its recipe JSON
+  // (`normalizeVerifyRecipe`, src/verify/recipes.ts), that coercion made this
+  // condition unsatisfiable on every repo where the model does not emit one —
+  // including every .NET repo. Condition 1 short-circuits, so nothing below ever
+  // ran: run `muauw6u93e1c` recorded `verify: "PASS"`, a goal-gate `"aligned"`
+  // over 12,710 diff chars, and still `score: 0` / `reason: "zero_coverage"` on
+  // both sprints. `classifyCoverage` now names the three states apart and
+  // `circuit-breakers.ts` reads the SAME function, so the two cannot drift again.
+  //
+  // DIVERGENCE FROM CB-3, deliberate: this gate uses `isVerifiedZeroCoverage`, so
+  // only a zero the verify FLOOR actually measured can fail it. A model-asserted
+  // zero is treated exactly like "unmeasured" here. CB-3 uses the broader
+  // `isClaimedZeroCoverage` and still halts on an asserted zero. The classification
+  // is shared; the policy is not, because the consequences differ in VISIBILITY:
+  // this gate's consequence is a silent per-sprint score of 0 that repeats
+  // forever, so a hallucinated number must never be able to cause it; CB-3's is a
+  // loud sprint-1 halt with a recovery card the user can answer. What is still
+  // required either way: non-empty `testCommands` AND a PASS verdict — so "tests
+  // exist and passed" remains mandatory, and a suite that passes while genuinely
+  // covering nothing is caught downstream by criteria and evidence, loudly.
+  //
+  // The `hasTests` term used to be `(ctx.recipe?.testCommands?.length ?? 0) > 0`
+  // — read straight off the recipe the verify sub-agent returned, which is the
+  // ONE value `verify-floor.ts:21-29` refuses to take its own commands from
+  // ("a model that emitted `testCommands: []` would silently disarm its own
+  // gate"). So the floor defended itself and this gate was handed the undefended
+  // number. Measured, run muc2joffe506 (qa-platform, sprint 1): the floor RAN a
+  // test command in the same minute (`sprints/1-verify.md`:
+  // "- [test] `npm run test` → NO-TESTS-EXECUTED") and this gate still recorded
+  // `reason: "no_test_commands"`, because the stored recipe it read carried
+  // `testCommands: []`.
+  //
+  // It now reads through `classifyTestCommands`, the sibling of
+  // `classifyCoverage`: the disk-derived set the floor discovered is UNIONED into
+  // the recipe in sprint-runner before this gate sees it (the same place a
+  // MEASURED coverage figure overwrites an asserted one), and the field's meaning
+  // lives in exactly one module so it cannot drift again. Provenance plays no
+  // part in the DECISION here — a command is a command whoever named it, and the
+  // direction of travel is that the model can only ADD to what the disk already
+  // proves — it is recorded below so a floor that opened on a command the model
+  // never mentioned can be read back.
+  const testCommands = classifyTestCommands(ctx.recipe);
+  const hasTests = testCommands.state === "present";
+  const coverage = classifyCoverage(ctx.recipe);
+  const coverageIsZero = isVerifiedZeroCoverage(coverage);
+  // Prefer the caller's ALREADY-ADJUDICATED verdict over re-parsing the raw
+  // ToolResult. Re-parsing here sees only the verify sub-agent's narration, so
+  // it is blind to the deterministic verify floor that runs after it in
+  // sprint-runner — the floor could upgrade a sprint to PASS on real exit codes
+  // and this gate would still score `engineering_floor` off the same string.
+  // Falls back to the parse when no verdict was threaded, so legacy callers are
+  // unchanged.
+  const verifyVerdict = ctx.verifyVerdict ?? (ctx.lastVerify ? parseVerifyResult(ctx.lastVerify) : undefined);
+  const verifyPassed = verifyVerdict === "PASS";
 
-  const floorPassed = ctx.recipe !== null && hasTests && hasCoverage && verifyPassed;
+  const floorPassed = ctx.recipe !== null && hasTests && !coverageIsZero && verifyPassed;
 
   if (!floorPassed) {
     let reason = "unknown";
     if (!ctx.recipe) reason = "no_recipe";
     else if (!hasTests) reason = "no_test_commands";
-    else if (!hasCoverage) reason = "zero_coverage";
+    else if (coverageIsZero) reason = "zero_coverage";
     else if (!verifyPassed) reason = "verify_FAIL";
 
     return { pass: false, failedCondition: "engineering_floor", reason, score };
+  }
+
+  // The floor opened without a MEASUREMENT behind its coverage term. That is the
+  // correct outcome — an unmeasured suite is not an uncovered one — but a
+  // condition that passed for want of evidence must not look identical to one
+  // that passed on evidence, which is the same defect class this whole module
+  // keeps closing (see condition #6's catch below). Recorded, never blocking.
+  //
+  // The second branch is the one that would otherwise be invisible: a figure WAS
+  // present and this gate declined to act on a zero because nothing proved it was
+  // measured. Silently discarding a number is exactly how a gate stops being
+  // auditable, so it is named in the log with its provenance.
+  if (coverage.state === "unmeasured") {
+    logger.info("orchestrator", "[done-gate] engineering floor passed with NO coverage measurement", {
+      runId: ctx.runId,
+      ecosystem: ctx.recipe?.ecosystem,
+      testCommands: testCommands.state === "present" ? testCommands.commands.length : 0,
+      testCommandsSource: testCommands.state === "present" ? testCommands.source : null,
+    });
+  } else if (coverage.state === "measured" && coverage.value <= 0) {
+    logger.info(
+      "orchestrator",
+      `[done-gate] a ZERO coverage figure was present but its provenance is "${coverage.source}", not "measured" — not treated as a floor failure`,
+      {
+        runId: ctx.runId,
+        ecosystem: ctx.recipe?.ecosystem,
+        coverage: coverage.value,
+        coverageSource: coverage.source,
+      },
+    );
+  }
+
+  // The floor's `hasTests` term opened on commands the verify sub-agent never
+  // named — the disk's set alone carried it. That is the intended outcome (it is
+  // the whole point of unioning the derived set in), but it means the model's own
+  // recipe would have scored this sprint `no_test_commands`, and a gate that
+  // silently swaps the source it opened on stops being auditable. Named, never
+  // blocking — the same treatment as the coverage-provenance branches above.
+  if (testCommands.state === "present" && testCommands.source === "disk-derived") {
+    logger.info(
+      "orchestrator",
+      "[done-gate] engineering floor opened on DISK-DERIVED test commands — the verify sub-agent's own recipe declared none",
+      {
+        runId: ctx.runId,
+        ecosystem: ctx.recipe?.ecosystem,
+        testCommands: testCommands.commands,
+      },
+    );
   }
 
   // 2. Evidence regex
@@ -73,10 +179,20 @@ export async function evaluateDoneGate(ctx: DoneGateContext): Promise<DoneVerdic
           score,
         };
       }
-    } catch {
+    } catch (err) {
       // Ledger read failure is non-fatal — a missing/corrupt ledger should
       // not block ship that otherwise passes #1-#3. The user can still
       // catch via the customer debate or final approval gates.
+      //
+      // It must NOT be silent, though: swallowing this is the same defect
+      // class as dropping `reason` — a condition that never ran looks exactly
+      // like a condition that passed, and nothing anywhere records which.
+      logger.error("orchestrator", "[done-gate] assumption-ledger read failed — condition #6 skipped", {
+        runId: ctx.runId,
+        flowDir: ctx.flowDir,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
     }
   }
 

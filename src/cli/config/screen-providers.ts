@@ -1,11 +1,7 @@
-import { getModelByTier, getModelsForProvider } from "../../models/registry.js";
+import { getModelByTier, getTextModelsForProvider } from "../../models/registry.js";
+import { promptProviderCredentials, saveProviderCredentials } from "../../providers/credential-setup.js";
 import { PROVIDER_ENDPOINTS } from "../../providers/endpoints.js";
-import {
-  KEYCHAIN_PROVIDER_IDS,
-  listStoredProviders,
-  loadKeyForProvider,
-  setKeyForProvider,
-} from "../../providers/keychain.js";
+import { KEYCHAIN_PROVIDER_IDS, listStoredProviders, loadKeyForProvider } from "../../providers/keychain.js";
 import type { ProviderId } from "../../providers/types.js";
 import {
   getDefaultProvider,
@@ -68,7 +64,7 @@ function pickModelForProvider(id: ProviderId): string | null {
     const m = getModelByTier(tier, id);
     if (m && m.provider === id) return m.id;
   }
-  const fallback = getModelsForProvider(id);
+  const fallback = getTextModelsForProvider(id);
   return fallback[0]?.id ?? null;
 }
 
@@ -151,22 +147,21 @@ export async function runProviderScreen(): Promise<void> {
           continue;
         }
         restore();
-        const newKey = (await hiddenPrompt(`\nNew API key for ${row.id} (hidden): `)).trim();
-        enterRawMode();
-        if (!newKey) {
-          statusMsg = "Aborted (empty key)";
-          continue;
-        }
         try {
-          const ok = await setKeyForProvider(row.id, newKey);
-          if (!ok) {
-            statusMsg = "OS keychain unavailable — set env var instead";
+          const credentials = await promptProviderCredentials(row.id, hiddenPrompt);
+          if (!credentials) {
+            statusMsg = "Aborted (empty key)";
+          } else if (!(await saveProviderCredentials(row.id, credentials))) {
+            statusMsg = "Could not store credentials in the environment store";
           } else {
-            statusMsg = `Key updated for ${row.id}`;
+            statusMsg = `Credentials updated for ${row.id}`;
             rows = await loadRows();
           }
         } catch (e) {
+          console.error(`[config providers] ${row.id}: ${(e as Error).message}`);
           statusMsg = `Error: ${(e as Error).message}`;
+        } finally {
+          enterRawMode();
         }
         continue;
       }

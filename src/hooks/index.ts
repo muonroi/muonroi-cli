@@ -98,6 +98,20 @@ export async function executeEventHooks(
   _signal?: AbortSignal,
 ): Promise<AggregatedHookResult> {
   try {
+    if (input.hook_event_name === "SessionStart") {
+      // Real command execution for user-configured SessionStart hooks (see
+      // command-runner.ts's header comment — every other event branch below
+      // still only does EE dispatch; command hooks were never wired back in
+      // for non-EE events after src/hooks/executor.ts was deleted).
+      const { runCommandHooksForEvent } = await import("./command-runner.js");
+      const { additionalContexts, results } = await runCommandHooksForEvent(
+        "SessionStart",
+        input,
+        (input as import("./types.js").SessionStartHookInput).source,
+      );
+      return { ...emptyResult(), additionalContexts, results };
+    }
+
     if (input.hook_event_name === "PreToolUse") {
       const preInput = input as PreToolUseHookInput;
 
@@ -255,10 +269,13 @@ export async function executeEventHooks(
       // clears some entries), then stay silent until the set changes again.
       let recallReminder: string | null = null;
       try {
-        const { sessionRecallLedger, isRecallLedgerEnabled, formatPendingReminder } = await import(
-          "../ee/recall-ledger.js"
-        );
-        if (isRecallLedgerEnabled()) {
+        const { sessionRecallLedger, isRecallLedgerEnabled, isRecallNagSuppressed, formatPendingReminder } =
+          await import("../ee/recall-ledger.js");
+        // `isRecallNagSuppressed()` — the caller declared this turn's content
+        // stream MACHINE-READ (see recall-ledger.ts). additionalContexts are
+        // yielded as `content` chunks by the tool engine, so a nag built here
+        // lands inside whatever payload that stream is concatenated into.
+        if (isRecallLedgerEnabled() && !isRecallNagSuppressed()) {
           const pending = sessionRecallLedger.pending();
           if (pending.length > 0) {
             const pendingSha = pending

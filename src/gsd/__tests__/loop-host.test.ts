@@ -25,7 +25,7 @@ describe("GsdLoopHost", () => {
   });
 
   afterEach(() => {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("fires gsd-core loop render-hooks at plan:post", async () => {

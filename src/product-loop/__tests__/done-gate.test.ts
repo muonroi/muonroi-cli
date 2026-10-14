@@ -44,6 +44,31 @@ describe("evaluateDoneGate", () => {
     expect(verdict.score).toBe(1.0);
   });
 
+  // F2 — the gate used to re-derive the verdict by re-parsing `lastVerify`,
+  // which is the verify sub-agent's raw narration. That parse cannot see the
+  // deterministic verify floor, which runs AFTER it in sprint-runner, so a
+  // sprint the floor had upgraded on real exit codes still scored
+  // `engineering_floor` here and the upgrade was inert.
+  it("honours an ALREADY-ADJUDICATED verdict over re-parsing the raw narration", async () => {
+    ctx.lastVerify = { success: true, output: "narration with no verdict marker at all" } as ToolResult;
+
+    const withoutVerdict = await evaluateDoneGate({ ...ctx });
+    expect(withoutVerdict.failedCondition).toBe("engineering_floor");
+    expect(withoutVerdict.reason).toBe("verify_FAIL");
+
+    const withVerdict = await evaluateDoneGate({ ...ctx, verifyVerdict: "PASS" });
+    expect(withVerdict.pass).toBe(true);
+  });
+
+  it("an adjudicated non-PASS still fails the floor even when the narration says VERIFY_PASS", async () => {
+    // The downgrade direction: the floor contradicted a claimed PASS, and the
+    // gate must not read the claim back out of the same string.
+    const verdict = await evaluateDoneGate({ ...ctx, verifyVerdict: "FAIL" });
+    expect(verdict.pass).toBe(false);
+    expect(verdict.failedCondition).toBe("engineering_floor");
+    expect(verdict.reason).toBe("verify_FAIL");
+  });
+
   it("fails Cond #1: engineering_floor (no recipe)", async () => {
     ctx.recipe = null;
     const verdict = await evaluateDoneGate(ctx);
@@ -52,12 +77,28 @@ describe("evaluateDoneGate", () => {
     expect(verdict.reason).toBe("no_recipe");
   });
 
-  it("fails Cond #1: engineering_floor (zero coverage)", async () => {
-    if (ctx.recipe) ctx.recipe.coverage = 0;
+  it("fails Cond #1: engineering_floor (zero coverage) — only when the zero was MEASURED", async () => {
+    // A bare `coverage = 0` used to be enough. It is not any more: this gate now
+    // fails only on a zero the verify floor actually parsed from the project's own
+    // test output (`coverageSource: "measured"`). A number a model typed into a
+    // recipe field is not a measurement, and a silent per-sprint score of 0 that
+    // repeats forever is too invisible a consequence to hang on one.
+    // Definition: src/product-loop/coverage-signal.ts. CB-3 deliberately keeps the
+    // broader rule — see zero-coverage-floor.test.ts for the divergence table.
+    if (ctx.recipe) {
+      ctx.recipe.coverage = 0;
+      ctx.recipe.coverageSource = "measured";
+    }
     const verdict = await evaluateDoneGate(ctx);
     expect(verdict.pass).toBe(false);
     expect(verdict.failedCondition).toBe("engineering_floor");
     expect(verdict.reason).toBe("zero_coverage");
+  });
+
+  it("does NOT fail Cond #1 on an unprovenanced zero", async () => {
+    if (ctx.recipe) ctx.recipe.coverage = 0;
+    const verdict = await evaluateDoneGate(ctx);
+    expect(verdict.reason).not.toBe("zero_coverage");
   });
 
   it("fails Cond #1: engineering_floor (verify FAIL)", async () => {

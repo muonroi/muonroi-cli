@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +15,6 @@ vi.mock("../done-gate.js", () => ({
   evaluateDoneGate: vi.fn(),
 }));
 vi.mock("../circuit-breakers.js", () => ({
-  CB1_costProjection: vi.fn(() => ({ halt: false, projection: 0, headroom: 100 })),
   CB2_oscillation: vi.fn(() => ({ halt: false, delta_t: 0, delta_t_minus_1: 0 })),
   CB3_verifyBlank: vi.fn(() => ({ halt: false })),
 }));
@@ -37,31 +37,24 @@ vi.mock("../../usage/ledger.js", () => ({
   release: vi.fn(async () => undefined),
 }));
 vi.mock("../cost-scoper.js", () => ({
-  reserveForProduct: vi.fn(async () => ({
-    id: "tok",
-    model: "m",
-    provider: "p",
-    projected_usd: 0.1,
-    est_input_tokens: 100,
-    est_output_tokens: 100,
-    createdAtMs: Date.now(),
-  })),
+  recordProductSpend: vi.fn(async () => undefined),
 }));
 vi.mock("../../providers/runtime.js", () => ({
   detectProviderForModel: vi.fn(() => "anthropic"),
 }));
 
 import { runCouncil } from "../../council/index.js";
-import { release } from "../../usage/ledger.js";
-import { CapBreachError } from "../../usage/types.js";
+import { readSprintVerifyFix } from "../../flow/run-artifacts.js";
 import { runVerifyOrchestration } from "../../verify/orchestrator.js";
 import { appendIteration } from "../artifact-io.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
-import { reserveForProduct } from "../cost-scoper.js";
+import { CB2_oscillation, CB3_verifyBlank } from "../circuit-breakers.js";
+import { recordProductSpend } from "../cost-scoper.js";
 import { evaluateDoneGate } from "../done-gate.js";
 import { postSprintBoundary } from "../phase-tracker-bridge.js";
 import { runSprint } from "../sprint-runner.js";
 import type { IterationState, ProductSpec, RoleSlot } from "../types.js";
+import { verifyBaselinePath } from "../verify-baseline.js";
+import { captureVerifyFloorBaseline } from "../verify-floor.js";
 
 // Per-test isolated flow dir. sprint-runner does REAL filesystem persistence of
 // per-sprint plans (persistSprintPlan/readPersistedSprintPlan live in the module
@@ -130,13 +123,12 @@ beforeEach(() => {
   testFlowDir = mkdtempSync(join(tmpdir(), "sprint-runner-"));
 });
 afterEach(() => {
-  rmSync(testFlowDir, { recursive: true, force: true });
+  rmSync(testFlowDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("sprint-runner", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
@@ -220,7 +212,7 @@ describe("sprint-runner", () => {
       // Loop advanced past implementation into verification.
       expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
     } finally {
-      rmSync(realCwd, { recursive: true, force: true });
+      rmSync(realCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -269,18 +261,9 @@ describe("sprint-runner", () => {
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
 
-  // CB-1 is intentionally disabled in sprint-runner (see comment at "Step 1").
-  // Provider pricing gaps produced false halts; re-enable once cost
-  // normalisation is reliable.
-  it.skip("CB-1 trips when projected cost exceeds 1.5x remaining headroom", async () => {
-    (CB1_costProjection as any).mockReturnValue({ halt: true, projection: 50, headroom: 5 });
-    const ctx = makeCtx();
-    const { error } = await drain(
-      runSprint({ sprintN: 4, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
-    );
-    expect((error as Error).message).toContain("cost projection");
-    expect(runCouncil).not.toHaveBeenCalled();
-  });
+  // The skipped "CB-1 trips when projected cost exceeds 1.5x remaining headroom"
+  // test is gone: CB-1 was deleted, not just disabled, with `/ideal`'s spend cap
+  // (user decision: no limits), so there is nothing left to re-enable.
 
   it("CB-2 trips when last 2 deltas are non-positive at sprint >= 3", async () => {
     (CB2_oscillation as any).mockReturnValue({ halt: true, delta_t: -0.05, delta_t_minus_1: 0 });
@@ -336,7 +319,11 @@ describe("sprint-runner", () => {
     );
     expect(result!.stage).toBe("retrospective");
     expect(result!.lastVerifyResult).toBe("FAIL");
-    const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next focus"));
+    // The transcript line used to read `Next focus: ${fb.focus}`, which pasted
+    // the whole verify log into the transcript. It now carries the single derived
+    // action line (deriveNextAction — src/product-loop/next-action.ts), the SAME
+    // string written to state.md's `Next action`, so the two cannot disagree.
+    const continueChunk = chunks.find((c: any) => typeof c.content === "string" && c.content.includes("Next action:"));
     expect(continueChunk).toBeDefined();
     // Task #10: the not-done sprint returns a carry-over focus so the phase-runner
     // adapter can thread it into the next sprint (continue the risky/failing parts).
@@ -344,45 +331,93 @@ describe("sprint-runner", () => {
     expect(result!.nextFocus).toContain("fix verify failures");
   });
 
-  it("releases reservation when council generate throws (no leaked reservations)", async () => {
-    // Force the planner to call llm.generate which throws — ensure release is invoked.
-    (reserveForProduct as any).mockResolvedValue({
-      id: "tok",
-      model: "m",
-      provider: "p",
-      projected_usd: 0.1,
-      est_input_tokens: 1,
-      est_output_tokens: 1,
-      createdAtMs: Date.now(),
-    });
-    // Make council itself yield, then trigger an error on the implementation pass.
-    (runCouncil as any).mockImplementation(async function* () {
-      yield { type: "content", content: "planning" };
-      return "plan-text";
-    });
-    // Drive base llm.generate via product-llm wrapper inside the test indirectly:
-    // since council is mocked to NOT call llm, we simulate by directly invoking
-    // the sprint-runner happy path and then asserting release is NOT called when
-    // there is no failure. Then a separate path: cap breach.
-    const ctx = makeCtx();
-    const { result } = await drain(
-      runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
-    );
-    expect(result).toBeDefined();
-    // No error, so release should NOT have been called by the wrapper.
-    expect(release).not.toHaveBeenCalled();
+  it("S5 — a run-introduced build break the verify floor cannot excuse carries into nextFocus as a must-fix item", async () => {
+    // Real git repo + real `npm run build`, replaying the mu54vrme4c87 shape:
+    // a baseline captured DIRTY (an earlier run's leftover breakage) whose
+    // build was already red, then THIS run's own edit introduces a DIFFERENT
+    // build error on top of it. The old binary buildOk===false rule excused
+    // this unconditionally; it must not anymore.
+    const realCwd = mkdtempSync(join(tmpdir(), "sprint-s5-"));
+    try {
+      const git = (...args: string[]) => execFileSync("git", args, { cwd: realCwd, stdio: "ignore" });
+      const writeBuildCfg = (code: string, message: string) =>
+        writeFileSync(join(realCwd, "buildcfg.json"), JSON.stringify({ code, message }), "utf8");
+
+      writeFileSync(
+        join(realCwd, "package.json"),
+        JSON.stringify({
+          name: "s5-sprint-fixture",
+          version: "0.0.0",
+          private: true,
+          scripts: { build: "node build.js" },
+        }),
+        "utf8",
+      );
+      writeFileSync(
+        join(realCwd, "build.js"),
+        [
+          "const fs = require('fs');",
+          "const path = require('path');",
+          "const cfg = JSON.parse(fs.readFileSync(path.join(__dirname, 'buildcfg.json'), 'utf8'));",
+          "console.error('error ' + cfg.code + ': ' + cfg.message);",
+          "process.exit(1);",
+        ].join("\n"),
+        "utf8",
+      );
+      writeBuildCfg("CS0103", "legacy baseline issue in Legacy.cs");
+      writeFileSync(join(realCwd, "README.md"), "seed\n", "utf8");
+
+      git("init", "-q", "-b", "main");
+      git("config", "user.email", "s5@test.local");
+      git("config", "user.name", "S5 fixture");
+      git("config", "commit.gpgsign", "false");
+      git("add", "-A");
+      git("commit", "-q", "-m", "seed");
+
+      // Dirty an unrelated file BEFORE capturing the baseline, so the baseline
+      // is itself dirty (like mu54vrme4c87) — this run must not inherit its
+      // "not this run's doing" pass just because the tree was already dirty.
+      writeFileSync(join(realCwd, "README.md"), "seed\ndirty\n", "utf8");
+
+      const ctx = makeCtx({ cwd: realCwd });
+      await captureVerifyFloorBaseline({
+        cwd: realCwd,
+        runId: ctx.runId,
+        baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+      });
+
+      // This run's own edit: a NEW build error the baseline never saw, in a
+      // file (buildcfg.json) the baseline itself never recorded as dirty.
+      writeBuildCfg("NU1107", "Version conflict detected for Sample.CodeAnalysis in Directory.Packages.props");
+
+      (evaluateDoneGate as any).mockResolvedValue({
+        pass: false,
+        failedCondition: "engineering_floor",
+        score: 0,
+        reason: "verify_floor_FAIL",
+      });
+      // runVerifyOrchestration keeps the module-level PASS mock (beforeEach) so
+      // the deterministic floor actually runs and gets to decide the verdict.
+
+      const { result } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(result!.lastVerifyResult).toBe("FAIL");
+      expect(result!.nextFocus).toBeDefined();
+      expect(result!.nextFocus).toContain("Build gate");
+      expect(result!.nextFocus).toContain("this run introduced its own break");
+      expect(result!.nextFocus).toContain("Fix it before the next sprint can be verified.");
+    } finally {
+      rmSync(realCwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   });
 
-  it("propagates CapBreachError as readable Error from product-LLM wrapper", async () => {
-    // Trigger reserveForProduct to return a CapBreachError during the LLM call inside the
-    // wrapper. We invoke the wrapper indirectly by having runCouncil call ctx.llm.generate
-    // through the wrapper. The simplest way is to check that the cost-scoper signals
-    // breach correctly when invoked manually — covered already by cost-scoper tests.
-    // Here we just ensure that if reserveForProduct surfaces a breach, the wrapper rethrows.
-    (reserveForProduct as any).mockResolvedValue(new CapBreachError(40, 5, 10, 50));
-
-    // Simulate by importing the wrapper indirectly via runSprint: drive llm through
-    // a custom test by providing a council mock that calls llm.generate.
+  // Previously: "releases reservation when council generate throws" and "propagates
+  // CapBreachError as readable Error from product-LLM wrapper". `/ideal` has no
+  // spend cap (user decision): the wrapper reserves nothing and refuses nothing; it
+  // records the spend after each call returns.
+  it("the product-LLM wrapper meters every call and never refuses one on spend", async () => {
     (runCouncil as any).mockImplementation(async function* (
       _topic: string,
       _model: string,
@@ -390,24 +425,29 @@ describe("sprint-runner", () => {
       _sid: string,
       llm: any,
     ) {
-      // Invoke the wrapped llm — this should throw inside the wrapper.
       yield { type: "content", content: "planning" };
-      await llm.generate("m", "sys", "prompt");
-      return "unreachable";
+      const text = await llm.generate("m", "sys", "prompt");
+      return `plan: ${text}`;
     });
 
     const ctx = makeCtx();
-    const { error } = await drain(
+    const { error, result } = await drain(
       runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
     );
-    expect((error as Error).message).toMatch(/Cost cap breached/);
+    expect(error).toBeUndefined();
+    expect(result).toBeDefined();
+    expect(ctx.llm.generate).toHaveBeenCalled();
+    expect(recordProductSpend).toHaveBeenCalledWith(
+      expect.objectContaining({ provider: "anthropic", model: "m" }),
+      "run-123",
+      expect.objectContaining({ callsite: "sprint.generate" }),
+    );
   });
 });
 
 describe("sprint-runner phaseScope (subsystem E)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (runVerifyOrchestration as any).mockResolvedValue({
@@ -507,7 +547,6 @@ describe("sprint-runner phaseScope (subsystem E)", () => {
 describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    (CB1_costProjection as any).mockReturnValue({ halt: false, projection: 0, headroom: 100 });
     (CB2_oscillation as any).mockReturnValue({ halt: false, delta_t: 0, delta_t_minus_1: 0 });
     (CB3_verifyBlank as any).mockReturnValue({ halt: false });
     (evaluateDoneGate as any).mockResolvedValue({ pass: true, score: 1.0 });
@@ -586,5 +625,129 @@ describe("sprint-runner halt chunk forwarding (Task 5.1)", () => {
     expect((halt as any).haltChunk.recovery_options).toHaveLength(3);
     // Planner must NOT have been called.
     expect(runCouncil).not.toHaveBeenCalled();
+  });
+
+  describe("S4 — bounded verify-fix loop", () => {
+    it("fixes a FAIL to PASS before judgment sees it", async () => {
+      // Round 0 (Step 5's own first verify): the agent reports FAIL.
+      // Round 1 (the fix loop's re-verify, via the SAME runVerifyAndFloorPass
+      // routine): the agent reports PASS, after the fixer "ran".
+      // parseVerifyResult checks `tr.error` BEFORE any marker — a non-empty
+      // `error` always reads as ERROR, never FAIL. A genuine FAIL verdict
+      // carries the fail marker in `output` with `error` left empty.
+      (runVerifyOrchestration as any)
+        .mockResolvedValueOnce({
+          success: false,
+          output: "VERIFY_FAIL\n1 assertion failed",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        })
+        .mockResolvedValueOnce({
+          success: true,
+          output: "VERIFY_PASS\n",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        });
+      // ctx.runIsolatedTask is ALSO the bridge sprint-runner uses for the
+      // sprint's own implementation step, so it fires once for that before the
+      // fix loop ever runs — filter by description to isolate the fix round.
+      const isolatedCalls: string[] = [];
+      const runIsolatedTask = vi.fn(async (req: any) => {
+        isolatedCalls.push(req.description);
+        return { success: true, output: "applied the fix" };
+      });
+      const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model" });
+
+      const { result, error } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(error).toBeUndefined();
+      expect(result?.lastVerifyResult).toBe("PASS");
+      expect(runVerifyOrchestration).toHaveBeenCalledTimes(2);
+      expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(1);
+      // Judgment (evaluateDoneGate) must see the CORRECTED verdict, not the
+      // original FAIL.
+      expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "PASS" }));
+
+      const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+      expect(record?.enabled).toBe(true);
+      expect(record?.triggered).toBe(true);
+      expect(record?.stopReason).toBe("pass");
+      expect(record?.rounds).toHaveLength(1);
+    });
+
+    it("MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0 leaves a FAIL sprint byte-identical to today", async () => {
+      process.env.MUONROI_IDEAL_VERIFY_FIX_ROUNDS = "0";
+      try {
+        (runVerifyOrchestration as any).mockResolvedValueOnce({
+          success: false,
+          output: "VERIFY_FAIL\n1 assertion failed",
+          verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+        });
+        const isolatedCalls: string[] = [];
+        const runIsolatedTask = vi.fn(async (req: any) => {
+          isolatedCalls.push(req.description);
+          return { success: true, output: "applied the fix" };
+        });
+        const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model" });
+
+        const { result, error } = await drain(
+          runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+        );
+
+        expect(error).toBeUndefined();
+        // Exactly the pre-S4 behaviour: one verify call, no fix round
+        // dispatched, FAIL reaches judgment unchanged.
+        expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
+        expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(0);
+        expect(result?.lastVerifyResult).toBe("FAIL");
+        expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "FAIL" }));
+
+        const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+        expect(record?.enabled).toBe(false);
+        expect(record?.stopReason).toBe("disabled");
+        expect(record?.rounds).toEqual([]);
+      } finally {
+        delete process.env.MUONROI_IDEAL_VERIFY_FIX_ROUNDS;
+      }
+    });
+
+    it("ctx.abortSignal (the REAL production abort signal) stops the loop between the fixer and the re-verify, and the record is still written", async () => {
+      // Initial Step 5 verify: FAIL — triggers the fix loop.
+      (runVerifyOrchestration as any).mockResolvedValueOnce({
+        success: false,
+        output: "VERIFY_FAIL\n1 assertion failed",
+        verifyRecipe: { testCommands: ["npm test"], coverage: 80, shellInitCommands: [] },
+      });
+      const controller = new AbortController();
+      const isolatedCalls: string[] = [];
+      // The signal fires as a side effect of the fix round's own isolated call
+      // resolving — exactly "the user hit Escape while the fixer was running".
+      const runIsolatedTask = vi.fn(async (req: any) => {
+        isolatedCalls.push(req.description);
+        if (req.description.includes("verify-fix")) controller.abort();
+        return { success: true, output: "applied the fix" };
+      });
+      const ctx = makeCtx({ runIsolatedTask, sessionModelId: "fixer-model", abortSignal: controller.signal });
+
+      const { result, error } = await drain(
+        runSprint({ sprintN: 1, ctx, productSpec: makeSpec(), roleAssignments: NO_ROLES, history: [] }),
+      );
+
+      expect(error).toBeUndefined();
+      // Only the INITIAL verify ran — the abort landed before the re-verify,
+      // so no second runVerifyOrchestration call happened (no round 2 either).
+      expect(runVerifyOrchestration).toHaveBeenCalledTimes(1);
+      expect(isolatedCalls.filter((d) => d.includes("verify-fix"))).toHaveLength(1);
+      // The FAIL from before the fix round stands — nothing re-verified it.
+      expect(result?.lastVerifyResult).toBe("FAIL");
+      expect(evaluateDoneGate).toHaveBeenCalledWith(expect.objectContaining({ verifyVerdict: "FAIL" }));
+
+      const record = await readSprintVerifyFix(testFlowDir, ctx.runId, 1);
+      expect(record?.enabled).toBe(true);
+      expect(record?.triggered).toBe(true);
+      expect(record?.stopReason).toBe("aborted");
+      expect(record?.rounds).toHaveLength(1);
+      expect(record?.rounds[0]).toMatchObject({ round: 1, fixerRan: true, fixerSuccess: true });
+    });
   });
 });

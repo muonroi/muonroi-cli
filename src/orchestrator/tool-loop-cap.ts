@@ -20,7 +20,29 @@
  * without standing up a full streamText harness.
  */
 
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { hashToolArgs } from "./tool-args-hash.js";
+
+/**
+ * Step limits for one top-level turn.
+ *
+ * Normal chat keeps the soft cap (`maxToolRounds`, bumpable through the cap
+ * askcard) and the absolute hard cap (`hardMaxToolRounds`). Inside an `/ideal`
+ * run both are gone — the user's decision: `/ideal` has no limits. That turn
+ * instead ends when the model stops, when the pattern guard below fires, or when
+ * the no-progress guard (no-progress-guard.ts) sees consecutive steps that only
+ * repeat calls the loop already made with the same result.
+ */
+export function resolveTurnStepLimits(opts: { maxToolRounds: number; hardMaxToolRounds: number }): {
+  softCap: number;
+  hardCap: number;
+  stopOnNoProgress: boolean;
+} {
+  if (isIdealRunUnlimited()) {
+    return { softCap: Number.POSITIVE_INFINITY, hardCap: Number.POSITIVE_INFINITY, stopOnNoProgress: true };
+  }
+  return { softCap: opts.maxToolRounds, hardCap: opts.hardMaxToolRounds, stopOnNoProgress: false };
+}
 
 export type ToolLoopCapAskInfo =
   | { kind: "cap"; stepNumber: number; cap: number; bumpBy: number }

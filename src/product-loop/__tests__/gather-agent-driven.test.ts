@@ -112,7 +112,6 @@ describe("runGatherPhase — agent-driven interview wiring", () => {
       "/tmp/flow-agent-driven",
       "run-1",
       "Build a URL-shortener CLI",
-      50,
       fakeLlm,
       "session-model",
       { emit: (c) => emitted.push(c), respondToQuestion },
@@ -134,7 +133,7 @@ describe("runGatherPhase — agent-driven interview wiring", () => {
   it("falls back to the legacy path when no io is wired (pure-unit callers)", async () => {
     // Without emit+respondToQuestion the agent path is skipped — runClarification
     // must NOT be called (keeps context-free unit callers on the legacy engine).
-    await runGatherPhase("/tmp/flow-agent-driven-2", "run-2", "x", 50, fakeLlm, "session-model").catch(() => {
+    await runGatherPhase("/tmp/flow-agent-driven-2", "run-2", "x", fakeLlm, "session-model").catch(() => {
       // legacy path may throw further down without io — we only assert the guard.
     });
     expect(runClarification).not.toHaveBeenCalled();

@@ -15,10 +15,38 @@ import { redactor } from "../../utils/redactor.js";
 import type { OAuthTokens } from "./types.js";
 
 /**
- * Override for tests — set process.env.MUONROI_AUTH_DIR to point at a temp dir.
+ * Root of the muonroi home.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
+ * call, never as a module-level `const`, so the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
+ * records why a const cannot be redirected from a test).
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
+/**
+ * Directory holding `<provider>.json` token files.
+ *
+ * Two overrides, deliberately nested rather than parallel:
+ *
+ * - `MUONROI_AUTH_DIR` names this directory exactly and is the MORE SPECIFIC of
+ *   the two, so it wins outright. Tests use it because `vi.spyOn(os, "homedir")`
+ *   cannot patch a non-configurable ESM export (see
+ *   `__tests__/token-store.test.ts:14-15`), and a caller that has aimed the auth
+ *   dir somewhere on purpose must not have it overridden by a broader setting.
+ * - `MUONROI_CLI_HOME` moves the whole muonroi home, and this now sits under it.
+ *   Previously it did not: with `MUONROI_AUTH_DIR` unset, `saveTokens` joined
+ *   `os.homedir()` itself and wrote next to the user's genuine OAuth tokens in
+ *   the real `~/.muonroi-cli/auth/` even when the suite had pinned the home
+ *   elsewhere. A specific override beating a general one is sound; silently
+ *   ignoring the general one is not.
  */
 function fallbackDir(): string {
-  return process.env.MUONROI_AUTH_DIR ?? path.join(os.homedir(), ".muonroi-cli", "auth");
+  return process.env.MUONROI_AUTH_DIR ?? path.join(muonroiHome(), "auth");
 }
 
 function fallbackPath(provider: string): string {

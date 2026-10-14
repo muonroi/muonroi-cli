@@ -18,7 +18,7 @@ describe("mirrorRecallLocally", () => {
     logPath = join(dir, "activity.jsonl");
   });
   afterEach(() => {
-    rmSync(dir, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("appends an op:recall row with surfacedIds derived from entries", async () => {

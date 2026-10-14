@@ -89,6 +89,10 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
         providerOptions: undefined,
       }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -135,6 +139,10 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({}),
@@ -190,6 +198,10 @@ describe("CQ-03: research() MCP tool merge", () => {
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({ builtin_bash: {} }),
@@ -240,6 +252,10 @@ describe("CQ-03: research() MCP tool merge", () => {
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
+      // Mocked runtime carries no modelInfo, so the real helper would pass the
+      // caller number through unchanged (the reasoning-model widening in
+      // resolveMaxOutputTokens needs modelInfo.reasoning). Mirror that.
+      resolveMaxOutputTokensParam: vi.fn((_rt: unknown, n: number) => ({ maxOutputTokens: n })),
     }));
     vi.doMock("../../tools/registry.js", () => ({
       createBuiltinTools: vi.fn().mockReturnValue({ builtin_bash: {} }),

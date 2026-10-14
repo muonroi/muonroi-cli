@@ -13,7 +13,10 @@ import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { pickCouncilTaskModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
+import { beginRecallNagSuppression } from "../ee/recall-ledger.js";
+import { beginUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import { evaluateDoneGate } from "../product-loop/done-gate.js";
+import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "../product-loop/nested-turn.js";
 import type { Criterion } from "../product-loop/types.js";
 import type { StreamChunk } from "../types/index.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
@@ -168,9 +171,14 @@ export async function* runMaintenanceTask(
   let editError: string | null = null;
   const editPrompt = buildEditPrompt(task, designPlan);
   try {
-    const editGen = ctx.processMessageFn(editPrompt);
-    for await (const chunk of editGen) {
-      yield chunk as StreamChunk;
+    // The edit turn's `{type:"done"}` must not reach the `/ideal` stream (the TUI
+    // ends the run on it — see product-loop/nested-turn.ts). A turn that ended in
+    // failure (e.g. "Turn ended by watchdog: …") fails the edit stage instead of
+    // reporting a completed edit that never happened.
+    const editTurn = yield* forwardNestedTurn(ctx.processMessageFn(editPrompt));
+    if (editTurn.failure) {
+      editError = editTurn.failure;
+      console.error(`[task-runner] edit turn ended in failure (run ${ctx.runId}): ${editError}`);
     }
   } catch (e) {
     editError = e instanceof Error ? e.message : String(e);
@@ -468,14 +476,45 @@ function buildVerifyAgent(ctx: MaintenanceCtx, recipe: import("../types/index.js
     },
     detectVerifyRecipe: async () => recipe,
     runTaskRequest: async (req) => {
-      const gen = ctx.processMessageFn(req.prompt);
-      let output = "";
-      for await (const chunk of gen) {
-        if (chunk.type === "content" && typeof chunk.content === "string") {
-          output += chunk.content;
-        }
+      // Same machine-read boundary as the /ideal verify agent
+      // (`sprint-runner.buildVerifyAgent`): every `content` chunk — including
+      // the framework notices the tool engine yields from PreToolUse hooks — is
+      // concatenated into the payload `parseVerifyResult` reads via
+      // `evaluateDoneGate` below. Declaring the scope keeps the EE recall nag
+      // out of it at the emitter rather than filtering it back out here.
+      const releaseNagSuppression = beginRecallNagSuppression();
+      // Same no-human boundary as the /ideal verify agent, and for a sharper
+      // reason: this call site is a bare `runVerifyOrchestration(verifyAgent)`
+      // with NO watchdog (task-runner.ts:243), so an `ask_user` card opened here
+      // parks the maintain run indefinitely with nothing to cut it. Measured on
+      // the /ideal path, run `muc2joffe506`: the card was answered 10.5 hours
+      // after the stage asked. See orchestrator/unattended-turn.ts.
+      const releaseUnattended = beginUnattendedTurn();
+      let turn: CollectedNestedTurn;
+      try {
+        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt));
+      } finally {
+        releaseUnattended();
+        releaseNagSuppression();
       }
-      return { success: true, output } as import("../types/index.js").ToolResult;
+      // Same kill-vs-completion distinction as the /ideal verify agent: a turn
+      // ended by the watchdog (orchestrator.ts:3708-3709), a provider stall or a
+      // thrown provider error leaves a TRUNCATED payload. Returning it as
+      // `{success:true}` let `parseVerifyResult` clear the engineering floor off
+      // a partial narration that happened to contain `VERIFY_PASS`, so the judge
+      // blamed a later condition instead of the verify that never finished.
+      if (turn.failure) {
+        console.error(
+          `[task-runner] verify turn ended in failure (run ${ctx.runId}): ${turn.failure} ` +
+            `— payload truncated at ${turn.output.length} chars`,
+        );
+        return {
+          success: false,
+          output: turn.output,
+          error: `verify turn ended in failure: ${turn.failure}`,
+        } as import("../types/index.js").ToolResult;
+      }
+      return { success: true, output: turn.output } as import("../types/index.js").ToolResult;
     },
   };
 }

@@ -56,6 +56,7 @@ function scriptedDriver(events: LiveEvent[]): Driver {
     press_sequence: () => {},
     type: () => {},
     focus: () => {},
+    focus_verified: async () => ({ ok: false as const, reason: "not_focusable" as const, message: "stub" }),
     wait_for: async () => undefined,
     query: () => null,
     queryAll: () => [],

@@ -109,6 +109,72 @@ describe("buildStanceRows", () => {
     });
     expect(rows[0]!.stances).toEqual({ architect: null, skeptic: null, research: null });
   });
+
+  // R4a — the leader's `deferred` flag (settleable only by building, not
+  // arguing) was dropped on the floor here, so the undebated-criteria gate
+  // could not see it. These pin the carry-through and its conservative
+  // failure mode, mirroring alignCriteriaDeferred's drift-defaults-false rule.
+  describe("deferred (R4a)", () => {
+    it("carries deferred:true through from the matched criteriaStatus entry (index match)", () => {
+      const rows = buildStanceRows({
+        criteria: ["latency"],
+        criteriaStatus: status([{ criterion: "latency", met: false, evidence: "", stances: {}, deferred: true }]),
+        roster: ROSTER,
+      });
+      expect(rows[0]!.deferred).toBe(true);
+    });
+
+    it("carries deferred:true through a reordered (exact text match) entry", () => {
+      const rows = buildStanceRows({
+        criteria: ["latency", "contract"],
+        criteriaStatus: status([
+          { criterion: "contract", met: false, evidence: "", stances: {} },
+          { criterion: "latency", met: false, evidence: "", stances: {}, deferred: true },
+        ]),
+        roster: ROSTER,
+      });
+      expect(rows[0]!.criterion).toBe("latency");
+      expect(rows[0]!.deferred).toBe(true);
+      expect(rows[1]!.deferred).toBeFalsy();
+    });
+
+    it("is falsy when the matched entry omits deferred", () => {
+      const rows = buildStanceRows({
+        criteria: ["latency"],
+        criteriaStatus: status([{ criterion: "latency", met: false, evidence: "", stances: {} }]),
+        roster: ROSTER,
+      });
+      expect(rows[0]!.deferred).toBeFalsy();
+    });
+
+    it("is falsy when no entry exists for the criterion at all", () => {
+      const rows = buildStanceRows({
+        criteria: ["latency", "rollout cost"],
+        criteriaStatus: status([{ criterion: "latency", met: true, evidence: "", stances: {}, deferred: true }]),
+        roster: ROSTER,
+      });
+      expect(rows[1]!.deferred).toBeFalsy();
+    });
+
+    // Drift: the leader's payload at this index names a DIFFERENT criterion and
+    // no entry anywhere matches by text either. `met` still falls back to this
+    // mismatched entry (existing, unchanged behaviour) but `deferred` must NOT —
+    // mis-labelling a debatable criterion as deferred would silently retire it
+    // from the debate's goals (same rationale as alignCriteriaDeferred).
+    it("does not carry deferred through an unmatched (drifted) entry", () => {
+      const rows = buildStanceRows({
+        criteria: ["latency"],
+        criteriaStatus: status([
+          { criterion: "totally different criterion", met: true, evidence: "", stances: {}, deferred: true },
+        ]),
+        roster: ROSTER,
+      });
+      // Pin the existing drift behaviour for `met` stays unchanged...
+      expect(rows[0]!.met).toBe(true);
+      // ...while `deferred` degrades to falsy rather than being more permissive.
+      expect(rows[0]!.deferred).toBeFalsy();
+    });
+  });
 });
 
 describe("resolveRoleKey", () => {

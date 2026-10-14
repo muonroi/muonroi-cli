@@ -164,7 +164,7 @@ describe("runPlanExecution", () => {
   let cwd: string;
 
   afterEach(() => {
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("advances multiple phases in order, marking each done on disk", async () => {

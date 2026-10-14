@@ -44,12 +44,31 @@ describe("pickPostDebateRecommendation — issue #3 default", () => {
     expect(r.value).toBe("retry_synthesis");
   });
 
-  it("refine wins when the debate left sections empty", () => {
+  // DELIBERATELY CHANGED (session 115a59c9bb9e/49f6b8c1d8d6, this fix): this
+  // test used to assert `refine` here for an `implementation_plan` debate too.
+  // That was itself the recommendation half of the live defect — evidence
+  // (plan-phase.ts `runPlannerPhase`) shows the plan draft is built from the
+  // full synthesis TEXT + exchange transcript, never from `outcome.sections`,
+  // so an empty structured section cannot block "Start Implementation" for an
+  // implementation-shape debate. `refine` now wins on empty sections only for
+  // an analysis-shape kind, where the sections ARE the deliverable — see the
+  // next test.
+  it("implementation_plan with empty sections still recommends implement, not refine", () => {
     const r = pickPostDebateRecommendation({
       ...base,
       hasEmptySections: true,
       refinementTopics: ["Risks", "Trade-offs"],
       outputKind: "implementation_plan",
+    });
+    expect(r.value).toBe("implement");
+  });
+
+  it("an analysis-shape kind with empty sections still recommends refine (sections ARE the deliverable there)", () => {
+    const r = pickPostDebateRecommendation({
+      ...base,
+      hasEmptySections: true,
+      refinementTopics: ["Risks", "Trade-offs"],
+      outputKind: "evaluation",
     });
     expect(r.value).toBe("refine");
     expect(r.reason).toContain("2");
@@ -63,6 +82,81 @@ describe("pickPostDebateRecommendation — issue #3 default", () => {
   it("an existing plan always defaults to save_exit", () => {
     const r = pickPostDebateRecommendation({ ...base, hasPlan: true, outputKind: "implementation_plan" });
     expect(r.value).toBe("save_exit");
+  });
+});
+
+/**
+ * Session 115a59c9bb9e/49f6b8c1d8d6 — intent-aware recommendation.
+ *
+ * Live defect: the user's turn literally said "ok tiến hành implement theo
+ * plan kết hợp sub agent" (PIL classified taskType="generate",
+ * intentKind="task"), a 4-round debate ran, and the debate's own LOCKED
+ * `outputKind` still read as an analysis-shape kind (stale relative to this
+ * follow-up) — so `pickPostDebateRecommendation` recommended "refine" ("Fill
+ * in 9 section(s)...") despite the turn asking to build. `turnWantsImplementation`
+ * is the PIL-derived override that lets THIS turn's own intent win even when
+ * the debate's locked kind disagrees.
+ */
+describe("pickPostDebateRecommendation — turnWantsImplementation (PIL override)", () => {
+  const analysisBase = { ...base, outputKind: "evaluation" as const };
+
+  it("reproduces the live defect shape: 9 empty sections + implement-intent turn → implement, not refine/save_exit", () => {
+    const nineSections = [
+      "agreed_architecture",
+      "entities",
+      "endpoints",
+      "acceptance_criteria",
+      "tradeoffs",
+      "risks",
+      "actionItems",
+      "dissenting_notes",
+      "mvp_definition",
+    ];
+    const r = pickPostDebateRecommendation({
+      ...analysisBase,
+      hasEmptySections: true,
+      refinementTopics: nineSections,
+      turnWantsImplementation: true,
+    });
+    expect(r.value).toBe("implement");
+    expect(r.value).not.toBe("save_exit");
+    expect(r.value).not.toBe("refine");
+  });
+
+  it("an analysis-kind debate with NO implement-intent override still recommends save_exit (baseline unchanged)", () => {
+    const r = pickPostDebateRecommendation({ ...analysisBase });
+    expect(r.value).toBe("save_exit");
+  });
+
+  it("turnWantsImplementation alone (no empty sections) still flips an analysis-kind, no-plan debate to implement", () => {
+    const r = pickPostDebateRecommendation({ ...analysisBase, turnWantsImplementation: true });
+    expect(r.value).toBe("implement");
+  });
+
+  it("turnWantsImplementation does not override low confidence — a thin debate still asks a follow-up first", () => {
+    const r = pickPostDebateRecommendation({ ...analysisBase, confidenceLevel: "low", turnWantsImplementation: true });
+    expect(r.value).toBe("ask_followup");
+  });
+
+  it("turnWantsImplementation does not override unmet criteria", () => {
+    const r = pickPostDebateRecommendation({ ...analysisBase, criteriaUnmet: 1, turnWantsImplementation: true });
+    expect(r.value).toBe("ask_followup");
+  });
+
+  it("turnWantsImplementation is a no-op once a plan already exists (still save_exit)", () => {
+    const r = pickPostDebateRecommendation({ ...analysisBase, hasPlan: true, turnWantsImplementation: true });
+    expect(r.value).toBe("save_exit");
+  });
+
+  it("implementation-shape kind already implies implementation-leaning without needing the override", () => {
+    const r = pickPostDebateRecommendation({
+      ...base,
+      outputKind: "implementation_plan",
+      hasEmptySections: true,
+      refinementTopics: ["x"],
+      turnWantsImplementation: false,
+    });
+    expect(r.value).toBe("implement");
   });
 });
 

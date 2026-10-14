@@ -222,7 +222,7 @@ describe("C1 — no ungated implement turn after the gated phase loop", () => {
   afterEach(() => {
     if (prevEscalate === undefined) delete process.env.MUONROI_COUNCIL_ESCALATE;
     else process.env.MUONROI_COUNCIL_ESCALATE = prevEscalate;
-    if (cwd) rmSync(cwd, { recursive: true, force: true });
+    if (cwd) rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     vi.restoreAllMocks();
   });
 

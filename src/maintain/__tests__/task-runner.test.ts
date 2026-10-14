@@ -345,3 +345,69 @@ describe("runMaintenanceTask — edit failure", () => {
     expect(runVerifyOrchestration).not.toHaveBeenCalled();
   });
 });
+
+// The edit stage consumes a nested `processMessageFn` turn and forwards its
+// chunks into the `/ideal` stream (product-loop/index.ts `yield* runMaintenanceTask`).
+// A turn ends with `{type:"done"}` — normally (tool-engine.ts:4570) and when the
+// turn watchdog kills it (orchestrator.ts:3708-3709). The TUI ends its `/ideal`
+// for-await on the first `done` (use-app-logic.tsx:5277), so forwarding one tore
+// the maintenance run down mid-task — measured on the /ideal sprint path in run
+// mtwnfp8p3869.
+describe("runMaintenanceTask — nested edit turn terminator", () => {
+  const WATCHDOG_ERROR = {
+    type: "error",
+    content: "Turn ended by watchdog: assistant turn produced no output for 120s — treated as hung",
+    isAuthError: false,
+  } as const;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    (runVerifyOrchestration as ReturnType<typeof vi.fn>).mockResolvedValue({ success: true, output: "VERIFY_PASS" });
+    (evaluateDoneGate as ReturnType<typeof vi.fn>).mockResolvedValue({ pass: true, score: 0.95 });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("never forwards the edit turn's `done`, and a normal completion closes the edit stage `done`", async () => {
+    const input = makeInput({
+      processMessageFn: vi.fn(async function* () {
+        yield { type: "content", content: "applying fix..." } as const;
+        yield { type: "done" } as const;
+      }),
+    });
+    (input.ctx.llm.generate as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce("1. Fix redirect")
+      .mockResolvedValueOnce('{"ok": true, "concerns": []}');
+
+    const { chunks, result } = await drain(runMaintenanceTask(input));
+
+    expect(chunks.filter((c) => (c as { type: string }).type === "done")).toHaveLength(0);
+    const edit = chunks
+      .filter((c) => (c as { type: string }).type === "council_phase")
+      .map((c) => (c as unknown as { councilPhase: Record<string, unknown> }).councilPhase)
+      .filter((p) => p.phaseId === "maint-edit");
+    expect(edit.map((p) => p.state)).toEqual(["active", "done"]);
+    expect(result.status).toBe("done");
+  });
+
+  it("a watchdog-killed edit turn (error, done) forwards the error, not the `done`, and fails the edit stage", async () => {
+    const input = makeInput({
+      processMessageFn: vi.fn(async function* () {
+        yield { type: "content", content: "applying fix..." } as const;
+        yield WATCHDOG_ERROR;
+        yield { type: "done" } as const;
+      }),
+    });
+    (input.ctx.llm.generate as ReturnType<typeof vi.fn>).mockResolvedValue("1. Fix redirect");
+
+    const { chunks, result } = await drain(runMaintenanceTask(input));
+
+    expect(chunks.filter((c) => (c as { type: string }).type === "done")).toHaveLength(0);
+    expect(chunks.some((c) => (c as { content?: string }).content === WATCHDOG_ERROR.content)).toBe(true);
+    expect(result.status).toBe("failed");
+    expect(result.failureReason).toContain("Turn ended by watchdog");
+    expect(runVerifyOrchestration).not.toHaveBeenCalled();
+  });
+});

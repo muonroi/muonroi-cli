@@ -9,7 +9,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { markSprintDone, readSprintPlan, setActiveSprint, writeSprintPlan } from "../sprint-store.js";
+import { markSprintDone, readSprintPlan, setActiveSprint, upsertSprint, writeSprintPlan } from "../sprint-store.js";
 import type { Sprint, SprintPlan } from "../types.js";
 
 let tmpDir: string;
@@ -94,5 +94,67 @@ describe("sprint-store", () => {
     const read = await readSprintPlan(tmpDir, "test-run");
     expect(typeof read!.createdAtUtc).toBe("string");
     expect(typeof read!.sprints[0].goal).toBe("string");
+  });
+
+  describe("upsertSprint (S1)", () => {
+    it("creates sprint-plan.json from scratch when none exists", async () => {
+      const plan = await upsertSprint(tmpDir, "no-run", 1, { status: "active" });
+      expect(plan.sprints).toHaveLength(1);
+      expect(plan.sprints[0]).toMatchObject({ id: "sprint-1", number: 1, status: "active" });
+      expect(plan.activeSprintId).toBe("sprint-1");
+    });
+
+    it("appends a sprint number the initial plan never predicted, with an honest placeholder goal", async () => {
+      await writeSprintPlan(tmpDir, "test-run", makePlan()); // only sprint-1, sprint-2
+      const plan = await upsertSprint(tmpDir, "test-run", 3, { status: "active" });
+      expect(plan.sprints).toHaveLength(3);
+      const s3 = plan.sprints.find((s) => s.number === 3)!;
+      expect(s3.goal).toMatch(/not recorded/);
+    });
+
+    it("updates an existing entry in place instead of appending", async () => {
+      await writeSprintPlan(tmpDir, "test-run", makePlan());
+      const plan = await upsertSprint(tmpDir, "test-run", 1, {
+        status: "done",
+        endedAtUtc: "2026-01-01T00:00:00.000Z",
+      });
+      expect(plan.sprints).toHaveLength(2);
+      const s1 = plan.sprints.find((s) => s.number === 1)!;
+      expect(s1.status).toBe("done");
+      expect(s1.goal).toBe("Goal 1"); // untouched field preserved
+    });
+
+    it("re-running the same sprint number never creates a duplicate", async () => {
+      await upsertSprint(tmpDir, "test-run", 1, { status: "active" });
+      await upsertSprint(tmpDir, "test-run", 1, { status: "done" });
+      await upsertSprint(tmpDir, "test-run", 1, { status: "active" }); // retried
+      const plan = await readSprintPlan(tmpDir, "test-run");
+      expect(plan!.sprints.filter((s) => s.number === 1)).toHaveLength(1);
+    });
+
+    it("status=active flips a different sprint's active status to done", async () => {
+      await upsertSprint(tmpDir, "test-run", 1, { status: "active" });
+      const plan = await upsertSprint(tmpDir, "test-run", 2, { status: "active" });
+      const s1 = plan.sprints.find((s) => s.number === 1)!;
+      const s2 = plan.sprints.find((s) => s.number === 2)!;
+      expect(s1.status).toBe("done");
+      expect(s2.status).toBe("active");
+      expect(plan.activeSprintId).toBe("sprint-2");
+    });
+
+    it("a terminal status clears activeSprintId when it pointed at this sprint", async () => {
+      await upsertSprint(tmpDir, "test-run", 1, { status: "active" });
+      const plan = await upsertSprint(tmpDir, "test-run", 1, { status: "done" });
+      expect(plan.activeSprintId).toBeUndefined();
+    });
+
+    it("persists a verdict record", async () => {
+      const plan = await upsertSprint(tmpDir, "test-run", 1, {
+        status: "done",
+        verdict: { pass: false, failedCondition: "engineering_floor", reason: "verify_FAIL" },
+      });
+      const s1 = plan.sprints.find((s) => s.number === 1)!;
+      expect(s1.verdict).toEqual({ pass: false, failedCondition: "engineering_floor", reason: "verify_FAIL" });
+    });
   });
 });

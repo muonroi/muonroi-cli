@@ -82,6 +82,7 @@ export function PromptBox({
   showPlanQuestions,
   showApiKeyModal,
   blockPrompt,
+  modalOwnsKeyboard = false,
   onSubmit,
   onPaste,
   pasteBlocks: _pasteBlocks,
@@ -110,6 +111,18 @@ export function PromptBox({
   showPlanQuestions: boolean;
   showApiKeyModal: boolean;
   blockPrompt?: boolean;
+  /**
+   * True when an open modal card owns the keyboard (see src/ui/modal-focus.ts).
+   * Suppresses ONLY the semantic `focus` flag on the composer node — never the
+   * textarea's own `focused`, so rendering and input routing are untouched.
+   *
+   * Why the two must differ here: an askcard does not set `blockPrompt`, so the
+   * textarea keeps OpenTUI focus, yet `handleKey` intercepts the keypress and
+   * calls preventDefault before the card reduces it. Publishing focus on both
+   * would make `tui.query "focus"` match two nodes and THROW (driver.ts:
+   * "query: ambiguous"), which is a worse dead end than the null it replaced.
+   */
+  modalOwnsKeyboard?: boolean;
   onSubmit: () => void;
   onPaste: (event: PasteEvent) => void;
   pasteBlocks: { id: number; content: string; lines: number }[];
@@ -213,7 +226,9 @@ export function PromptBox({
               // even while the slash menu is technically still open — was
               // hiding the trailing space inserted by Tab autocomplete.
               value={inputRef.current?.plainText ?? composerValue ?? ""}
-              focused={composerFocused}
+              // Semantic mirror only — see `modalOwnsKeyboard` above. The
+              // textarea below keeps `composerFocused` unchanged.
+              focused={composerFocused && !modalOwnsKeyboard}
             >
               <textarea
                 ref={inputRef}

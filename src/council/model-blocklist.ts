@@ -112,6 +112,46 @@ export function formatBlockedModelWarning(info: BlockedModelInfo): string {
 }
 
 /**
+ * Drop every block whose record matches `pred`, across ALL scopes, and forget
+ * that the user was told about them. Returns how many were cleared.
+ *
+ * This exists for one measured reason: a block outlives the condition that
+ * caused it. Every entry here is an auth failure by construction — the only
+ * production caller of `blockModel` (`council/llm.ts:639`) is gated on
+ * `isNonRetryableAuthFailure`, i.e. 401/403 with the SDK's own
+ * `isRetryable === false`. So when the credentials for a provider change, the
+ * blocks recorded against that provider are answering a question that is no
+ * longer being asked.
+ *
+ * Observed 2026-09-09 in a real session: a wrong key blocked `step-3.5-flash`
+ * at 01:57, the user fixed the key at 01:59 (`[provider-warm] rebuilt stepfun
+ * factory after a credential change`), and at 02:05 the council still logged
+ * `reason: "blocked"` for that model and fell back. Only a CLI restart cleared
+ * it.
+ *
+ * The predicate is supplied by the caller rather than a `providerId` argument
+ * so this module stays free of any provider/registry import — the caller
+ * already owns that knowledge (see `providers/warm.ts`).
+ *
+ * ALL scopes are swept, not just one session: a credential change is global,
+ * while blocks are keyed per session, so a concurrent session holding a stale
+ * block would otherwise keep degrading after the key was fixed.
+ */
+export function clearAuthBlocksWhere(pred: (info: BlockedModelInfo) => boolean): number {
+  let cleared = 0;
+  for (const [key, scoped] of blocklists) {
+    for (const [modelId, info] of scoped) {
+      if (!pred(info)) continue;
+      scoped.delete(modelId);
+      notified.get(key)?.delete(modelId);
+      cleared++;
+    }
+    if (scoped.size === 0) blocklists.delete(key);
+  }
+  return cleared;
+}
+
+/**
  * Test/hygiene hook — drop a scope's blocklist entirely. Omit `sessionId` to
  * clear EVERY scope (used between tests so process-bucket state from one
  * test can't leak into the next).

@@ -323,6 +323,296 @@ function git(cwd: string, args: string[]): string {
   }
 }
 
+// ─── History/ref-writing subcommand detector (autoCommit-disabled gate) ────
+//
+// `analyzeGitCommand`'s isCommit/isPush are loose "does the word appear
+// somewhere in this clause" regexes over the QUOTE-STRIPPED command — good
+// enough for the push-gate/staging-warning features they drive, but
+// bypassable two ways a refuter found (round 2):
+//   1. `stripQuoted` blanks ANY quoted substring, so `sh -c "git commit -am x"`
+//      becomes `sh -c ""` before the regex ever runs — the whole invocation
+//      vanishes.
+//   2. They only recognize `commit`/`push`; `git merge`, `cherry-pick`,
+//      `rebase --continue`, `am`, `revert`, `commit-tree`, `update-ref`,
+//      `tag`, `pull`, and a user's own alias (`git ci` -> commit) all write
+//      history or refs just as much and were never classified at all.
+//
+// Round 3: string parsing of an arbitrary shell command line is an arms race
+// (a refuter kept finding new ways to say "git" without the literal token
+// `git`) — this detector is now a defense-in-depth EARLY warning, not the
+// sole guarantee; `git-effect-guard.ts` is the real backstop (it snapshots
+// refs and undoes any it did not expect, regardless of how the command spelled
+// "git"). This detector still matters for `push` specifically — a push
+// cannot be undone once the remote has it, so it must still be caught
+// BEFORE execution. Round-3 additions:
+//   3. `\git` (a literal backslash before the word, the standard way to
+//      bypass a shell alias/function of the same name) didn't match the bare
+//      token `git`.
+//   4. `git${IFS}commit` / `git$IFS commit` — `$IFS` is the shell's field
+//      separator variable; gluing it into a word with no literal whitespace
+//      still splits into two words at RUN time, but a naive whitespace split
+//      never saw two tokens.
+//   5. `-c alias.<x>=<v>` DEFINED on the same command line was never looked
+//      up — only a persisted `git config --get alias.<word>` was checked, so
+//      an inline, never-persisted alias definition sailed through.
+//   6. `echo commit | xargs git` — the actual subcommand comes from stdin at
+//      run time, invisible to any static scan; must be blocked
+//      conservatively UNLESS the command line itself already shows a
+//      concrete (and safe) subcommand right after `git` in that xargs
+//      invocation (`xargs git log` — "log" is fixed text, only the per-line
+//      argument comes from stdin).
+//   7. FALSE POSITIVE fix: `git tag` with no arguments, or only `-l`/
+//      `--list`/`-n`/`-v`, lists/inspects tags — it does not create one.
+//
+// This detector is deliberately separate from `analyzeGitCommand` (used only
+// by the autoCommit-disabled bash-tool gate, registry.ts) rather than a
+// patch to it, because it makes an opposite, INTENTIONALLY more paranoid
+// tradeoff: it scans the RAW command — quotes included — so a `git` token
+// hidden inside a `sh -c`/`bash -c`/`eval "..."` string argument is still
+// found (the same reason it can also flag an `echo "... git commit ..."` that
+// never actually invokes git; accepted, since this only fires when a project
+// has explicitly disabled auto-commit and a false block is recoverable — the
+// user can just ask again — while a silent bypass is not).
+//
+// Unlike the loose "word appears somewhere" regexes, the subcommand is found
+// by tokenizing and taking the FIRST non-flag token after `git` (skipping
+// global flags, including the two-token forms `-c <k>=<v>` / `-C <dir>`) —
+// this is what fixes the `git log --grep push` false positive structurally:
+// "push" two tokens later than the subcommand slot is never inspected.
+const GIT_GLOBAL_FLAGS_WITH_ARG = new Set(["-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path"]);
+
+/** Native subcommands common enough to skip an `alias.<word>` lookup for. */
+const KNOWN_GIT_SUBCOMMANDS = new Set([
+  "status",
+  "log",
+  "diff",
+  "show",
+  "blame",
+  "grep",
+  "rev-parse",
+  "for-each-ref",
+  "add",
+  "commit",
+  "push",
+  "pull",
+  "fetch",
+  "merge",
+  "rebase",
+  "cherry-pick",
+  "revert",
+  "tag",
+  "branch",
+  "checkout",
+  "restore",
+  "reset",
+  "stash",
+  "clone",
+  "init",
+  "config",
+  "remote",
+  "worktree",
+  "notes",
+  "am",
+  "commit-tree",
+  "update-ref",
+  "diff-tree",
+  "ls-files",
+  "cat-file",
+  "hash-object",
+  "symbolic-ref",
+  "describe",
+  "shortlog",
+  "reflog",
+  "gc",
+  "fsck",
+  "prune",
+  "submodule",
+  "apply",
+  "format-patch",
+  "send-email",
+  "request-pull",
+  "bisect",
+  "rerere",
+  "replace",
+  "filter-branch",
+  "mergetool",
+  "difftool",
+  "instaweb",
+  "archive",
+  "bundle",
+  "credential",
+  "help",
+  "version",
+]);
+
+/**
+ * History-writing (creates/rewrites a commit) or ref-writing (moves a branch/
+ * tag/notes ref) subcommands — blocked when a project disables auto-commit.
+ * `stash` is a deliberate judgement call: only its ref-writing forms
+ * (`push`/`store`, which write `refs/stash`) are blocked — `apply`/`pop`/
+ * `list`/`show`/`drop` never create a commit reachable from a branch, so they
+ * stay allowed. `notes` similarly only blocks its writing subcommands.
+ */
+const BLOCKED_SUBCOMMANDS = new Set([
+  "commit",
+  "merge",
+  "cherry-pick",
+  "rebase",
+  "am",
+  "revert",
+  "commit-tree",
+  "update-ref",
+  "tag",
+  "push",
+  "pull",
+]);
+const STASH_WRITE_SUBWORDS = new Set(["push", "store"]);
+const NOTES_WRITE_SUBWORDS = new Set(["add", "append", "edit", "remove", "merge", "prune", "copy"]);
+/** `git tag` with ONLY these (or no args at all) lists/inspects — read-only. */
+const TAG_READ_ONLY_ARG_RE = /^(-l|--list|-n\d*|-v)$/;
+const CLAUSE_BOUNDARY = new Set([";", "&", "|", "(", ")"]);
+
+function stripSurroundingQuotes(token: string): string {
+  return token.replace(/^["']+/, "").replace(/["']+$/, "");
+}
+
+/** A leading `\` (the standard way to invoke a name bypassing a shell alias/function of the same spelling). */
+function stripLeadingBackslash(token: string): string {
+  return token.replace(/^\\+/, "");
+}
+
+/** `${IFS}` / `$IFS` glued onto a word still splits it into two words at run time. */
+function normalizeIFS(command: string): string {
+  return command.replace(/\$\{IFS\}|\$IFS\b/g, " ");
+}
+
+/**
+ * Split `command` into shell-metacharacter-aware tokens for the SOLE purpose
+ * of finding `git` occurrences and the token that follows — not a full shell
+ * parser. `;`, `&`, `|`, `(`, `)` are forced apart from adjacent words first
+ * (so `git commit;git push` tokenizes as two clauses) before a plain
+ * whitespace split.
+ */
+function tokenizeForGitScan(command: string): string[] {
+  return normalizeIFS(command)
+    .replace(/([;&|()])/g, " $1 ")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map(stripSurroundingQuotes)
+    .map(stripLeadingBackslash)
+    .filter(Boolean);
+}
+
+/**
+ * Inline `-c alias.<name>=<value>` definitions on THIS command line — a
+ * one-shot alias that never touches persisted config, so `git config --get
+ * alias.<name>` (looked up against the repo) would never see it.
+ */
+function extractInlineAliases(command: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re = /-c\s+alias\.([a-zA-Z0-9_-]+)=(?:"([^"]*)"|'([^']*)'|(\S+))/g;
+  let m: RegExpExecArray | null = re.exec(command);
+  while (m) {
+    const name = m[1].toLowerCase();
+    const value = (m[2] ?? m[3] ?? m[4] ?? "").trim();
+    if (value) map.set(name, value);
+    m = re.exec(command);
+  }
+  return map;
+}
+
+/** [start, end) token-index range of the clause containing `idx` (bounded by `;`/`&`/`|`/`(`/`)`). */
+function clauseRange(tokens: string[], idx: number): [number, number] {
+  let start = idx;
+  while (start > 0 && !CLAUSE_BOUNDARY.has(tokens[start - 1])) start--;
+  let end = idx;
+  while (end < tokens.length && !CLAUSE_BOUNDARY.has(tokens[end])) end++;
+  return [start, end];
+}
+
+export interface BlockedGitSubcommandResult {
+  blocked: boolean;
+  /** The subcommand that triggered the block (post-alias-resolution). */
+  subcommand?: string;
+  /** Set when `subcommand` was reached by resolving a user git alias. */
+  viaAlias?: string;
+}
+
+/**
+ * True when `command` contains (anywhere, including inside quoted
+ * `sh -c`/`bash -c`/`eval` strings) a `git` invocation whose subcommand
+ * writes history or a ref — directly, or through a user-defined alias
+ * (an inline `-c alias.<word>=...` on this line, or a persisted
+ * `git config --get alias.<word>`, resolved one level deep). See the module
+ * comment above `GIT_GLOBAL_FLAGS_WITH_ARG` for the full rationale.
+ */
+export function detectBlockedGitSubcommand(command: string, cwd: string): BlockedGitSubcommandResult {
+  const tokens = tokenizeForGitScan(command);
+  const inlineAliases = extractInlineAliases(command);
+
+  for (let i = 0; i < tokens.length; i++) {
+    if (tokens[i] !== "git") continue;
+    const [clauseStart, clauseEnd] = clauseRange(tokens, i);
+
+    let j = i + 1;
+    while (j < clauseEnd && (GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) || tokens[j].startsWith("-"))) {
+      j += GIT_GLOBAL_FLAGS_WITH_ARG.has(tokens[j]) ? 2 : 1;
+    }
+
+    if (j >= clauseEnd) {
+      // No subcommand token visible on the line for THIS `git` occurrence.
+      // If it is being fed by `xargs` in the same clause, the real
+      // subcommand comes from stdin at run time and cannot be inspected
+      // statically — block conservatively.
+      if (tokens.slice(clauseStart, i).includes("xargs")) {
+        return { blocked: true, subcommand: "xargs-piped(unknown subcommand from stdin)" };
+      }
+      continue;
+    }
+
+    const rawSub = tokens[j];
+    const [word] = rawSub.split(/(?=[^a-z0-9-])/i); // split off a trailing punctuation blob, if any
+    const candidate = (word ?? rawSub).toLowerCase();
+
+    if (candidate === "stash") {
+      const next = tokens[j + 1]?.toLowerCase();
+      if (next && STASH_WRITE_SUBWORDS.has(next)) return { blocked: true, subcommand: `stash ${next}` };
+      continue;
+    }
+    if (candidate === "notes") {
+      const next = tokens[j + 1]?.toLowerCase();
+      if (next && NOTES_WRITE_SUBWORDS.has(next)) return { blocked: true, subcommand: `notes ${next}` };
+      continue;
+    }
+    if (candidate === "tag") {
+      const tagArgs = tokens.slice(j + 1, clauseEnd);
+      // Read-only: no args at all, OR every arg is one of -l/--list/-n[num]/-v,
+      // OR is the operand immediately following -l/--list/-v (a list pattern
+      // or the tag being verified — neither creates/moves a ref).
+      const isReadOnly =
+        tagArgs.length === 0 ||
+        tagArgs.every(
+          (a, idx) => TAG_READ_ONLY_ARG_RE.test(a) || (idx > 0 && /^(-l|--list|-v)$/.test(tagArgs[idx - 1] ?? "")),
+        );
+      if (isReadOnly) continue;
+      return { blocked: true, subcommand: "tag" };
+    }
+
+    if (BLOCKED_SUBCOMMANDS.has(candidate)) return { blocked: true, subcommand: candidate };
+
+    if (!KNOWN_GIT_SUBCOMMANDS.has(candidate) && /^[a-z][a-z0-9-]*$/.test(candidate)) {
+      const aliasValue = inlineAliases.get(candidate) ?? git(cwd, ["config", "--get", `alias.${candidate}`]);
+      if (aliasValue) {
+        const aliasTarget = tokenizeForGitScan(aliasValue)[0]?.toLowerCase();
+        if (aliasTarget && BLOCKED_SUBCOMMANDS.has(aliasTarget)) {
+          return { blocked: true, subcommand: aliasTarget, viaAlias: candidate };
+        }
+      }
+    }
+  }
+  return { blocked: false };
+}
+
 /** Working-tree paths that a destructive command would discard (best-effort). */
 function atRiskPaths(cwd: string, untrackedRisk: boolean): string[] {
   // NOTE: read raw stdout — do NOT trim the whole output. Porcelain v1 lines

@@ -163,7 +163,7 @@ describe("detectProjectLanguages", () => {
   let dir: string;
 
   afterEach(() => {
-    if (dir) rmSync(dir, { recursive: true, force: true });
+    if (dir) rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("detects languages by file extension and root marker (canonical order)", async () => {

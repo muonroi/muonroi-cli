@@ -16,6 +16,7 @@ export function ApiKeyModal({
   inputRef,
   error,
   onSubmit,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -23,6 +24,12 @@ export function ApiKeyModal({
   inputRef: React.RefObject<TextareaRenderable | null>;
   error: string | null;
   onSubmit: () => void;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(68, width - 6);
@@ -30,7 +37,7 @@ export function ApiKeyModal({
   const top = bottomAlignedModalTop(height, panelHeight);
 
   return (
-    <Semantic id="api-key-modal" role="dialog" name="API Key" isModal>
+    <Semantic id="api-key-modal" role="dialog" name="API Key" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

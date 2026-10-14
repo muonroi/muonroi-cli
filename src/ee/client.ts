@@ -25,6 +25,7 @@ import type {
   PromptStaleRequest,
   PromptStaleResponse,
   RouteFeedbackPayload,
+  RouteHistoryResponse,
   RouteModelRequest,
   RouteModelResponse,
   RouteTaskRequest,
@@ -623,6 +624,21 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       }
     },
 
+    async routeHistory(task: string, timeoutMs = 1500): Promise<RouteHistoryResponse | null> {
+      try {
+        const resp = await f(`${baseUrl}/api/route-history`, {
+          method: "POST",
+          headers: headers(),
+          body: JSON.stringify(redactPayload({ task })),
+          signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (!resp.ok) return null;
+        return (await resp.json()) as RouteHistoryResponse;
+      } catch {
+        return null;
+      }
+    },
+
     // ─── Semantic search ────────────────────────────────────────────────────
     async search(
       query: string,
@@ -760,6 +776,7 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
         locale_hint: options.localeHint,
         project_ctx: options.projectCtx,
         budget_ms: options.budgetMs,
+        ...(options.intent ? { intent_kind: options.intent.kind, task_type: options.intent.taskType } : {}),
       };
       const timeoutMs = options.budgetMs ?? 1500;
       const signal = options.signal ?? AbortSignal.timeout(timeoutMs + 150);

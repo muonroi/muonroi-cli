@@ -29,8 +29,11 @@
 
 import { appendFileSync } from "node:fs";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
+import { isGsdHardGateEnabled } from "../gsd/flags.js";
+import { evaluateMutationGate } from "../gsd/mutation-gate.js";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { normalizeModelId } from "../models/registry.js";
 import {
@@ -63,10 +66,12 @@ import { logInteraction } from "../storage/interaction-log.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
 import type { AgentMode, TaskRequest, ToolResult, VerifyRecipe } from "../types/index";
-import { logger } from "../utils/logger.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import {
   getCurrentShellSettings,
+  getFirstTokenTimeoutMs,
   getProviderProgressTimeoutMs,
   getProviderStallTimeoutMs,
   getSubAgentBudgetChars,
@@ -82,6 +87,7 @@ import { asNumber } from "./batch-utils";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
+import { createNoProgressStopWhen } from "./no-progress-guard.js";
 import {
   applyModelConstraints,
   buildSubagentPrompt,
@@ -104,12 +110,19 @@ import {
   shouldInjectSoftWarn,
 } from "./scope-reminder.js";
 import { recordCompaction, recordElision } from "./session-experience.js";
-import { createStallWatchdog, STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import {
+  buildToolFailureLoopMessage,
+  createStallWatchdog,
+  createToolFailureLoopDetector,
+  STALL_ERROR_MESSAGE,
+  TOOL_FAILURE_LOOP_ABORT_REASON,
+} from "./stall-watchdog.js";
+import { noteElidedForCap, type SubAgentCapState, wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 
 /**
  * Dependency callbacks the StreamRunner needs to reach back into Agent state
@@ -170,6 +183,9 @@ export interface StreamRunnerDeps {
     childTools: ToolSet;
     maxSteps: number;
     initialDetail: string;
+    /** Cap dedup ledger for this invocation — the batch loop compacts too, and
+     *  a pointer whose payload that compaction elided is a dead pointer. */
+    subAgentCapState: SubAgentCapState;
     onActivity?: (detail: string) => void;
     signal?: AbortSignal;
   }): Promise<ToolResult>;
@@ -199,6 +215,13 @@ export interface PreparedSubAgentCall {
   lastActivity: string;
   maxSteps: number;
   closeMcp?: () => Promise<void>;
+  /**
+   * The cumulative cap's own dedup ledger for this invocation. runStream needs
+   * it so the B3 compactor can invalidate pointers whose payload it just elided
+   * — the cap mints `[dup of call #N …]` pointers and cannot otherwise learn
+   * that prepareStep removed the anchor from the model's view.
+   */
+  subAgentCapState: SubAgentCapState;
   /** True when caller should short-circuit to runTaskRequestBatch. */
   useBatchApi: boolean;
 }
@@ -244,6 +267,25 @@ export function writeSubagentDebug(enabled: boolean, line: string): void {
       `[subagent] debug-log append failed (path=${path}): ${err instanceof Error ? err.message : String(err)}\n${text}`,
     );
   }
+}
+
+/**
+ * Round 2 fix (G1-adjacent MEDIUM): the sub-agent `prepareStep` callback used
+ * to fold mid-conversation system messages ONLY when
+ * `childRuntime.modelId.startsWith("claude")` — a non-Claude sub-agent child
+ * got them raw. The main tool-engine.ts path (see its own
+ * `foldMidConversationSystemMessages` call, right before
+ * `applyAnthropicPromptCaching`) already applies the fold unconditionally,
+ * for every provider, and only lets the CACHING half self-gate on the model
+ * id (`applyAnthropicPromptCaching` already returns its input untouched for
+ * a non-Claude model — see its own `if (!modelId.startsWith("claude")) return
+ * messages` guard in subagent-compactor.ts). Extracted here (mirroring the
+ * pattern already used for `selectRawToolSet` in tool-engine.ts) so the
+ * composition is directly unit-testable without mocking the whole streaming
+ * call. Exported for the test.
+ */
+export function prepareSubAgentPromptMessages(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
+  return applyAnthropicPromptCaching(foldMidConversationSystemMessages(messages), modelId);
 }
 
 /**
@@ -356,6 +398,20 @@ export class StreamRunner {
       modelId: childModelId,
       sessionId: this.deps.getSessionId(),
     });
+    // Explore mode still has a shell. Research cannot use it to route around
+    // the originating main session's locked plan gate (ea7378aab8f8).
+    const shellTool = childBaseToolsRaw.bash;
+    if (isExplore && shellTool?.execute) {
+      const executeShell = shellTool.execute;
+      shellTool.execute = async (input, context) => {
+        const gate = evaluateMutationGate(topBash.getCwd(), {
+          toolName: "bash",
+          hardGateEnabled: isGsdHardGateEnabled(),
+        });
+        if (gate.blocked) return gate.reason;
+        return executeShell(input, context);
+      };
+    }
     // Wrap with the cumulative cap so the sub-agent's tool loop cannot
     // accumulate unbounded tool_result tokens. See sub-agent-cap.ts for the
     // tiered compression schedule. The cap is per-invocation; each sub-agent
@@ -499,7 +555,11 @@ export class StreamRunner {
     const childMessages: ModelMessage[] = [{ role: "user", content: childPrompt }];
 
     // The main agent manages its sub-agents, so don't apply an arbitrary hard limit.
-    const maxSteps = request.maxToolRounds ?? this.deps.getMaxToolRounds() * 2;
+    // Inside an `/ideal` run there is no step count at all (user decision: no
+    // limits) — not even one a request asks for. That loop ends on the model's own
+    // stop, the no-progress guard (see runStream), or the hang watchdogs.
+    const unlimited = isIdealRunUnlimited();
+    const maxSteps = unlimited ? Number.POSITIVE_INFINITY : (request.maxToolRounds ?? this.deps.getMaxToolRounds() * 2);
 
     // F1 parity — derive per-turn providerOptions so the sub-agent OpenAI calls
     // carry a stable session-derived promptCacheKey (every tool round routes to
@@ -529,6 +589,7 @@ export class StreamRunner {
         lastActivity,
         maxSteps,
         closeMcp,
+        subAgentCapState: subAgentCap.state,
         useBatchApi: this.deps.isBatchApiEnabled(),
       },
     };
@@ -543,7 +604,16 @@ export class StreamRunner {
     prepared: PreparedSubAgentCall,
     onActivity?: (detail: string) => void,
     signal?: AbortSignal,
-  ): Promise<{ output: string; lastActivity: string; cancelled: boolean; assistantText: string; stalled?: boolean }> {
+    progress?: { text: string; toolCalls: number },
+  ): Promise<{
+    output: string;
+    lastActivity: string;
+    cancelled: boolean;
+    assistantText: string;
+    stalled?: boolean;
+    /** Set when the failing-tool-loop guard terminated the turn; carries the reason. */
+    failureLoop?: string;
+  }> {
     const { childRuntime, childSystem, childMessages, childTools, maxSteps } = prepared;
     // F1 — per-turn options (with promptCacheKey) built in setup(); falls back
     // to resolve-time options when no provider/session was available.
@@ -582,7 +652,7 @@ export class StreamRunner {
     // Phase B3: compact older tool_results out of the running message history
     // before each AI SDK step. First step (stepNumber === 0) has no history
     // worth compacting; later steps are where cumulative input balloons.
-    const compactThreshold = getSubAgentCompactThresholdChars();
+    const compactThreshold = getSubAgentCompactThresholdChars(childRuntime.modelInfo?.contextWindow ?? 0);
     const compactKeepLast = getSubAgentCompactKeepLast();
     // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
     this.deps.setLastProviderOptionsShape(extractProviderOptionsShape(childProviderOptions));
@@ -613,9 +683,20 @@ export class StreamRunner {
     // vấn đề gì sẽ có main agent (khi spawn) kiểm soát đừng hard"
     const _subCeiling = isExplore ? resolveCeiling("analyze", "large") : resolveCeiling("general", "medium");
     const _subCounterKey = `subagent:${subCallId}`;
+    // `maxSteps` is Infinity only inside an `/ideal` run (see setup). A loop with no
+    // step count must still end when it is going nowhere: stop after consecutive
+    // steps that only repeat calls it already made with the same result.
+    const _subNoProgress = Number.isFinite(maxSteps) ? null : createNoProgressStopWhen();
     const _subStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
       incSessionStep(_subCounterKey); // Keep telemetry counter ticking
       if (state.steps.length >= maxSteps) return true;
+      if (_subNoProgress?.(state)) {
+        console.error(
+          `[stream-runner] sub-agent stopped: consecutive steps only repeated earlier calls with identical results ` +
+            `(no progress) after ${state.steps.length} steps model=${childRuntime.modelId}`,
+        );
+        return true;
+      }
       return false;
     }) as unknown as Parameters<typeof streamText>[0]["stopWhen"];
 
@@ -654,6 +735,56 @@ export class StreamRunner {
         },
       },
     );
+    // Round 6 (G8 HIGH B): the top-level turn watchdog cannot see ANY of this
+    // sub-agent's own chunks — its whole run happens inside ONE `task` tool
+    // call from the parent turn's perspective (turn-watchdog.ts's own header
+    // comment names exactly this class of gap: "WEDGES inside a tool call...
+    // a `task` sub-agent"). Unlike the main model call (tool-engine.ts),
+    // where the parent's watchdog resumes seeing real progress the instant
+    // streaming starts (each chunk is yielded up), a sub-agent's chunks are
+    // never yielded to the parent's generator at all — so liveness must be
+    // pinged on the parent's behalf for the sub-agent's WHOLE run, not just
+    // its first-byte wait. `stall.pet()` (below, called on every chunk in the
+    // `for await` drain loop) is wrapped to ping unconditionally on EVERY
+    // call, not just the first — that is the difference from tool-engine.ts's
+    // wrapper. The bounded pre-first-byte pinger still applies its own
+    // ceiling (`getFirstTokenTimeoutMs()`) for the wait before that first
+    // chunk arrives.
+    const stopFirstTokenPing = startPeriodicTurnProgressPing({
+      maxMs: getFirstTokenTimeoutMs(),
+      onCeiling: () => {
+        breadcrumb("pre-stream.subAgentStream.firstTokenCeiling", {
+          sessionId: this.deps.getSessionId(),
+          model: childRuntime.modelId,
+          maxMs: getFirstTokenTimeoutMs(),
+        });
+      },
+    });
+    const _origStallPet = stall.pet.bind(stall);
+    const _origStallDispose = stall.dispose.bind(stall);
+    (stall as { pet: () => void }).pet = () => {
+      stopFirstTokenPing(); // no-op after the first call — see doc comment above
+      pingTurnProgress(); // keep pinging on EVERY chunk for the sub-agent's whole run
+      _origStallPet();
+    };
+    (stall as { dispose: () => void }).dispose = () => {
+      stopFirstTokenPing();
+      _origStallDispose();
+    };
+    // N3 — usefulness guard. Both timers above are re-armed by EMISSION: `pet()`
+    // by any chunk, `petProgress()` by a text-delta or a tool-call. A sub-agent
+    // that emits a failing tool call every few seconds therefore keeps both
+    // alive indefinitely (measured: 176 steps / 1116s / ~7.45M input tokens,
+    // max inter-step gap 30.5s — no time threshold could separate it from a
+    // healthy run whose max gap is 30.2s). The discriminator is the RESULT:
+    // N consecutive same-class tool failures with no successful tool result in
+    // between means the turn is producing nothing. Aborts the same stream via
+    // its own controller so the in-flight provider request is actually
+    // cancelled, not merely un-awaited.
+    const failureLoopDetector = createToolFailureLoopDetector();
+    const failureLoopController = new AbortController();
+    let failureLoopMessage: string | null = null;
+
     // Per-step cache instrumentation: the aggregate `task` usage event only
     // reports one cache-hit % for the whole sub-agent run, so an 8% aggregate
     // can't be attributed to a step (is the growing prefix uncacheable, or does
@@ -671,7 +802,7 @@ export class StreamRunner {
       tools: !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
       stopWhen: _subStopWhen ?? stepCountIs(maxSteps),
       maxRetries: 0,
-      abortSignal: combineAbortSignals(signal, stall.signal),
+      abortSignal: combineAbortSignals(signal, stall.signal, failureLoopController.signal),
       // Repair malformed tool-call JSON args — same wiring as the top-level
       // loop in message-processor.ts. Without this, sub-agents on models
       // with broken tool-arg emission (Qwen3-30B-Instruct observed) loop on
@@ -747,6 +878,12 @@ export class StreamRunner {
           keepToolIds: subKeepToolIds.length ? subKeepToolIds : undefined,
           persistArtifact: persistSubArtifact,
           stripOldReasoning: isReasoningModel,
+          // Keep both dedup ledgers honest: anything elided here left the
+          // model's view, so no pointer from either layer may name it any more.
+          onElide: (ids) => {
+            noteElidedForCap(prepared.subAgentCapState, ids);
+            this.deps.getCrossTurnDedup()?.noteElided(ids);
+          },
         });
         if (compacted !== stripped) recordCompaction(stepNumber);
         // Phase 4A — scope reminder injection for the sub-agent loop.
@@ -769,7 +906,12 @@ export class StreamRunner {
               size: _subSize,
               originalPrompt: prepared.request.prompt,
             });
-            const _reminder = _subShouldWarn ? `[approaching ceiling] ${_baseReminder}` : _baseReminder;
+            // Same wording fix as tool-engine.ts: this reminder halts nothing,
+            // so it must not read as a quota. A sub-agent run measured on
+            // 2026-09-09 (session e28336959a62) stopped mid-task and reported
+            // "hết budget" — out of budget — with no budget configured and
+            // nothing having cut the run.
+            const _reminder = _subShouldWarn ? `[scope check — not a limit] ${_baseReminder}` : _baseReminder;
             return attachReminderToMessages(compacted, _reminder);
           }
           return compacted;
@@ -783,17 +925,9 @@ export class StreamRunner {
           ? attachReminderToMessages(finalMessages, _subMirrorNote)
           : finalMessages;
 
-        if (childRuntime.modelId.startsWith("claude")) {
-          return {
-            messages: applyAnthropicPromptCaching(
-              foldMidConversationSystemMessages(finalMessagesWithMirror),
-              childRuntime.modelId,
-            ),
-          };
-        }
-
-        if (compacted === stripped && stripped === messages && !_subMirrorNote) return undefined;
-        return { messages: finalMessagesWithMirror };
+        // Round 2 fix (G1-adjacent MEDIUM): see `prepareSubAgentPromptMessages`'s
+        // doc comment above — folds for every provider now, not Claude-only.
+        return { messages: prepareSubAgentPromptMessages(finalMessagesWithMirror, childRuntime.modelId) };
       },
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
       ...(childDropMaxOutput ? {} : { maxOutputTokens: Math.min(this.deps.getMaxTokens(), 8_192) }),
@@ -931,10 +1065,15 @@ export class StreamRunner {
           });
         }
 
+        // Preserve the provider error before response rejects with the SDK's
+        // generic NoOutputGeneratedError (or an empty response looks successful).
+        if (part.type === "error") throw part.error;
+
         if (part.type === "text-delta") {
           stall.petProgress(); // real forward progress — reset the no-progress guard
           textDeltaCount++;
           assistantText += part.text;
+          if (progress) progress.text += part.text;
           // Task 2.6b — emit llm-token (agent-mode only; high-volume, default-off per Phase 4).
           try {
             const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -956,8 +1095,40 @@ export class StreamRunner {
         if (part.type === "tool-call") {
           stall.petProgress(); // real forward progress — reset the no-progress guard
           toolCallCount++;
+          if (progress) progress.toolCalls++;
           lastActivity = formatSubagentActivity(part.toolName, part.input);
           onActivity?.(lastActivity);
+          continue;
+        }
+
+        // N3 — feed the usefulness guard. NOTE: deliberately NOT petProgress().
+        // A tool RESULT is only forward progress when it is not a repeat of the
+        // same failure; the detector decides, and the timers stay driven by
+        // emission (unchanged behaviour for every non-looping turn).
+        if (part.type === "tool-result" || part.type === "tool-error") {
+          const isErrorPart = part.type === "tool-error";
+          const payload = isErrorPart
+            ? (part as unknown as { error?: unknown }).error
+            : (part as unknown as { output?: unknown }).output;
+          const toolName = (part as unknown as { toolName?: string }).toolName ?? "unknown";
+          const outcome = failureLoopDetector.record(toolName, payload, isErrorPart);
+          if (outcome.tripped) {
+            failureLoopMessage = buildToolFailureLoopMessage(
+              toolName,
+              outcome.runLength,
+              failureLoopDetector.lastFailureText(),
+            );
+            logger.error("orchestrator", "[stream-runner] sub-agent terminated: failing-tool-loop guard fired", {
+              tool: toolName,
+              runLength: outcome.runLength,
+              failureClass: outcome.failureClass ?? undefined,
+              model: childRuntime.modelId,
+            });
+            onActivity?.(`tool-failure-loop: ${toolName} failed ${outcome.runLength}x identically`);
+            // Cancel the in-flight provider request instead of abandoning it.
+            failureLoopController.abort(new DOMException(TOOL_FAILURE_LOOP_ABORT_REASON, "AbortError"));
+            break;
+          }
           continue;
         }
 
@@ -981,6 +1152,18 @@ export class StreamRunner {
         }
       }
 
+      // N3 — the guard broke out of the drain loop; return BEFORE awaiting
+      // `result.response`, which would reject on the abort we just issued.
+      if (failureLoopMessage) {
+        return {
+          output: failureLoopMessage,
+          lastActivity,
+          cancelled: false,
+          assistantText,
+          failureLoop: failureLoopMessage,
+        };
+      }
+
       if (signal?.aborted) {
         return { output: "[Cancelled]", lastActivity, cancelled: true, assistantText };
       }
@@ -998,6 +1181,21 @@ export class StreamRunner {
       // Returning (not throwing) means run()'s transient-retry path is skipped
       // — a stalled provider would just stall again for another full timeout.
       // (retry-classifier also marks provider-stall non-transient as defence.)
+      // N3 — our own cancellation surfaced as a throw (the SDK rejected the
+      // stream on the abort). Report the guard's reason, not the abort error.
+      if (failureLoopMessage) {
+        logger.error("orchestrator", "[stream-runner] failing-tool-loop abort surfaced as a stream rejection", {
+          error: err instanceof Error ? err.message : String(err),
+          model: childRuntime.modelId,
+        });
+        return {
+          output: failureLoopMessage,
+          lastActivity,
+          cancelled: false,
+          assistantText,
+          failureLoop: failureLoopMessage,
+        };
+      }
       if (stallTriggered) {
         try {
           const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -1049,11 +1247,19 @@ export class StreamRunner {
           ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
         });
         for await (const part of synthResult.fullStream) {
-          if (part.type === "text-delta") synthesizedText += part.text ?? "";
+          if (part.type === "error") throw part.error;
+          if (part.type === "text-delta") {
+            synthesizedText += part.text;
+            if (progress) progress.text += part.text;
+          }
         }
         debugLog(`forced-synthesis: textLen=${synthesizedText.length}`);
       } catch (err) {
-        debugLog(`forced-synthesis failed: ${(err as Error)?.message}`);
+        logger.error("orchestrator", "[stream-runner] final synthesis failed", {
+          model: childRuntime.modelId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        throw err;
       }
     }
 
@@ -1078,6 +1284,7 @@ export class StreamRunner {
     const prepared = outcome.prepared;
     let lastActivity = prepared.lastActivity;
     let assistantText = "";
+    const progress = { text: "", toolCalls: 0 };
 
     try {
       if (prepared.useBatchApi) {
@@ -1089,16 +1296,34 @@ export class StreamRunner {
           childTools: prepared.childTools,
           maxSteps: prepared.maxSteps,
           initialDetail: prepared.initialDetail,
+          subAgentCapState: prepared.subAgentCapState,
           onActivity,
           signal,
         });
       }
 
-      const streamResult = await this.runStream(prepared, onActivity, signal);
+      const streamResult = await this.runStream(prepared, onActivity, signal, progress);
       lastActivity = streamResult.lastActivity;
       assistantText = streamResult.assistantText;
       if (streamResult.cancelled) {
         return { success: false, output: "[Cancelled]" };
+      }
+      // N3 — the failing-tool-loop guard terminated the turn. Surface it as a
+      // FAILED ToolResult whose `output` names the reason, so the caller's
+      // reason resolver (product-loop `resolveImplFailureReason`, which reads
+      // `error || output`) reports WHY the sub-agent stopped.
+      if (streamResult.failureLoop) {
+        return {
+          success: false,
+          output: streamResult.failureLoop,
+          error: streamResult.failureLoop,
+          task: {
+            agent: request.agent,
+            description: request.description,
+            summary: firstLine(streamResult.failureLoop),
+            activity: lastActivity,
+          },
+        };
       }
       if (streamResult.stalled) {
         // Provider stalled — surface as a failed task so the parent agent (and
@@ -1127,17 +1352,27 @@ export class StreamRunner {
       };
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
+      assistantText = progress.text;
+      const providerError = err as { statusCode?: number; responseBody?: unknown } | null;
+      logger.error("orchestrator", "[stream-runner] delegated task failed", {
+        model: prepared.childRuntime.modelId,
+        agent: request.agent,
+        message: err instanceof Error ? err.message : String(err),
+        statusCode: providerError?.statusCode,
+        responseBody:
+          typeof providerError?.responseBody === "string" ? providerError.responseBody.slice(0, 2000) : undefined,
+      });
       // Re-throw transient network errors when no content has flowed so the
       // caller (runTask) can retry with withStreamRetry. Only re-throw when
       // assistantText is empty — if the agent produced partial output we must
       // NOT restart, as that would corrupt the task output.
-      if (!assistantText.trim()) {
+      if (!assistantText.trim() && progress.toolCalls === 0) {
         const { transient } = classifyStreamError(err);
         if (transient) {
           throw err;
         }
       }
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = redactSecrets(err instanceof Error ? err.message : String(err));
       // G1 diagnostic: surface the full error shape under
       // MUONROI_DEBUG_SUBAGENT=1 so we can see whether `msg` is "No output
       // generated" (AI SDK validation failure on empty assistant response)
@@ -1187,7 +1422,9 @@ export class StreamRunner {
         }
         if (e.stack) writeSubagentDebug(true, `stack: ${e.stack.split("\n").slice(0, 6).join(" | ")}`);
       }
-      const output = `Task failed: ${msg}`;
+      const status = typeof providerError?.statusCode === "number" ? `HTTP ${providerError.statusCode}: ` : "";
+      const failure = `Task failed: ${status}${msg}`;
+      const output = assistantText.trim() ? `${assistantText.trim()}\n\n${failure}` : failure;
       return {
         success: false,
         output,

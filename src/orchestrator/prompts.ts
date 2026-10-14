@@ -3,8 +3,10 @@ import { getModelInfo } from "../models/registry";
 import { buildContractSection } from "../pil/agent-operating-contract.js";
 import { buildNativeCapabilitiesSection } from "../pil/native-capabilities-workbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
+import { effectiveRateLimits } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
+import { buildRateLimitRule, maxParallelBackgroundAgents } from "../utils/background-jobs.js";
 import { loadCustomInstructions } from "../utils/instructions";
 import { logger } from "../utils/logger.js";
 import {
@@ -16,6 +18,7 @@ import {
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
+import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable } from "../verify/host-capabilities.js";
 
 // F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
 // after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
@@ -306,7 +309,7 @@ DEFAULT DELEGATION POLICY (critical for avoiding stalls/timeouts):
 - Prefer delegate + explore for anything that needs reading many files or long reasoning.
 - Use general sub-agent only when edits/commands are required.
 - Never use delegate for write/edit/shell changes.
-- After launching a background delegate, continue useful work. Check results later with delegation_read / list only when needed.
+- After launching a background delegate or background shell, continue useful work if there is any. If there is nothing else to do, END YOUR TURN — do not wait with sleep, a polling loop, or repeated delegation_list / process_logs calls. Each job wakes you automatically with its result when it finishes, and ending the turn frees the user to keep talking to you meanwhile.
 - The model choosing task for long research is a common mistake that leads to timeouts — prefer delegate.
 
 WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):
@@ -764,16 +767,40 @@ export function buildSubagentPrompt(
                   "2. Build the project (run buildCommands from the recipe).",
                   "3. Run tests/lint if available (run testCommands from the recipe).",
                   "4. Start the app (run startCommand from the recipe in the background).",
-                  "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
-                  "6. Run browser smoke tests like a real human QA tester:",
-                  "   - Open the app in the browser, record a video, take screenshots.",
-                  "   - Navigate the app: click links, buttons, menus. Verify pages load.",
-                  "   - Check for JavaScript console errors.",
-                  "   - Spend 3-5 interactions testing the critical path.",
-                  "7. Stop recording, close browser, then stop the dev server.",
-                  "",
-                  "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
-                  "agent-browser commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.",
+                  // The browser steps are MEASURED against the host, not asserted.
+                  // This system prompt used to say "They WILL work. Do not skip
+                  // them." on a host where the binary is absent (measured on the
+                  // host of run muc2joffe506), which is how a verify stage spent six
+                  // minutes hunting for substitutes and then asked a human.
+                  //
+                  // This is the PER-TURN call site of the probe. It is affordable
+                  // because `resolveBrowserToolAvailable` is memoised per PATH and
+                  // spawn-free: the first call in the process does the PATH scan,
+                  // every later one is a map lookup (see host-capabilities.ts). It
+                  // stays here rather than being trimmed to the two verify-specific
+                  // prompts on purpose — a system prompt that contradicts the task
+                  // prompt about the same binary is the divergence that caused this.
+                  ...(resolveBrowserToolAvailable()
+                    ? [
+                        "5. Wait for the app to be ready (curl readiness check or agent-browser wait).",
+                        "6. Run browser smoke tests like a real human QA tester:",
+                        "   - Open the app in the browser, record a video, take screenshots.",
+                        "   - Navigate the app: click links, buttons, menus. Verify pages load.",
+                        "   - Check for JavaScript console errors.",
+                        "   - Spend 3-5 interactions testing the critical path.",
+                        "7. Stop recording, close browser, then stop the dev server.",
+                        "",
+                        "Do NOT stop after build/lint. Starting the app and testing it in the browser is the most important part.",
+                        `${BROWSER_TOOL_NAME} commands run on the HOST, not inside the sandbox. They WILL work. Do not skip them.`,
+                      ]
+                    : [
+                        "5. Wait for the app to be ready with a bounded curl readiness loop.",
+                        "6. Exercise the app over HTTP: request the smoke target and any health endpoint, and check the status + body.",
+                        "7. Stop the dev server.",
+                        "",
+                        "Do NOT stop after build/lint. Starting the app and proving it answers is the most important part.",
+                        `Browser QA CANNOT run here: \`${BROWSER_TOOL_NAME}\` is not installed on this host (measured, not assumed). Do not install it, do not look for it in another shell, and do not substitute another browser stack. Report "browser QA could not run: ${BROWSER_TOOL_NAME} is not installed on this host" under Blockers and judge the verdict on what you did measure.`,
+                      ]),
                   "Return a concise verification report. Keep it compact but always include Evidence with artifact file paths.",
                 ]
               : [
@@ -806,6 +833,23 @@ export function buildSubagentPrompt(
 
 export function formatSandboxPromptSection(sandboxMode: SandboxMode, settings?: SandboxSettings): string {
   return "";
+}
+
+/**
+ * Append the provider rate-limit rule for the main agent's model. Applies to
+ * every provider; numbers come from the catalog + account overrides. Appended
+ * at the END so the cached static prefix is untouched, and stable per model so
+ * it does not churn the prompt cache turn to turn.
+ */
+export function applyRateLimitRule(system: string, modelId: string): string {
+  const info = getModelInfo(modelId);
+  if (!info?.provider) return system;
+  const limits = effectiveRateLimits(info);
+  return `${system}\n${buildRateLimitRule({
+    provider: info.provider,
+    ...limits,
+    maxParallelAgents: maxParallelBackgroundAgents(limits?.concurrency),
+  })}`;
 }
 
 export function applyModelConstraints(system: string, modelId: string): string {

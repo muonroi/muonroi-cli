@@ -60,13 +60,39 @@ export async function prepareVerifyRun(
   let usedVerifyDetect = false;
   let manifestPath = manifest?.path;
 
+  // WHY THE MANIFEST IS CACHED, AND WHAT THE CACHE IS ALLOWED TO DECIDE.
+  //
+  // `agent.detectVerifyRecipe` is a full LLM sub-agent turn (`agent:
+  // "verify-detect"`, src/orchestrator/orchestrator.ts:4541) — billed tokens,
+  // latency, non-deterministic output. It is also the only source of things no
+  // disk scan can produce: the apt/nodesource bootstrap sequence, `docker compose
+  // up -d`, the smoke target, the evidence and notes written after reading the
+  // repo. That is what the `!manifest` gate protects, and it stays: an existing
+  // manifest still means no second model turn.
+  //
+  // What the cache is NOT allowed to decide is the half the disk answers for
+  // free. `inferVerifyProjectProfile` above now MERGES the stored recipe with the
+  // live derivation instead of being replaced by it, so a manifest written once no
+  // longer freezes the recipe: every detection improvement reaches
+  // `profile.recipe` on the next run, with no model call and no file write. The
+  // per-field rule, and why an existing manifest is never rewritten (it carries no
+  // provenance, so a loop-written record and a hand-authored one are
+  // indistinguishable), are argued in `src/verify/recipe-merge.ts`.
   if (!manifest) {
     const detectedRecipe = await agent.detectVerifyRecipe(baseSettings, options.abortSignal);
     if (detectedRecipe) {
       usedVerifyDetect = true;
       profile = inferVerifyProjectProfile(cwd, baseSettings, detectedRecipe);
       options.onProgress?.(`verify-detect selected recipe for ${profile.appLabel}`);
-      manifestPath = saveVerifyEnvironment(cwd, profile.recipe, profile.sandboxSettings);
+      // The MODEL's recipe is what gets persisted — deliberately NOT
+      // `profile.recipe`, which is that recipe already merged with today's disk
+      // derivation. Persisting the merge would freeze this run's derived commands
+      // into the record, and since the merge only ever ADDS, a later fix to a
+      // WRONG derived command could never take effect. Nothing is lost by writing
+      // the un-merged recipe: the derived half is recomputed on every load, and so
+      // are the two runtime rewrites `inferVerifyProjectProfile` applies
+      // (`smokeTarget` from the port mapping, the missing-node_modules note).
+      manifestPath = saveVerifyEnvironment(cwd, detectedRecipe, profile.sandboxSettings);
       options.onProgress?.(`Created verify environment manifest: ${manifestPath}`);
     } else {
       options.onProgress?.(

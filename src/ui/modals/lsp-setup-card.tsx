@@ -23,6 +23,7 @@ export function LspSetupCard({
   cursorIndex,
   mode,
   statuses,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -33,6 +34,12 @@ export function LspSetupCard({
   cursorIndex: number;
   mode: LspSetupCardMode;
   statuses: LspInstallStatus[];
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const overlayBg = "#000000cc" as string;
   const panelWidth = Math.min(78, width - 6);
@@ -50,7 +57,7 @@ export function LspSetupCard({
   const pickedCount = languages.filter((lang) => selectedIds.has(lang.id)).length;
 
   return (
-    <Semantic id="lsp-setup-card" role="dialog" name="Set up language servers" isModal>
+    <Semantic id="lsp-setup-card" role="dialog" name="Set up language servers" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

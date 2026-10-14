@@ -28,6 +28,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `for await` loops.
 
 ### Added
+- **Background jobs that actually free the main agent**:
+  - The Agents rail now shows a job's REAL state. A background delegation
+    (`delegate`, or `task` with the explore agent) and a backgrounded shell return
+    as soon as they start; the rail used to read that "started" result as done and
+    painted a green check on agents still working. State now comes from a live
+    snapshot (`Agent.getBackgroundJobSnapshot`). Finished rows leave the rail and
+    collapse into a "N done · M failed — /jobs" line.
+  - `/jobs` (alias `/bg`): every sub-agent and background job of the session,
+    running first — open a row for its prompt and result, `ctrl+x` stops a running
+    background job.
+  - Auto-wake: when background jobs finish while the agent is idle, their notices
+    start a new turn so the agent continues by itself. Opt out with
+    `MUONROI_BACKGROUND_AUTOWAKE=0`. Background shells now report their exit (with
+    the log tail) like delegations do.
+  - The agent is told to END its turn instead of waiting, and a foreground
+    `sleep` ≥ 20s while background jobs run is refused — that poll kept the turn
+    "running" and locked the user out for the whole job.
+- **Machine-wide provider budget** (`src/providers/rate-ledger.ts`): one ledger per
+  provider shared by every muonroi process, enforcing catalog `concurrency`,
+  `requests_per_minute` and now `tokens_per_minute`. Background delegations run as
+  separate processes, so each used to get a full budget of its own — six explore
+  agents plus main meant 7× the account limit and 429s. Disable with
+  `MUONROI_RATE_LEDGER=0`. A delegation started at the provider's concurrency
+  limit tells the agent so, instead of letting it fan out blind.
+- **Provider 429s are waited out, for every provider**: a rate-limited request
+  is retried on a schedule that can outlast a per-minute window (Retry-After
+  honoured, else 4 s doubling to 60 s, 4 min budget —
+  `MUONROI_RATE_LIMIT_RETRY_BUDGET_MS`), at the gate so any step of the main
+  agent, sub-agents and council is covered — and also when the 429 arrives
+  mid-stream as an error part. The pushback is shared as a machine-wide
+  cooldown so every muonroi process holds. Background delegations previously had
+  no retry at all and died on their first 429; a delegation that still fails is
+  marked `failureKind: "rate-limited"` with guidance to wait / launch fewer.
+- **Fan-out rule + guard for every provider**: the main agent's system prompt
+  states the provider's limits and the max parallel background agents; the CLI
+  refuses a delegation past that same number (`MUONROI_MAX_PARALLEL_DELEGATIONS`).
+- **Replies no longer cut off silently**: the main turn's output budget now goes
+  through `resolveMaxOutputTokensParam` (a reasoning model's thinking shares the
+  budget, so 4,096 tokens cut long answers); a `finishReason: "length"` reply is
+  auto-continued (`MUONROI_OUTPUT_LIMIT_CONTINUATIONS`, default 2) and otherwise
+  ends with a visible notice.
+- **Per-account rate limits**: `settings.rateLimitOverrides` (keyed by provider or
+  model id, catalog snake_case shape) overrides the catalog's `rate_limits`,
+  because limits depend on the account tier. StepFun catalog limits updated to
+  concurrency 5 / 100 RPM / 500k TPM.
 - **Phase 06**: 4 upgrades (Security, Performance, Reporting, UI). Wave 0 (ROADMAP/CHANGELOG/STATE) done. See `.planning/phases/06-4-upgrades-security-perf-report-ui/PLAN.md`.
 - **`/ideal` × BB ecosystem**: scaffold flow now injects Experience Engine
   context at CB-1 when the target resolves to `muonroi-building-block`.

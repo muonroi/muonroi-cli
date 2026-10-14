@@ -1,0 +1,9 @@
+{
+  "release": "/opt/muonroi/catalog-releases/20261008-2.20-a95fbfe00871",
+  "files": {
+    "src/models/catalog.json": "a95fbfe00871499d720d7eaaac6d6319bfa332003c19176d858ce06710734126",
+    "services/catalog-api/main.py": "1824f0ada9e20332b136398de73a37843e86d1aaac86bd5fc2420d1f26798ed6",
+    "services/catalog-api/requirements.txt": "55548f87722889fe69d685d25bd5429fdfb9d8bd1ea4deded6e8b82bc0a2b113",
+    "services/catalog-api/Dockerfile": "f06473c0925b60c5b0a29a3c149d6be71523435c856c9f9da4469761694f3fcb"
+  }
+}

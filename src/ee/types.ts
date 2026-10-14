@@ -168,6 +168,11 @@ export interface RouteFeedbackPayload {
   model?: string | null;
   retryCount?: number;
   duration?: number | null;
+  /**
+   * The routed task text. EE stores no decision for a turn routed locally, so
+   * without the task it has nothing to attach the outcome to and learns nothing.
+   */
+  task?: string;
 }
 
 // ─── Feedback + touch contract ───────────────────────────────────────────────
@@ -324,6 +329,31 @@ export interface RouteTaskOption {
   description: string;
 }
 
+/**
+ * Outcomes of similar past tasks from EE `/api/route-history` (vector search, no LLM).
+ * floorTier: one tier above the highest tier a similar task failed on.
+ * suggestedTier: lowest tier a similar task succeeded on with no failure at or above it.
+ */
+export interface RouteHistoryResponse {
+  floorTier: "fast" | "balanced" | "premium" | null;
+  suggestedTier: "fast" | "balanced" | "premium" | null;
+  matches: number;
+  reason: string;
+}
+
+export interface PilContextOptions {
+  localeHint?: string;
+  projectCtx?: Record<string, unknown>;
+  budgetMs?: number;
+  signal?: AbortSignal;
+  /**
+   * The CLI's own classification of this turn (made with the recent turns). EE then
+   * skips its one-prompt classifier, which read real follow-ups as chitchat and
+   * skipped retrieval for them.
+   */
+  intent?: { kind: "task" | "chitchat"; taskType: string | null };
+}
+
 export interface RouteTaskResponse {
   route: "qc-flow" | "qc-lock" | "direct" | null;
   confidence: number;
@@ -455,14 +485,12 @@ export interface EEClient {
   importPrinciple(data: unknown): Promise<EEImportResponse | null>;
   // Task routing + search + user
   routeTask(req: RouteTaskRequest): Promise<RouteTaskResponse | null>;
+  routeHistory(task: string, timeoutMs?: number): Promise<RouteHistoryResponse | null>;
   search(query: string, opts?: EESearchOptions | number): Promise<EESearchResponse | null>;
   /** Active recall via /api/recall (recallMode). Returns [id col] index + records a surface. */
   recall(query: string, opts?: EERecallOptions): Promise<EERecallResponse | null>;
   user(): Promise<EEUserResponse | null>;
   // PIL brain proxy — used by thin clients to reach the VPS LLM router.
   brainProxy(prompt: string, timeoutMs?: number, options?: BrainProxyOptions): Promise<string | null>;
-  pilContext(
-    prompt: string,
-    options?: { localeHint?: string; projectCtx?: Record<string, unknown>; budgetMs?: number; signal?: AbortSignal },
-  ): Promise<unknown | null>;
+  pilContext(prompt: string, options?: PilContextOptions): Promise<unknown | null>;
 }

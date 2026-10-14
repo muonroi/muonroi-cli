@@ -2,13 +2,8 @@
  * src/pil/pipeline.ts
  *
  * runPipeline() entry point: orchestrates 6 sequential layers with an
- * adaptive timeout. Fail-open: any unhandled error or timeout returns the
- * original fallback context.
- *
- * Timeout budget:
- *   - 200ms when EE is disabled / not reachable (fast regex-only path).
- *   - 3000ms when EE thin/thin-degraded mode is active so Layer 1 can hit
- *     the remote `/api/brain` endpoint and Layer 6 can refine output style.
+ * automated-work deadline. Errors/timeouts return the original fallback;
+ * parent cancellation propagates. Actual human answers pause the deadline.
  *
  * CRITICAL: fallback is captured BEFORE runLayers() starts to ensure the timeout
  * path returns a pristine context (Pitfall 4 from RESEARCH.md).
@@ -34,7 +29,7 @@ import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
 import { bumpSessionTurn } from "./session-state.js";
 import { setPilLastResult } from "./store.js";
-import { resolveAfter } from "./timeout.js";
+import { PilTimeoutError, withPilExecutionBudget } from "./timeout.js";
 import type { PipelineContext } from "./types.js";
 
 const PIPELINE_TIMEOUT_FAST_MS = 1500;
@@ -46,13 +41,19 @@ const PIPELINE_TIMEOUT_FAST_MS = 1500;
 // via getCachedServerBaseUrl() or getCachedEEClientMode()).
 const PIPELINE_TIMEOUT_BRAIN_MS = 3500;
 
-function pipelineTimeoutMs(): number {
+function pipelineTimeoutMs(interactive: boolean): number {
   // Allow test environments to override the timeout to avoid flaky races when
   // the test process is under load (e.g., running 1600+ tests concurrently).
   const envOverride = process.env.MUONROI_TEST_PIPELINE_TIMEOUT_MS;
   if (envOverride) {
     const parsed = parseInt(envOverride, 10);
     if (!Number.isNaN(parsed) && parsed > 0) return parsed;
+  }
+  if (interactive) {
+    // Classification (10s), two discovery proposals (15s each), and EE layers
+    // get a shared automatic budget below the default 120s turn-idle window.
+    const configured = Number(process.env.MUONROI_PIL_PREP_TIMEOUT_MS);
+    return Number.isFinite(configured) && configured >= 1000 ? Math.min(configured, 90_000) : 60_000;
   }
   const mode = getCachedEEClientMode();
   if (mode && (mode.mode === "thin" || mode.mode === "thin-degraded" || mode.mode === "fat")) {
@@ -93,9 +94,14 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   }> = [];
 
   async function timed(name: string, fn: (c: PipelineContext) => Promise<PipelineContext>): Promise<void> {
+    options?.signal?.throwIfAborted();
+    options?.onPhase?.(name, "start");
     const start = Date.now();
     const charsBefore = ctx.enriched.length;
-    ctx = await fn(ctx);
+    const next = await fn(ctx);
+    options?.signal?.throwIfAborted();
+    ctx = next;
+    options?.onPhase?.(name, "end");
     const ms = Date.now() - start;
     const charsAfter = ctx.enriched.length;
     timings.push({ name, ms });
@@ -187,9 +193,11 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     ctx = { ...ctx, directAnswer: true };
   }
 
-  // Phase 1 discovery: L1.5–L1.8 (interactive, no hard timeout).
+  // Discovery automation shares the budget; actual human answers pause it.
   // External-scope turns (not about this repo) skip the repo scan entirely.
   if (isDiscoveryEnabled() && ctx.intentKind !== "chitchat" && ctx.scopeKind !== "external") {
+    options?.signal?.throwIfAborted();
+    options?.onPhase?.("discovery", "start");
     const { runDiscovery } = await import("./discovery.js");
     const discoveryStart = Date.now();
     try {
@@ -210,6 +218,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
         options?.clarificationProposer ?? null,
         options?.recentTurnsSummary ?? null,
       );
+      options?.signal?.throwIfAborted();
       ctx = { ...ctx, _discoveryResult: discovery };
       if (discovery.interviewed && discovery.accepted) {
         // Build prefix with both the structured summary and the raw interview transcript
@@ -236,6 +245,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       }
     } catch (err) {
       console.error("[Agent:discovery] runDiscovery failed — continuing with L1 result only", err);
+      options?.signal?.throwIfAborted();
+    } finally {
+      if (!options?.signal?.aborted) options?.onPhase?.("discovery", "end");
     }
     timings.push({ name: "discovery", ms: Date.now() - discoveryStart });
   }
@@ -308,6 +320,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
 
   // Best-effort PIL budget log — attributes prompt-size growth to each layer.
   // Fire-and-forget; never await on the hot path.
+  options?.signal?.throwIfAborted();
   appendPilLog({
     ts: pipelineStart,
     sessionId: ctx.sessionId ?? null,
@@ -330,6 +343,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
 }
 
 export interface PipelineOptions {
+  signal?: AbortSignal;
+  /** Layer boundaries/failures for the caller's progress and durable breadcrumbs. */
+  onPhase?: (name: string, state: "start" | "end" | "error", error?: string) => void;
   gsdPhase?: string | null;
   resumeDigest?: string | null;
   activeRunId?: string | null;
@@ -385,14 +401,50 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     sessionId: options?.sessionId ?? null,
     fallbackReason: null,
   };
+  const phases: string[] = [];
+  let finished = false;
+  const onPhase: NonNullable<PipelineOptions["onPhase"]> = (name, state, error) => {
+    if (finished) return;
+    if (state === "start") phases.push(name);
+    else {
+      const index = phases.lastIndexOf(name);
+      if (index >= 0) phases.splice(index, 1);
+    }
+    try {
+      options?.onPhase?.(name, state, error);
+    } catch (err) {
+      console.error(`[pil] phase observer failed (${name}/${state}): ${(err as Error).message}`);
+    }
+  };
   try {
-    const hasInteractiveDiscovery = !!options?.interactionHandler && isDiscoveryEnabled();
-    const result = hasInteractiveDiscovery
-      ? await runLayers({ ...fallback }, options)
-      : await Promise.race([
-          runLayers({ ...fallback }, options),
-          resolveAfter(pipelineTimeoutMs(), { ...fallback, fallbackReason: "pipeline-timeout" } as PipelineContext),
-        ]);
+    const interactive = !!options?.interactionHandler && isDiscoveryEnabled();
+    const result = await withPilExecutionBudget(
+      async (budget) => {
+        const bounded: PipelineOptions = { ...options, signal: budget.signal, onPhase };
+        if (options?.llmFallback) {
+          bounded.llmFallback = (prompt, opts) => options.llmFallback!(prompt, { ...opts, signal: budget.signal });
+        }
+        if (options?.clarificationProposer) {
+          bounded.clarificationProposer = (input) =>
+            options.clarificationProposer!({ ...input, signal: budget.signal });
+        }
+        if (options?.interactionHandler) {
+          bounded.interactionHandler = {
+            askQuestion: (question) =>
+              budget.waitForUser(async () => {
+                onPhase("user-answer", "start");
+                const answer = await options.interactionHandler!.askQuestion(question);
+                budget.signal.throwIfAborted();
+                onPhase("user-answer", "end");
+                return answer;
+              }),
+          };
+        }
+        return runLayers({ ...fallback }, bounded);
+      },
+      pipelineTimeoutMs(interactive),
+      options?.signal,
+    );
     const parse = PipelineContextSchema.safeParse(result);
     if (!parse.success) {
       const validated: PipelineContext = {
@@ -405,9 +457,25 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     setPilLastResult(result);
     return result;
   } catch (err) {
-    const reason = err instanceof Error ? `exception:${err.name}` : "exception:unknown";
+    const activePhase = phases.at(-1);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[pil] pipeline failed (${activePhase ?? "setup"}): ${message}`, {
+      sessionId: options?.sessionId ?? null,
+    });
+    // Close nested discovery/user-answer markers too; otherwise the next
+    // turn can inherit an orphaned open phase from this cancelled preparation.
+    for (const phase of [...phases].reverse()) onPhase(phase, "error", message);
+    options?.signal?.throwIfAborted();
+    const reason =
+      err instanceof PilTimeoutError
+        ? "pipeline-timeout"
+        : err instanceof Error
+          ? `exception:${err.name}`
+          : "exception:unknown";
     const failed = { ...fallback, fallbackReason: reason } as PipelineContext;
     setPilLastResult(failed);
     return failed;
+  } finally {
+    finished = true;
   }
 }

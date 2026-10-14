@@ -1,15 +1,18 @@
 {
-  "___note": "Fixture for testing model-driven AskCard (PIL discovery interview). The model returns ModelCard[] via generateText, which discovery.ts parses and passes to the interaction handler. This fixture has a 'model' block so --mock-llm installs it into globalThis.__muonroiMockModel, and the clarifier proposer path works.",
+  "___note": "Fixture for the PIL discovery interview askcard (tests/harness/discovery-askcard.spec.ts). The ModelCard[] JSON MUST be delivered on the STREAM path: createModelClarificationProposer (src/pil/discovery.ts) calls generateTextStreamed, i.e. streamText -> doStream. It called generateText (doGenerate) until 5fbebf23 (2026-07-19, which moved every auxiliary call to stream+collect); this fixture was never migrated, so the cards sat unread in a now-deleted \"generate\" field while the proposer consumed stream round 0 (a stale classify line), parsed no JSON and returned [] — the interview simply never opened, silently, for 48 days. Round 0 is therefore the cards; round 1 is the ordinary turn reply, reached only if the interview is answered. The classify call does NOT consume a round: loadMockModelFromDir sets autoClassify, so mock-model.ts answers it from its own intercept.",
   "model": {
     "provider": "mock",
     "modelId": "mock-model",
-    "generate": "[{\"question\":\"What do you want to build?\",\"context\":\"Please describe the core goal of your project.\",\"options\":[{\"label\":\"A web application\",\"description\":\"Build a full web app with frontend and backend\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"A CLI tool\",\"description\":\"A command-line utility\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"Just exploring / need advice\",\"description\":\"I want to discuss options first\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":true},{\"label\":\"Cancel / nothing\",\"description\":\"Cancel this request\",\"kind\":\"choice\",\"isCancel\":true}],\"defaultIndex\":0},{\"question\":\"What technology stack do you prefer?\",\"context\":\"Helps me give more targeted answers.\",\"options\":[{\"label\":\"TypeScript / Node.js\",\"description\":\"TypeScript on Node.js runtime\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"Python\",\"kind\":\"choice\"},{\"label\":\"Something else\",\"kind\":\"freetext\"}],\"defaultIndex\":0}]",
     "stream": [
       [
         { "type": "stream-start", "warnings": [] },
-        { "type": "text-start", "id": "classify" },
-        { "type": "text-delta", "id": "classify", "delta": "generate, concise, task, code, standard, local, english" },
-        { "type": "text-end", "id": "classify" },
+        { "type": "text-start", "id": "cards" },
+        {
+          "type": "text-delta",
+          "id": "cards",
+          "delta": "[{\"question\":\"What do you want to build?\",\"context\":\"Please describe the core goal of your project.\",\"options\":[{\"label\":\"A web application\",\"description\":\"Build a full web app with frontend and backend\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"A CLI tool\",\"description\":\"A command-line utility\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"Just exploring / need advice\",\"description\":\"I want to discuss options first\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":true},{\"label\":\"Cancel / nothing\",\"description\":\"Cancel this request\",\"kind\":\"choice\",\"isCancel\":true}],\"defaultIndex\":0},{\"question\":\"What technology stack do you prefer?\",\"context\":\"Helps me give more targeted answers.\",\"options\":[{\"label\":\"TypeScript / Node.js\",\"description\":\"TypeScript on Node.js runtime\",\"kind\":\"choice\",\"isCancel\":false,\"isAdjust\":false},{\"label\":\"Python\",\"kind\":\"choice\"},{\"label\":\"Something else\",\"kind\":\"freetext\"}],\"defaultIndex\":0}]"
+        },
+        { "type": "text-end", "id": "cards" },
         {
           "type": "finish",
           "finishReason": { "unified": "stop", "raw": null },
@@ -21,9 +24,9 @@
       ],
       [
         { "type": "stream-start", "warnings": [] },
-        { "type": "text-start", "id": "classify2" },
-        { "type": "text-delta", "id": "classify2", "delta": "Final response text" },
-        { "type": "text-end", "id": "classify2" },
+        { "type": "text-start", "id": "reply" },
+        { "type": "text-delta", "id": "reply", "delta": "Final response text" },
+        { "type": "text-end", "id": "reply" },
         {
           "type": "finish",
           "finishReason": { "unified": "stop", "raw": null },

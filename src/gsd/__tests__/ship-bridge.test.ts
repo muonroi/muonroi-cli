@@ -16,7 +16,7 @@ describe("ship-bridge", () => {
   });
 
   afterEach(() => {
-    if (tmp) rmSync(tmp, { recursive: true, force: true });
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("runTaskShip writes SHIP.md with plan title", () => {

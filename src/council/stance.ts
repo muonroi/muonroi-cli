@@ -105,10 +105,16 @@ export function buildStanceRows({ criteria, criteriaStatus, roster }: BuildStanc
     // Index first (the leader is told to preserve order), then fall back to a
     // text match so a reordered payload still lands on the right row.
     const byIndex = status[i];
-    const entry =
-      byIndex && sameCriterion(byIndex.criterion ?? "", criterion)
-        ? byIndex
-        : (status.find((s) => sameCriterion(s?.criterion ?? "", criterion)) ?? byIndex);
+    const indexMatch = byIndex && sameCriterion(byIndex.criterion ?? "", criterion) ? byIndex : undefined;
+    const textMatch = indexMatch ? undefined : status.find((s) => sameCriterion(s?.criterion ?? "", criterion));
+    // The entry actually keyed to this criterion by text, if any. `met` (below)
+    // also falls back further, to an unmatched `byIndex` entry on pure drift —
+    // that fallback stays exactly as it was (out of scope here). `deferred`
+    // does NOT get that fallback: mirroring alignCriteriaDeferred's rule, a
+    // criterion this module could not actually line up must not be marked
+    // deferred just because the leader marked *something* at that index.
+    const matched = indexMatch ?? textMatch;
+    const entry = matched ?? byIndex;
 
     if (!entry) {
       return { criterion, met: false, stances: emptyStances(roster) };
@@ -125,7 +131,14 @@ export function buildStanceRows({ criteria, criteriaStatus, roster }: BuildStanc
     }
 
     const split = typeof entry.split === "string" && entry.split.trim() ? entry.split.trim() : undefined;
-    return { criterion, met: entry.met === true, stances, ...(split ? { split } : {}) };
+    const deferred = matched ? matched.deferred === true : false;
+    return {
+      criterion,
+      met: entry.met === true,
+      stances,
+      ...(split ? { split } : {}),
+      ...(deferred ? { deferred: true } : {}),
+    };
   });
 }
 

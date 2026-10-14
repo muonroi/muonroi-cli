@@ -3,7 +3,6 @@ import { access, mkdir, readdir, readFile, rm } from "fs/promises";
 import os from "os";
 import path from "path";
 
-const CACHE_ROOT = path.join(os.homedir(), ".muonroi-cli", "cache", "lsp");
 const locks = new Map<string, Promise<unknown>>();
 const WINDOWS_BIN_SUFFIX = process.platform === "win32" ? ".cmd" : "";
 
@@ -11,12 +10,33 @@ function cachedBinPath(binDir: string, bin: string): string {
   return path.join(binDir, `${bin}${WINDOWS_BIN_SUFFIX}`);
 }
 
+/**
+ * Root of the language-server package cache.
+ *
+ * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
+ * `muonroiHome()` convention already used by src/storage/config.ts,
+ * src/usage/ledger.ts, src/chat/channel-manager.ts et al.
+ *
+ * Resolved LAZILY on every call, deliberately NOT as a module-level `const`.
+ * A const is evaluated once at import, so a test that imports this module
+ * normally can never redirect it — and the tests here CREATE whole package
+ * directories under this root and then `rm -rf` them. Pointed at the real
+ * home, that deleted the user's actual LSP installs: a run wiped
+ * ~/.muonroi-cli/cache/lsp/pyright down to a bin-less `dist/` stump, and the
+ * half-finished recursive delete of a full pyright tree then blew vitest's
+ * 10s hook budget, so every subsequent run re-broke it. Reading the env var
+ * per call is what makes the isolation actually reachable from a test.
+ */
+function cacheRoot(): string {
+  return path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "cache", "lsp");
+}
+
 function packageDir(pkg: string): string {
   const sanitized =
     process.platform === "win32"
       ? Array.from(pkg, (ch) => (/[<>:"|?*]/.test(ch) || ch.charCodeAt(0) < 32 ? "_" : ch)).join("")
       : pkg;
-  return path.join(CACHE_ROOT, sanitized);
+  return path.join(cacheRoot(), sanitized);
 }
 
 /**

@@ -31,6 +31,7 @@ function makeStubDriver(frame: LiveFrame, nodes: UINode[]): Driver {
     press_sequence: () => {},
     type: () => {},
     focus: () => {},
+    focus_verified: async () => ({ ok: false as const, reason: "not_focusable" as const, message: "stub" }),
     wait_for: async () => {},
     query: (sel: string) =>
       sel === "ambiguous-error"

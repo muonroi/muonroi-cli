@@ -26,10 +26,48 @@ export interface ProactiveCompactRequestState {
 
 let pending: ProactiveCompactRequestState | null = null;
 
+/**
+ * STICKY focus, distinct from the one-shot `pending` above.
+ *
+ * `pending` is consumed exactly once (it *triggers* one compaction). The focus
+ * the agent stated must outlive that consumption, because it has to reach TWO
+ * different compaction paths that run at different times:
+ *   - the per-step prepareStep compactor (`compactSubAgentMessages`), and
+ *   - the summarizing compaction (`Orchestrator.compactForContext`), which runs
+ *     outside the tool-loop closure entirely.
+ * Before this existed, `consumeProactiveCompact()` in tool-engine.ts:2218 read
+ * `instructions` and dropped it on the floor — the agent could say HOW to
+ * compact and nothing read the answer.
+ *
+ * Scope is one user turn: `beginCompactionTurn()` is called at the turn
+ * boundary in message-processor.ts. Last write wins within the turn.
+ */
+let focusNote: string | null = null;
+
 /** Queue a proactive compaction to run before the next tool-loop step. */
 export function requestProactiveCompact(instructions?: string | null): void {
   const trimmed = typeof instructions === "string" ? instructions.trim() : "";
   pending = { instructions: trimmed.length > 0 ? trimmed : null };
+  // A bare `compact()` with no focus must NOT erase a focus stated earlier in
+  // the same turn — the agent said it once and never retracted it.
+  if (trimmed.length > 0) focusNote = trimmed;
+}
+
+/**
+ * The most recent preservation focus the main-context agent stated this turn,
+ * or null when it has not spoken. Read by both compaction paths.
+ */
+export function getCompactionFocus(): string | null {
+  return focusNote;
+}
+
+/**
+ * Turn boundary — drop the previous turn's focus so a stale "keep foo.ts open"
+ * from turn 1 cannot shape a compaction in turn 9. Deliberately does NOT clear
+ * `pending`: a request queued at the tail of a turn is still a real request.
+ */
+export function beginCompactionTurn(): void {
+  focusNote = null;
 }
 
 /** True when a proactive compaction is queued (non-consuming peek). */
@@ -47,4 +85,5 @@ export function consumeProactiveCompact(): ProactiveCompactRequestState | null {
 /** Test hook — clear any queued request. */
 export function __resetProactiveCompactForTests(): void {
   pending = null;
+  focusNote = null;
 }

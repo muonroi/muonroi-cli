@@ -22,9 +22,18 @@ type WaitConditionEvent = {
   /** Optional: only satisfy if at least one buffered event of this kind passes this check. */
   match?: (e: LiveEvent) => boolean;
 };
-type WaitConditionAll = { all: (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent)[] };
+/**
+ * Satisfied once the latest VisualFrame (the real rendered cell grid, see
+ * `render_visual()`) contains `visualText`. The visual frame is written to the
+ * sidechannel AFTER the semantic frame of the same render pass, so a selector
+ * wait on the semantic tree can resolve one line before the matching visual
+ * frame has been ingested — wait on this instead of polling `render_visual()`.
+ */
+type WaitConditionVisual = { visualText: string };
+type WaitCondition = WaitConditionIdle | WaitConditionSelector | WaitConditionEvent | WaitConditionVisual;
+type WaitConditionAll = { all: WaitCondition[] };
 
-export type WaitArgs = (WaitConditionIdle | WaitConditionSelector | WaitConditionEvent | WaitConditionAll) & {
+export type WaitArgs = (WaitCondition | WaitConditionAll) & {
   timeoutMs?: number;
 };
 
@@ -39,6 +48,31 @@ export type WaitForResult = { event?: LiveEvent } | void;
 export type LiveEventWithKind = Extract<LiveEvent, { kind: string }>;
 
 export type EventFilter = { kinds?: Array<LiveEventWithKind["kind"]> } | ((e: LiveEvent) => boolean);
+
+/**
+ * Outcome of {@link Driver.focus_verified}. `ok:false` is a REAL failure the
+ * caller must handle — the previous `tui.focus` returned the string "ok"
+ * whether or not focus moved, so a driver could not tell a successful recovery
+ * from a no-op.
+ */
+export type FocusOutcome =
+  | { ok: true; id: string; alreadyFocused?: boolean }
+  | {
+      ok: false;
+      /**
+       * `no_match` / `ambiguous` — the selector did not resolve to exactly one
+       * node. `not_focusable` — it did, the dispatch was sent, and no frame ever
+       * reported the node focused.
+       */
+      reason: "no_match" | "ambiguous" | "not_focusable";
+      /** Resolved node id (present only for `not_focusable`). */
+      id?: string;
+      /** How many nodes the selector matched (present for no_match/ambiguous). */
+      matches?: number;
+      /** Who actually holds focus right now, so the caller can re-plan. */
+      focusHolder?: string | null;
+      message: string;
+    };
 
 type DriverDeps = {
   sendKey: (key: string) => void;
@@ -58,6 +92,19 @@ export type Driver = {
   press_sequence: (keys: string[]) => void;
   type: (text: string) => void;
   focus: (selector: string) => void;
+  /**
+   * Honest focus: dispatch `__focus__:<id>` and then VERIFY the tree really
+   * reports the target focused before claiming success.
+   *
+   * {@link Driver.focus} only dispatches. The OpenTUI input bridge drops
+   * `__focus__:` by design (`input-bridge.tsx`: focus routing is owned by
+   * individual components), so for every surface that does not already hold
+   * focus the dispatch is a silent no-op — and `tui.focus` reported `ok`
+   * anyway. A driver that lost track of which modal owned the keyboard had
+   * no way to learn its recovery attempt had failed, which is how a live
+   * `/ideal` run became unreachable on 2026-09-05.
+   */
+  focus_verified: (selector: string, timeoutMs?: number) => Promise<FocusOutcome>;
   wait_for: (args: WaitArgs) => Promise<WaitForResult>;
   query: (selector: string) => UINode | null;
   queryAll: (selector: string) => UINode[];
@@ -108,6 +155,12 @@ export type Driver = {
 /** Maximum events held in the global ring buffer (FIFO eviction). */
 const EVENT_RING_CAP = 1000;
 
+/** How long {@link Driver.focus_verified} waits for a frame confirming the move. */
+const DEFAULT_FOCUS_VERIFY_MS = 500;
+
+/** Poll interval while waiting for that frame. */
+const FOCUS_VERIFY_POLL_MS = 15;
+
 /** Maximum events held per subscriber's internal push-queue (FIFO eviction). */
 const PER_SUBSCRIBER_QUEUE_CAP = 256;
 
@@ -149,6 +202,16 @@ export function createDriver(deps: DriverDeps): Driver {
     const all = matchSelector(syntheticRoot, sel);
     // Filter out the synthetic root itself
     return all.filter((n) => n.id !== "__root__");
+  }
+
+  /**
+   * Is `id` the focus owner in the newest frame? Accepts either evidence the
+   * protocol offers: the frame-level `focus` pointer, or the node's own flag.
+   */
+  function isFocused(id: string): boolean {
+    if (!latestFrame) return false;
+    if (latestFrame.focus === id) return true;
+    return selectorMatches(`id=${id}`).some((n) => n.focus === true);
   }
 
   function notifyWaiters(): void {
@@ -243,7 +306,7 @@ export function createDriver(deps: DriverDeps): Driver {
     return undefined;
   }
 
-  function buildCheck(cond: WaitConditionIdle | WaitConditionSelector | WaitConditionEvent): () => boolean {
+  function buildCheck(cond: WaitCondition): () => boolean {
     if ("idle" in cond && cond.idle) {
       const capturedStart = Date.now();
       return () => lastIdleAt >= capturedStart;
@@ -256,6 +319,10 @@ export function createDriver(deps: DriverDeps): Driver {
       const kind = (cond as WaitConditionEvent).event;
       const matchFn = (cond as WaitConditionEvent).match;
       return () => eventBuffer.some((e) => e.t === "event" && e.kind === kind && (matchFn ? matchFn(e) : true));
+    }
+    if ("visualText" in cond) {
+      const needle = (cond as WaitConditionVisual).visualText;
+      return () => latestVisualFrame !== null && driver.render_visual().includes(needle);
     }
     return () => false;
   }
@@ -294,6 +361,38 @@ export function createDriver(deps: DriverDeps): Driver {
       deps.sendKey(`__focus__:${hits[0].id}`);
     },
 
+    async focus_verified(selector: string, timeoutMs: number = DEFAULT_FOCUS_VERIFY_MS): Promise<FocusOutcome> {
+      const hits = selectorMatches(selector);
+      if (hits.length !== 1) {
+        return {
+          ok: false,
+          reason: hits.length === 0 ? "no_match" : "ambiguous",
+          matches: hits.length,
+          message: `focus: expected 1 match for "${selector}", got ${hits.length}`,
+        };
+      }
+      const id = hits[0].id;
+      if (isFocused(id)) return { ok: true, id, alreadyFocused: true };
+      deps.sendKey(`__focus__:${id}`);
+      const deadline = Date.now() + Math.max(0, timeoutMs);
+      // Poll the frame stream rather than assume: the only evidence that focus
+      // moved is a frame in which the node says so.
+      for (;;) {
+        if (isFocused(id)) return { ok: true, id };
+        if (Date.now() >= deadline) break;
+        await new Promise<void>((r) => setTimeout(r, FOCUS_VERIFY_POLL_MS));
+      }
+      return {
+        ok: false,
+        reason: "not_focusable",
+        id,
+        focusHolder: latestFrame?.focus ?? null,
+        message:
+          `focus: dispatched __focus__:${id} but no frame reported it focused within ${timeoutMs}ms. ` +
+          `This surface does not accept programmatic focus — drive it with press()/press_sequence() instead.`,
+      };
+    },
+
     wait_for(args: WaitArgs): Promise<WaitForResult> {
       const timeoutMs = (args as { timeoutMs?: number }).timeoutMs ?? 5000;
       const start = Date.now();
@@ -318,6 +417,8 @@ export function createDriver(deps: DriverDeps): Driver {
         check = buildCheck(args as WaitConditionSelector);
       } else if ("event" in args) {
         check = buildCheck(args as WaitConditionEvent);
+      } else if ("visualText" in args) {
+        check = buildCheck(args as WaitConditionVisual);
       } else {
         check = () => false;
       }

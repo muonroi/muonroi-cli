@@ -19,6 +19,10 @@
       "types": "./src/protocol.ts",
       "default": "./src/protocol.ts"
     },
+    "./argv-contract": {
+      "types": "./src/argv-contract.ts",
+      "default": "./src/argv-contract.ts"
+    },
     "./selector": {
       "types": "./src/selector.ts",
       "default": "./src/selector.ts"

@@ -63,17 +63,14 @@ import {
   isModelDisabled,
   isReservedSubagentName,
   loadMcpServers,
-  loadPaymentSettings,
   loadUserSettings,
   loadValidSubAgents,
   type McpRemoteTransport,
   type McpServerConfig,
-  type PaymentSettings,
   type SandboxMode,
   type SandboxSettings,
   saveApprovedTelegramUserId,
   saveMcpServers,
-  savePaymentSettings,
   saveProjectSettings,
   saveUserSettings,
   setDefaultProvider,
@@ -185,6 +182,7 @@ import { UpdateModal } from "./modals/update-modal.js";
 import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
 import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
+import { JobsModal } from "./modals/jobs-modal.js";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import { SLASH_MENU_ITEMS, type SlashMenuItem, VISIBLE_SLASH_MENU_ITEMS } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
@@ -251,7 +249,6 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
-import { collectAgentActivities } from "./utils/agent-activities.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
@@ -516,6 +513,8 @@ const BUILTIN_TYPED_SLASH_COMMANDS = new Set([
   "/agent",
   "/schedule",
   "/schedules",
+  "/jobs",
+  "/bg",
   "/quit",
   "/exit",
   "/q",
@@ -622,6 +621,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     apiKeyPrompt,
     blockPrompt,
     btwState,
+    modalKeyboardOwner,
     oauthLogin,
     oauthProviders,
     configuredProviders,
@@ -734,6 +734,12 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     scheduleModalIndex,
     scheduleRows,
     scheduleSearchQuery,
+    agentActivities,
+    jobRows,
+    jobsModalIndex,
+    jobsExpandedId,
+    showJobsModal,
+    openJobsModal,
     scrollRef,
     newSinceLock,
     scrollLockedAway,
@@ -796,9 +802,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   );
 
   // Roster of every sub-agent / background job spawned this session, for the
-  // rail. Derived from the transcript + in-flight calls, so it cannot drift from
-  // what actually ran.
-  const agentActivities = useMemo(() => collectAgentActivities(messages, activeToolCalls), [messages, activeToolCalls]);
+  // rail — derived in use-app-logic from the transcript, in-flight calls and the
+  // live background-job snapshot (shared with the /jobs view).
   const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
@@ -1321,6 +1326,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
               activities={agentActivities}
               selected={selectedActivity}
               onSelect={setSelectedActivity}
+              onOpenJobs={openJobsModal}
               width={councilSurfaceRailWidth}
               t={t}
             />
@@ -1783,8 +1789,21 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       !pendingCouncilQuestion &&
                       !pendingCouncilPreflight && <ShimmerText t={t} text="Planning next moves" />}
                     {/* Plan questions panel — inline, OpenCode-style */}
-                    {showPlanPanel && <PlanQuestionsPanel t={t} questions={planQuestions} state={pqs} />}
-                    {pendingPaymentApproval && <PaymentApprovalPanel t={t} payment={pendingPaymentApproval} />}
+                    {showPlanPanel && (
+                      <PlanQuestionsPanel
+                        t={t}
+                        questions={planQuestions}
+                        state={pqs}
+                        focused={modalKeyboardOwner === "plan-questions"}
+                      />
+                    )}
+                    {pendingPaymentApproval && (
+                      <PaymentApprovalPanel
+                        t={t}
+                        payment={pendingPaymentApproval}
+                        focused={modalKeyboardOwner === "payment-approval"}
+                      />
+                    )}
                     {/* Modals/wizards anchored to the bottom so sticky-bottom
                       auto-scroll keeps them in view even when councilMessages
                       fill the scrollbox. */}
@@ -1794,11 +1813,24 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         selectedIndex={haltSelectedIndex}
                         terminalCols={width}
                         theme={t}
+                        focused={modalKeyboardOwner === "ideal-halt-card"}
                       />
                     )}
-                    {initNewForm && <InitNewFormCard state={initNewForm} terminalCols={width} theme={t} />}
+                    {initNewForm && (
+                      <InitNewFormCard
+                        state={initNewForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "init-new-form"}
+                      />
+                    )}
                     {pointToExistingForm && (
-                      <PointToExistingFormCard state={pointToExistingForm} terminalCols={width} theme={t} />
+                      <PointToExistingFormCard
+                        state={pointToExistingForm}
+                        terminalCols={width}
+                        theme={t}
+                        focused={modalKeyboardOwner === "point-to-existing-form"}
+                      />
                     )}
                     {councilProgress && (
                       <Semantic id="continue-as-council-progress" role="log" name="Council brainstorm">
@@ -1823,13 +1855,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchors to the pending question (moved here from above
                       streamContent/councilProgress — see fix/tui-askcard-anchor). */}
                     {pendingCouncilQuestion && councilCardState && (
-                      <CouncilQuestionCard question={pendingCouncilQuestion} theme={t} state={councilCardState} />
+                      <CouncilQuestionCard
+                        question={pendingCouncilQuestion}
+                        theme={t}
+                        state={councilCardState}
+                        focused={modalKeyboardOwner === "askcard"}
+                      />
                     )}
                     {pendingCouncilPreflight && preflightCardState && (
                       <CouncilQuestionCard
                         question={buildPreflightQuestion(pendingCouncilPreflight)}
                         theme={t}
                         state={preflightCardState}
+                        focused={modalKeyboardOwner === "askcard-preflight"}
+                        semanticId="askcard-preflight"
                       />
                     )}
                   </scrollbox>
@@ -1891,6 +1930,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                     showPlanQuestions={showPlanPanel}
                     showApiKeyModal={showApiKeyModal}
                     blockPrompt={blockPrompt}
+                    modalOwnsKeyboard={modalKeyboardOwner !== null}
                     onSubmit={handleSubmit}
                     onPaste={handlePaste}
                     pasteBlocks={pasteBlocks}
@@ -1955,6 +1995,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         activities={agentActivities}
                         selected={selectedActivity}
                         onSelect={setSelectedActivity}
+                        onOpenJobs={openJobsModal}
                         width={railWidth}
                         t={t}
                       />
@@ -2006,6 +2047,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                   showPlanQuestions={showPlanPanel}
                   showApiKeyModal={showApiKeyModal}
                   blockPrompt={blockPrompt}
+                  modalOwnsKeyboard={modalKeyboardOwner !== null}
                   onSubmit={handleSubmit}
                   onPaste={handlePaste}
                   pasteBlocks={pasteBlocks}
@@ -2068,6 +2110,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showApiKeyModal && (
           <ApiKeyModal
+            focused={modalKeyboardOwner === "api-key-modal"}
             t={t}
             width={width}
             height={height}
@@ -2078,6 +2121,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showUpdateModal && updateInfo && (
           <UpdateModal
+            focused={modalKeyboardOwner === "update-modal"}
             t={t}
             width={width}
             height={height}
@@ -2088,6 +2132,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {needsKeyQueue.length > 0 && needsKeyQueue[0] && (
           <McpNeedsKeyCard
+            focused={modalKeyboardOwner === "mcp-needs-key-card"}
             t={t}
             width={width}
             height={height}
@@ -2102,6 +2147,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {eeConnectVisible && needsKeyQueue.length === 0 && (
           <EeConnectCard
+            focused={modalKeyboardOwner === "ee-connect-card"}
             t={t}
             width={width}
             height={height}
@@ -2115,6 +2161,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {lspSetupVisible && needsKeyQueue.length === 0 && !eeConnectVisible && (
           <LspSetupCard
+            focused={modalKeyboardOwner === "lsp-setup-card"}
             t={t}
             width={width}
             height={height}
@@ -2128,6 +2175,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showMcpModal && !showMcpEditor && (
           <McpBrowserModal
+            focused={modalKeyboardOwner === "mcp-modal"}
             t={t}
             width={width}
             height={height}
@@ -2138,6 +2186,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showMcpEditor && (
           <McpEditorModal
+            focused={modalKeyboardOwner === "mcp-editor"}
             t={t}
             width={width}
             height={height}
@@ -2158,6 +2207,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showScheduleModal && (
           <ScheduleBrowserModal
+            focused={modalKeyboardOwner === "schedule-modal"}
             t={t}
             width={width}
             height={height}
@@ -2166,8 +2216,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             rows={scheduleRows}
           />
         )}
+        {showJobsModal && (
+          <JobsModal
+            focused={modalKeyboardOwner === "jobs-modal"}
+            t={t}
+            width={width}
+            height={height}
+            rows={jobRows}
+            selectedIndex={jobsModalIndex}
+            expandedId={jobsExpandedId}
+          />
+        )}
         {showAgentsModal && !showAgentsEditor && (
           <SubagentsBrowserModal
+            focused={modalKeyboardOwner === "subagents-modal"}
             t={t}
             width={width}
             height={height}
@@ -2178,6 +2240,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showAgentsEditor && (
           <SubagentEditorModal
+            focused={modalKeyboardOwner === "subagent-editor"}
             key={`subagent-editor-${agentsEditorSyncKey}`}
             t={t}
             width={width}
@@ -2195,6 +2258,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showModelPicker && (
           <ModelPickerModal
+            focused={modalKeyboardOwner === "model-picker"}
             t={t}
             currentModel={model}
             selectedIndex={modelPickerIndex}
@@ -2217,6 +2281,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showSessionPicker && (
           <SessionPickerModal
+            focused={modalKeyboardOwner === "session-picker"}
             t={t}
             sessions={sessionPickerList}
             focusIndex={sessionPickerIndex}
@@ -2226,6 +2291,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showWalletPicker && (
           <WalletPickerModal
+            focused={modalKeyboardOwner === "wallet-picker"}
             t={t}
             settings={walletSettings}
             walletInfo={walletDisplayInfo}
@@ -2236,6 +2302,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showSandboxPicker && (
           <SandboxPickerModal
+            focused={modalKeyboardOwner === "sandbox-picker"}
             t={t}
             currentMode={sandboxMode}
             settings={sandboxSettings}
@@ -2248,6 +2315,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showConnectModal && (
           <ConnectModal
+            focused={modalKeyboardOwner === "connect-modal"}
             t={t}
             width={width}
             height={height}
@@ -2257,6 +2325,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showTelegramTokenModal && (
           <TelegramTokenModal
+            focused={modalKeyboardOwner === "telegram-token-modal"}
             t={t}
             width={width}
             height={height}
@@ -2267,6 +2336,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         )}
         {showTelegramPairModal && (
           <TelegramPairModal
+            focused={modalKeyboardOwner === "telegram-pair-modal"}
             t={t}
             width={width}
             height={height}

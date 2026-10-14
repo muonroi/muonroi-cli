@@ -356,6 +356,7 @@ describe("runProductLoop integration", () => {
     const flowDir = await tmpFlowDir();
     // Sprint stub that always halts at max-sprints so runs stay incomplete
     // (no doneAt, not aborted).
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     const haltingSprint = async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -391,6 +392,7 @@ describe("runProductLoop integration", () => {
     expect(newerId).not.toBe(olderId);
 
     // Bare resume (no runId) should pick the newer run.
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 2,
@@ -426,6 +428,7 @@ describe("runProductLoop integration", () => {
   it("resume (no runId): skips aborted + shipped runs", async () => {
     const flowDir = await tmpFlowDir();
     // Run 1 → abort it (terminal). Run 2 → leave incomplete.
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -449,6 +452,7 @@ describe("runProductLoop integration", () => {
     await drain(runProductLoop(makeOpts({ flowDir, subcommand: "abort", runId: abortedId })));
 
     await new Promise((r) => setTimeout(r, 5));
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -470,6 +474,7 @@ describe("runProductLoop integration", () => {
     );
     const openId = (r2.result as any).runId;
 
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 2,
@@ -503,7 +508,6 @@ describe("runProductLoop integration", () => {
     await fs.mkdir(runDir, { recursive: true });
     await writeManifest(flowDir, runId, {
       idea: "resume the interrupted debate",
-      capUsd: 50,
       maxSprints: 3,
       doneThreshold: 0.9,
       createdAt: new Date(),
@@ -528,6 +532,7 @@ describe("runProductLoop integration", () => {
     );
 
     // The mocked runLoopDriver (module factory) returns an approved spec.
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -558,6 +563,7 @@ describe("runProductLoop integration", () => {
 
   it("resume: does NOT re-enter the FSM when there is no debate checkpoint", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,
@@ -576,6 +582,7 @@ describe("runProductLoop integration", () => {
     const runId = (start.result as any).runId;
     (runLoopDriver as any).mockClear();
 
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 2,
@@ -598,6 +605,7 @@ describe("runProductLoop integration", () => {
 
   it("abort (no runId): auto-detects and aborts the newest incomplete run", async () => {
     const flowDir = await tmpFlowDir();
+    // biome-ignore lint/correctness/useYield: mock returns immediately; consumer drains via .next()
     (runSprint as any).mockImplementationOnce(async function* () {
       const iter: IterationState = {
         sprintN: 1,

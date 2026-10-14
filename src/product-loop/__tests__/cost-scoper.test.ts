@@ -4,73 +4,85 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as ledger from "../../usage/ledger.js";
 import * as productLedger from "../../usage/product-ledger.js";
-import { CapBreachError } from "../../usage/types.js";
-import { reserveForProduct } from "../cost-scoper.js";
+import { recordProductSpend } from "../cost-scoper.js";
+
+// cost-scoper used to RESERVE projected spend against the per-run `--max-cost`
+// and the monthly cap, and refuse the call on either breach. `/ideal` has no
+// spend cap (user decision), so it only METERS now. These tests pin both halves:
+// spend is still recorded on both ledgers, and nothing ever consults a cap.
 
 const TEST_HOME = path.join(os.tmpdir(), `muonroi-test-${Math.random().toString(36).slice(2)}`);
+const CALL = {
+  provider: "anthropic",
+  model: "claude-3-5-sonnet-latest",
+  actualInputTokens: 100,
+  actualOutputTokens: 50,
+};
 
-describe("cost-scoper", () => {
+describe("cost-scoper — metering only", () => {
   beforeEach(async () => {
     await fs.mkdir(TEST_HOME, { recursive: true });
     vi.restoreAllMocks();
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(TEST_HOME, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
-  it("issues reservation when both caps are fine", async () => {
-    vi.spyOn(productLedger, "getProductSpentUsd").mockResolvedValue(0.1);
-    const reserveSpy = vi.spyOn(ledger, "reserve").mockResolvedValue({
-      id: "r1",
-      model: "claude-3-5-sonnet-latest",
+  it("records the call on the monthly ledger and on the per-run ledger", async () => {
+    const commit = vi.spyOn(ledger, "commitUnreserved").mockResolvedValue(0.05);
+    const append = vi.spyOn(productLedger, "appendProductLedger").mockResolvedValue(undefined);
+
+    await recordProductSpend(CALL, "run-1", { callsite: "sprint.generate" }, TEST_HOME);
+
+    expect(commit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: "anthropic",
+        actualInputTokens: 100,
+        actualOutputTokens: 50,
+        homeOverride: TEST_HOME,
+      }),
+    );
+    expect(append).toHaveBeenCalledWith(
+      "run-1",
+      expect.objectContaining({ productRunId: "run-1", callsite: "sprint.generate", reservationId: "unreserved" }),
+      TEST_HOME,
+    );
+  });
+
+  it("never consults a cap: no reservation and no spent-so-far lookup, however much the run has spent", async () => {
+    const reserve = vi.spyOn(ledger, "reserve");
+    const spentSoFar = vi.spyOn(productLedger, "getProductSpentUsd").mockResolvedValue(1_000_000);
+    vi.spyOn(ledger, "commitUnreserved").mockResolvedValue(1);
+    vi.spyOn(productLedger, "appendProductLedger").mockResolvedValue(undefined);
+
+    await expect(recordProductSpend(CALL, "run-1", undefined, TEST_HOME)).resolves.toBeUndefined();
+    expect(reserve).not.toHaveBeenCalled();
+    expect(spentSoFar).not.toHaveBeenCalled();
+  });
+
+  it("a ledger failure is logged, never thrown — metering must not break the call it measures", async () => {
+    vi.spyOn(ledger, "commitUnreserved").mockRejectedValue(new Error("disk full"));
+    vi.spyOn(productLedger, "appendProductLedger").mockRejectedValue(new Error("lock timeout"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    await expect(recordProductSpend(CALL, "run-1", undefined, TEST_HOME)).resolves.toBeUndefined();
+    const text = logged.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(text).toContain("disk full");
+    expect(text).toContain("lock timeout");
+  });
+
+  it("commitUnreserved records real spend on the monthly ledger even far above the configured cap", async () => {
+    await fs.writeFile(path.join(TEST_HOME, "config.json"), JSON.stringify({ cap: { monthly_usd: 0.000001 } }));
+    const usd = await ledger.commitUnreserved({
       provider: "anthropic",
-      projected_usd: 0.05,
-      est_input_tokens: 100,
-      est_output_tokens: 100,
-      createdAtMs: Date.now(),
+      model: "claude-3-5-sonnet-latest",
+      actualInputTokens: 1_000_000,
+      actualOutputTokens: 1_000_000,
+      homeOverride: TEST_HOME,
     });
-
-    const result = await reserveForProduct(
-      { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 100, estOutputTokens: 100 },
-      "run-1",
-      1.0,
-      TEST_HOME,
-    );
-
-    expect(result).not.toBeInstanceOf(CapBreachError);
-    if (!(result instanceof CapBreachError)) {
-      expect(result.productRunId).toBe("run-1");
-    }
-    expect(reserveSpy).toHaveBeenCalled();
-  });
-
-  it("blocks when per-product cap is hit", async () => {
-    vi.spyOn(productLedger, "getProductSpentUsd").mockResolvedValue(0.95);
-    const reserveSpy = vi.spyOn(ledger, "reserve");
-
-    const result = await reserveForProduct(
-      { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 10000, estOutputTokens: 10000 },
-      "run-1",
-      1.0,
-      TEST_HOME,
-    );
-
-    expect(result instanceof CapBreachError || (result as any).name === "CapBreachError").toBe(true);
-    expect(reserveSpy).not.toHaveBeenCalled();
-  });
-
-  it("blocks when monthly cap is hit", async () => {
-    vi.spyOn(productLedger, "getProductSpentUsd").mockResolvedValue(0.1);
-    vi.spyOn(ledger, "reserve").mockResolvedValue(new CapBreachError(14, 0, 2, 15));
-
-    const result = await reserveForProduct(
-      { provider: "anthropic", model: "claude-3-5-sonnet-latest", estInputTokens: 100, estOutputTokens: 100 },
-      "run-1",
-      1.0,
-      TEST_HOME,
-    );
-
-    expect(result instanceof CapBreachError || (result as any).name === "CapBreachError").toBe(true);
+    const state = JSON.parse(await fs.readFile(path.join(TEST_HOME, "usage.json"), "utf8")) as { current_usd: number };
+    expect(state.current_usd).toBeCloseTo(usd, 9);
   });
 });

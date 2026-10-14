@@ -1,0 +1,18 @@
+[
+  {
+    "Path": "D:\\sources\\Core\\muonroi-cli\\src\\orchestrator\\tool-engine.ts",
+    "Hash": "1F789CA99D35C6900D52FEEC10EB57436343AC36DCED8CF231F0A1776D185BE4"
+  },
+  {
+    "Path": "D:\\sources\\Core\\muonroi-cli\\src\\utils\\llm-deadline.ts",
+    "Hash": "8F4E5D5C0D490F87FCABDA12FA4CD84EDA5D91EA087CD3DC1FEE1EDCDF2BDD76"
+  },
+  {
+    "Path": "D:\\sources\\Core\\muonroi-cli\\src\\orchestrator\\__tests__\\main-handoff-stream.test.ts",
+    "Hash": "FC20E079D4BA447EEBEE734C77B2AC4BA7E68DB1E516ABA594A61BF325935FE6"
+  },
+  {
+    "Path": "D:\\sources\\Core\\muonroi-cli\\src\\utils\\__tests__\\abortable-stream.test.ts",
+    "Hash": "CB073697B3AC26B1C50E4A95287E03B8E02D120294C97940E64F311D2563C9BA"
+  }
+]

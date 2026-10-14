@@ -1,4 +1,5 @@
 import { APICallError } from "@ai-sdk/provider";
+import { isRateLimitRetryExhausted } from "../providers/rate-limit-backoff.js";
 import { isProviderThinkingDegraded, markProviderThinkingDegrade } from "../providers/strategies/thinking-mode.js";
 import { STALL_ABORT_REASON } from "./stall-watchdog.js";
 
@@ -41,6 +42,8 @@ export interface TransientCheck {
  *
  * Non-transient:
  *  - AbortError (user cancellation) — caller must handle abort separately
+ *  - A rate limit that already spent its full wait budget
+ *    (`ProviderRateLimitError`, see providers/rate-limit-backoff.ts)
  *  - HTTP 400, 401, 403, 422, and any other 4xx not listed above
  *  - Malformed tool/function name errors
  */
@@ -66,6 +69,16 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
   // AbortError: user cancellation — never retry, caller must handle
   if (e.name === "AbortError") {
     return { transient: false, reason: "user-abort" };
+  }
+
+  // A rate limit that ALREADY waited out its whole budget (the metered gate's
+  // `withProviderRateLimitRetry`, or `withStreamRetry`'s own rate-limit branch).
+  // It carries statusCode 429, so without this check every outer layer would
+  // classify it transient and stack its own retries — and each re-issued call
+  // passes through the gate again, which would spend another full budget. One
+  // budget per call; after that the actionable error must reach the caller.
+  if (isRateLimitRetryExhausted(err)) {
+    return { transient: false, reason: "rate-limit-exhausted" };
   }
 
   // Provider-stall watchdog abort (DOMException(STALL_ABORT_REASON,

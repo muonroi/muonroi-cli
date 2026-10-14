@@ -32,7 +32,7 @@ describe("ROUTE-06: cap-driven downgrade overrides classifier", () => {
 
   afterAll(async () => {
     await stub.stop();
-    await fs.rm(home, { recursive: true, force: true });
+    await fs.rm(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   beforeEach(() => {

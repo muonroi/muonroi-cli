@@ -2,6 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
+import { reportCleanupFailure } from "../../__test-stubs__/cleanup";
 import { withFileLock } from "../file-lock.js";
 
 describe("withFileLock", () => {
@@ -64,7 +65,16 @@ describe("withFileLock", () => {
   it("respects retry timeout", async () => {
     await fs.writeFile(`${tmpFile}.lock`, "manual");
     let acquired = false;
-    const release = setTimeout(() => fs.unlink(`${tmpFile}.lock`).catch(() => {}), 50);
+    // The unlink IS the mechanism under test: if it fails, `withFileLock` never
+    // acquires and line 72 reports "expected false to be true" with no cause.
+    // Swallowing it silently is exactly what made that failure unreadable.
+    const release = setTimeout(
+      () =>
+        fs
+          .unlink(`${tmpFile}.lock`)
+          .catch((err) => reportCleanupFailure("file-lock retry-timeout release", `${tmpFile}.lock`, err)),
+      50,
+    );
     await withFileLock(tmpFile, async () => {
       acquired = true;
     });

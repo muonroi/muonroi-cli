@@ -8,12 +8,17 @@
  * was asked or what it returned. The rail keeps the roster on screen, and a row
  * opens to show the prompt and the result.
  *
+ * Only RUNNING work is listed: a finished row leaves the rail and is counted in
+ * a one-line summary, so the block reads as "what is working right now" rather
+ * than an ever-growing wall of checkmarks. Every job, finished or not, stays
+ * reachable in the /jobs view — the summary line opens it.
+ *
  * Selection is by click (OpenTUI onMouseDown per row, same as
  * council-rail-rounds.tsx) — clicking the open row closes it again.
  */
 
 import { ListItem, Region } from "../primitives/semantic-primitives.js";
-import type { ActivityStatus, AgentActivity } from "../utils/agent-activities.js";
+import { type ActivityStatus, type AgentActivity, partitionForRail } from "../utils/agent-activities.js";
 import type { Theme } from "../theme.js";
 import { trunc } from "../utils/text.js";
 
@@ -39,14 +44,33 @@ export interface AgentRailActivitiesProps {
   /** Tool-call id of the open row, or null when all are collapsed. */
   selected: string | null;
   onSelect: (id: string | null) => void;
+  /** Opens the /jobs view (summary line click). */
+  onOpenJobs?: () => void;
   width: number;
   t: Theme;
 }
 
-export function AgentRailActivities({ activities, selected, onSelect, width, t }: AgentRailActivitiesProps) {
+/** "3 done · 1 failed" — null when nothing has finished. */
+export function finishedSummary(done: number, failed: number): string | null {
+  const parts: string[] = [];
+  if (done > 0) parts.push(`${done} done`);
+  if (failed > 0) parts.push(`${failed} failed`);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+export function AgentRailActivities({
+  activities,
+  selected,
+  onSelect,
+  onOpenJobs,
+  width,
+  t,
+}: AgentRailActivitiesProps) {
   if (activities.length === 0) return null;
 
-  const running = activities.filter((a) => a.status === "running").length;
+  const { running: runningRows, done, failed } = partitionForRail(activities);
+  const running = runningRows.length;
+  const summary = finishedSummary(done, failed);
 
   return (
     <Region
@@ -56,15 +80,17 @@ export function AgentRailActivities({ activities, selected, onSelect, width, t }
       props={{
         count: activities.length,
         running,
+        done,
+        failed,
         selected: selected ?? "",
-        ids: activities.map((a) => a.id).join(","),
+        ids: runningRows.map((a) => a.id).join(","),
       }}
     >
       <box flexDirection="column" flexShrink={0}>
         <text fg={t.textMuted} attributes={1}>
           {running > 0 ? `Agents (${running} running)` : "Agents"}
         </text>
-        {activities.map((a) => {
+        {runningRows.map((a) => {
           const isOpen = selected === a.id;
           return (
             <ListItem
@@ -94,6 +120,16 @@ export function AgentRailActivities({ activities, selected, onSelect, width, t }
             </ListItem>
           );
         })}
+        {summary && (
+          <ListItem id="rail-agent-finished" name={summary} value={`${done + failed}`}>
+            <box flexDirection="row" onMouseDown={() => onOpenJobs?.()}>
+              <text>
+                <span style={{ fg: failed > 0 ? t.diffRemovedFg : t.diffAddedFg }}>{failed > 0 ? "✗ " : "✓ "}</span>
+                <span style={{ fg: t.textMuted }}>{`${summary} — /jobs`}</span>
+              </text>
+            </box>
+          </ListItem>
+        )}
       </box>
     </Region>
   );

@@ -18,6 +18,13 @@ import { isAbsolute, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import {
+  ARGV_ALLOW_RE,
+  ARGV_CONTRACT,
+  ARGV_MAX_ARG_LENGTH,
+  ARGV_MAX_ARGS,
+  explainRejectedArg,
+} from "./argv-contract.js";
 import { createDriver, type Driver, type EventFilter, type LiveEventWithKind } from "./driver.js";
 import { createEventTee, resolveEventLogPath } from "./event-tee.js";
 import {
@@ -26,8 +33,10 @@ import {
   EVENTS_RESOURCE_URI,
   NotificationBridge,
 } from "./notification-bridge.js";
-import type { LiveEvent, LiveFrame, VisualFrame } from "./protocol.js";
-import { PROTOCOL_VERSION } from "./protocol.js";
+import { PREDICATE_GRAMMAR } from "./predicate.js";
+import type { LiveEvent, LiveFrame, UINode, VisualFrame } from "./protocol.js";
+import { KNOWN_ROLES, LIVE_EVENT_KINDS, PROTOCOL_VERSION } from "./protocol.js";
+import { SELECTOR_GRAMMAR } from "./selector.js";
 
 // ---------------------------------------------------------------------------
 // Spawn injection contract
@@ -61,13 +70,15 @@ export interface HarnessSpawnRequest {
 /** A function that spawns a TUI process and returns transport streams. */
 export type HarnessSpawn = (req: HarnessSpawnRequest) => Promise<HarnessSpawnResult>;
 
-// `--session=<id>` lets an MCP agent resume a persisted session by restarting
-// the harnessed child (tui.stop → tui.start({ args: ["--session=<id>"] })). Only
-// the combined `=` form is allowed so the value stays on a single argv token the
-// per-arg allowlist can vet; the id charset is restricted to word/dash chars so
-// it can never carry a path or shell metacharacter. See the resume-request event
-// (protocol.ts) for why in-TUI /resume relaunch is suppressed under agent-mode.
-const ARG_ALLOW = /^(--agent-[a-z-]+(=.*)?|--mock-llm(=.+)?|--profile=[a-zA-Z0-9_-]+|--session=[a-zA-Z0-9_-]+)$/;
+// The argv allowlist is ASSEMBLED from ARGV_FORMS in argv-contract.ts, which is
+// the same declaration `tui.capabilities` publishes as `argv`. Enforcement and
+// publication therefore cannot drift: adding a form advertises it, and removing
+// one un-advertises it, in a single edit. `--session=<id>` (restart-to-resume,
+// tui.stop → tui.start({args:["--session=<id>"]})) is `=`-only there for the
+// reason every value-bearing form is: the value must stay on a single argv token
+// the per-token allowlist can vet. See the resume-request event (protocol.ts)
+// for why in-TUI /resume relaunch is suppressed under agent-mode.
+const ARG_ALLOW = ARGV_ALLOW_RE;
 const ENV_KEY_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 const ENV_STRIP = new Set([
   "NODE_OPTIONS",
@@ -80,9 +91,21 @@ const ENV_STRIP = new Set([
   "NODE_PATH",
 ]);
 
-export function validateStartArgs(args: string[]): { ok: true } | { ok: false; bad: string } {
-  for (const a of args) {
-    if (!ARG_ALLOW.test(a)) return { ok: false, bad: a };
+/**
+ * Vet every `args` element against the assembled allowlist.
+ *
+ * On failure the result carries the element's INDEX and a derived explanation
+ * as well as the token: the most common rejection (a value written as its own
+ * element after `--mock-llm`) is not diagnosable from the token alone.
+ */
+export function validateStartArgs(
+  args: string[],
+): { ok: true } | { ok: false; bad: string; index: number; message: string } {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i] as string;
+    if (!ARG_ALLOW.test(a)) {
+      return { ok: false, bad: a, index: i, message: explainRejectedArg(args, i) };
+    }
   }
   return { ok: true };
 }
@@ -242,26 +265,106 @@ export function validateMockLlmPath(value: string): boolean {
   return real === root || real.startsWith(root + sep);
 }
 
-const FEATURES = [
-  "capabilities",
-  "snapshot",
-  "press",
-  "type",
-  "wait_for",
-  "query",
-  "expect",
-  "render_text",
-  "render_visual",
-  "snapshot_visual",
-  "cell",
-  "visual_quality",
-  "wait_for_event",
-  "event_log",
-] as const;
+// ---------------------------------------------------------------------------
+// Capabilities
+// ---------------------------------------------------------------------------
 
-export function buildCapabilitiesPayload(): {
+/** Prefix every harness tool is registered under. */
+const TOOL_NAMESPACE = "tui.";
+
+/**
+ * Capability strings that are NOT tools, and so cannot come from the registrar.
+ * `event_log` is the JSONL sink (see `eventLogPath`), not a callable.
+ */
+const NON_TOOL_FEATURES = ["event_log"] as const;
+
+/**
+ * Every tool name passed to `server.registerTool`, recorded as it is registered.
+ *
+ * The predecessor of this set was a hand-maintained `FEATURES` array that had
+ * drifted to 14 entries against 21 registered tools — `tui.last_event`, the one
+ * tool that answers "is this run waiting on a human or hung", was among the
+ * seven a capabilities-only agent could not discover. Deriving the advertised
+ * list from the registrar makes that class of drift unrepresentable.
+ */
+const REGISTERED_TOOL_NAMES = new Set<string>();
+
+/** The tool names registered in this process, sorted. */
+export function getRegisteredToolNames(): readonly string[] {
+  return [...REGISTERED_TOOL_NAMES].sort();
+}
+
+/**
+ * Wrap `server.registerTool` so every registration is recorded in
+ * {@link REGISTERED_TOOL_NAMES} before it is forwarded to the SDK. Must be
+ * applied before the first `registerTool` call on that server.
+ *
+ * The SDK keeps its tool table in a private field (`McpServer._registeredTools`),
+ * so intercepting the registrar is the only way to read the real tool set
+ * without depending on SDK internals.
+ */
+function recordToolRegistrations(server: McpServer): void {
+  type Registrar = (...args: unknown[]) => unknown;
+  const holder = server as unknown as { registerTool: Registrar };
+  const original = holder.registerTool.bind(server) as Registrar;
+  holder.registerTool = (...args: unknown[]) => {
+    const name = args[0];
+    if (typeof name === "string") REGISTERED_TOOL_NAMES.add(name);
+    return original(...args);
+  };
+}
+
+/** One semantic node, flattened out of the live frame for the capabilities handshake. */
+export interface CapabilitiesSemanticNode {
+  id: string;
+  role: string;
+  name?: string;
+  focus?: true;
+  isModal?: true;
+}
+
+/** Upper bound on nodes echoed into the payload, so capabilities stays a handshake. */
+const SEMANTICS_NODE_CAP = 300;
+
+export interface HarnessCapabilities {
   protocol: string;
+  /**
+   * Short (namespace-stripped) tool names plus non-tool capability strings.
+   * Retained for callers that predate `tools`; derived, not hand-maintained.
+   */
   features: readonly string[];
+  /** Fully-qualified names of every registered tool — what you actually call. */
+  tools: readonly string[];
+  /** `"registrar"` when derived from real registrations; `"none"` when no server
+   *  has been constructed in this process, so an empty list is never mistaken
+   *  for "this build has no tools". */
+  toolsSource: "registrar" | "none";
+  /** Every `LiveEvent.kind` accepted by `tui.last_event` / `tui.wait_for`. */
+  eventKinds: readonly string[];
+  /** The closed role vocabulary a semantic node may carry. */
+  roles: readonly string[];
+  /** Roles outside `roles` are admitted only under this prefix. */
+  customRolePrefix: "x-";
+  /** The selector grammar accepted by query/query_all/count/expect/focus/wait_for. */
+  selector: typeof SELECTOR_GRAMMAR;
+  /** The predicate grammar accepted by tui.expect. */
+  predicate: typeof PREDICATE_GRAMMAR;
+  /** The argv contract enforced by tui.start — every accepted form, the
+   *  whole-token matching rule, and ready-to-send call examples. Assembled from
+   *  the same declaration the allowlist regex is built from, so the published
+   *  contract and the enforced one cannot diverge. */
+  argv: typeof ARGV_CONTRACT;
+  /** Semantic ids/roles present in the CURRENT frame. Never a static inventory —
+   *  ids are per-render, so this reports what exists right now, or says why not. */
+  semantics: {
+    source: "live-frame" | "no-driver" | "no-frame";
+    frameSeq: number | null;
+    focus: string | null;
+    modals: readonly string[];
+    nodeCount: number;
+    truncated: boolean;
+    nodes: readonly CapabilitiesSemanticNode[];
+  };
   /** Where LiveEvents are teed as JSONL, or null when the sink is disabled. */
   eventLogPath: string | null;
   /** Streaming event + heartbeat tool is available (single-call delivery). */
@@ -271,10 +374,71 @@ export function buildCapabilitiesPayload(): {
   /** Server MAY use sampling/createMessage when the client advertises sampling
    *  AND the caller passes pushMode:true at tui.start. Runtime-detected per session. */
   supportsSampling: "client-dependent";
-} {
+}
+
+/** Flatten a frame's node forest, capped, into the handshake shape. */
+function flattenSemanticNodes(nodes: readonly UINode[]): { out: CapabilitiesSemanticNode[]; total: number } {
+  const out: CapabilitiesSemanticNode[] = [];
+  let total = 0;
+  const visit = (n: UINode): void => {
+    total++;
+    if (out.length < SEMANTICS_NODE_CAP) {
+      const row: CapabilitiesSemanticNode = { id: n.id, role: n.role };
+      if (n.name !== undefined) row.name = n.name;
+      if (n.focus) row.focus = true;
+      if (n.isModal) row.isModal = true;
+      out.push(row);
+    }
+    for (const c of n.children ?? []) visit(c);
+  };
+  for (const n of nodes) visit(n);
+  return { out, total };
+}
+
+/**
+ * Build the `tui.capabilities` payload.
+ *
+ * Everything an agent needs to construct a working selector is derived from the
+ * code that consumes it — the tool list from the registrar, the event kinds and
+ * role vocabulary from `protocol.ts`, the selector grammar from `selector.ts`.
+ * Nothing here is a second copy that can silently fall out of date.
+ *
+ * @param opts.frame  the current LiveFrame (or null) — supplies live semantic ids.
+ * @param opts.tools  override the derived tool list; tests only.
+ */
+export function buildCapabilitiesPayload(
+  opts: { frame?: LiveFrame | null; hasDriver?: boolean; tools?: readonly string[] } = {},
+): HarnessCapabilities {
+  const tools = opts.tools ?? getRegisteredToolNames();
+  const shortNames = tools.map((t) => (t.startsWith(TOOL_NAMESPACE) ? t.slice(TOOL_NAMESPACE.length) : t));
+  const features = [...new Set([...shortNames, ...NON_TOOL_FEATURES])].sort();
+
+  const frame = opts.frame ?? null;
+  const hasDriver = opts.hasDriver ?? frame !== null;
+  const { out: nodes, total } = frame ? flattenSemanticNodes(frame.nodes) : { out: [], total: 0 };
+
   return {
     protocol: PROTOCOL_VERSION,
-    features: FEATURES,
+    features,
+    tools,
+    toolsSource: tools.length > 0 ? "registrar" : "none",
+    eventKinds: LIVE_EVENT_KINDS,
+    roles: KNOWN_ROLES,
+    customRolePrefix: "x-",
+    selector: SELECTOR_GRAMMAR,
+    predicate: PREDICATE_GRAMMAR,
+    // Published for the same reason selector/predicate are: the rule needed to
+    // call the tool must live in the payload, not in this package's source.
+    argv: ARGV_CONTRACT,
+    semantics: {
+      source: frame ? "live-frame" : hasDriver ? "no-frame" : "no-driver",
+      frameSeq: frame ? frame.seq : null,
+      focus: frame?.focus ?? null,
+      modals: frame?.modals ?? [],
+      nodeCount: total,
+      truncated: total > nodes.length,
+      nodes,
+    },
     // A default-on sink nobody can locate is still opt-in. Reporting the
     // resolved path here is what makes it discoverable without the caller
     // reproducing the env/tmpdir/pid rule.
@@ -285,11 +449,90 @@ export function buildCapabilitiesPayload(): {
   };
 }
 
-export function registerReadTools(server: McpServer, getDriver: () => Driver | null): void {
-  const noDriver = () => ({
-    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
+/** Why no driver is attached right now. */
+export type HarnessStartStatus = "never-started" | "start-rejected" | "spawn-failed" | "running" | "stopped" | "exited";
+
+/** The most recent `tui.start` lifecycle transition, reported by `no_driver`. */
+export interface HarnessStartState {
+  status: HarnessStartStatus;
+  /** Error code of the last refused tui.start (`argv_rejected`, `cwd_rejected`, …). */
+  error?: string;
+  /** Actionable detail for that transition. */
+  detail?: string;
+  /** Epoch ms of the transition. */
+  at?: number;
+  pid?: number;
+  exitCode?: number;
+}
+
+const NEVER_STARTED: HarnessStartState = { status: "never-started" };
+
+/**
+ * Build the `no_driver` payload.
+ *
+ * "Call tui.start first" is true and useless to the agent that just called
+ * tui.start and was refused: a rejected start, a crashed child, a stopped child
+ * and a start never attempted were one indistinguishable response, and a
+ * graduation run burned five consecutive round-trips on it. The status field
+ * separates those four, and the message names the next action for each.
+ */
+export function buildNoDriverPayload(state: HarnessStartState = NEVER_STARTED): {
+  error: "no_driver";
+  status: HarnessStartStatus;
+  message: string;
+  lastStart: HarnessStartState;
+} {
+  const contractRef = "The accepted `tui.start` arguments are published at `tui.capabilities` → `argv`.";
+  let message: string;
+  switch (state.status) {
+    case "start-rejected":
+      message =
+        `No TUI is attached: your last tui.start was REFUSED before any process was spawned` +
+        `${state.error ? ` (${state.error})` : ""}. ` +
+        `${state.detail ? `${state.detail} ` : ""}` +
+        `Calling tui.start again with the SAME arguments will fail the same way. ${contractRef}`;
+      break;
+    case "spawn-failed":
+      message =
+        `No TUI is attached: the last tui.start passed validation but the child process could not be spawned. ` +
+        `${state.detail ? `${state.detail} ` : ""}This is an environment failure, not an argument error.`;
+      break;
+    case "stopped":
+      message = "No TUI is attached: tui.stop ended the previous child. Call tui.start again to attach a new one.";
+      break;
+    case "exited":
+      message =
+        `No TUI is attached: the child TUI exited on its own` +
+        `${state.exitCode === undefined ? "" : ` (exit code ${state.exitCode})`}` +
+        `, so it was detached. Call tui.start again.`;
+      break;
+    case "running":
+      message =
+        "No TUI is attached, but the last recorded transition was a successful start — the child was lost without an exit signal. Call tui.stop, then tui.start.";
+      break;
+    default:
+      message = `No TUI is attached and no tui.start has been attempted in this session. Call tui.start. ${contractRef}`;
+      break;
+  }
+  return { error: "no_driver", status: state.status, message, lastStart: state };
+}
+
+/** Shared `no_driver` tool result for every read/action/async tool. */
+function noDriverResult(getStartState?: () => HarnessStartState) {
+  return {
+    content: [
+      { type: "text" as const, text: JSON.stringify(buildNoDriverPayload(getStartState?.() ?? NEVER_STARTED)) },
+    ],
     isError: true,
-  });
+  };
+}
+
+export function registerReadTools(
+  server: McpServer,
+  getDriver: () => Driver | null,
+  getStartState?: () => HarnessStartState,
+): void {
+  const noDriver = () => noDriverResult(getStartState);
 
   server.registerTool("tui.snapshot", { description: "Return the latest LiveFrame.", inputSchema: {} }, async () => {
     const d = getDriver();
@@ -432,11 +675,12 @@ export function registerReadTools(server: McpServer, getDriver: () => Driver | n
   );
 }
 
-export function registerActionTools(server: McpServer, getDriver: () => Driver | null): void {
-  const noDriver = () => ({
-    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
-    isError: true,
-  });
+export function registerActionTools(
+  server: McpServer,
+  getDriver: () => Driver | null,
+  getStartState?: () => HarnessStartState,
+): void {
+  const noDriver = () => noDriverResult(getStartState);
 
   server.registerTool(
     "tui.press",
@@ -483,20 +727,33 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
   server.registerTool(
     "tui.focus",
     {
-      description: "Move focus to the node matched by selector (must match exactly one).",
-      inputSchema: { selector: z.string().max(500) },
+      description:
+        "Move focus to the node matched by selector (must match exactly one) and VERIFY it moved. " +
+        "Returns an error when the selector matches 0 or >1 nodes, or when no frame reports the node " +
+        "focused within timeoutMs — most TUI surfaces do not accept programmatic focus, drive those " +
+        "with tui.press / tui.press_sequence instead.",
+      inputSchema: { selector: z.string().max(500), timeoutMs: z.number().int().min(0).max(10_000).optional() },
     },
-    async ({ selector }) => {
+    async ({ selector, timeoutMs }) => {
       const d = getDriver();
       if (!d) return noDriver();
       try {
-        d.focus(selector);
-        return { content: [{ type: "text" as const, text: "ok" }] };
-      } catch (e) {
+        const outcome = await d.focus_verified(selector, timeoutMs);
+        if (outcome.ok) {
+          return { content: [{ type: "text" as const, text: JSON.stringify(outcome) }] };
+        }
+        // Not an exception — a truthful negative result. It MUST be isError so a
+        // driver cannot mistake "focus did not move" for "focus moved": that
+        // false `ok` is what left a live /ideal run unreachable (2026-09-05).
         return {
-          content: [
-            { type: "text" as const, text: JSON.stringify({ error: "focus_failed", message: (e as Error).message }) },
-          ],
+          content: [{ type: "text" as const, text: JSON.stringify({ error: outcome.reason, ...outcome }) }],
+          isError: true,
+        };
+      } catch (e) {
+        const message = (e as Error)?.message ?? String(e);
+        console.error(`[harness/mcp-server] tui.focus failed for selector ${JSON.stringify(selector)}: ${message}`);
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify({ error: "focus_failed", message }) }],
           isError: true,
         };
       }
@@ -504,19 +761,118 @@ export function registerActionTools(server: McpServer, getDriver: () => Driver |
   );
 }
 
+/**
+ * Outcome of a `tui.stop` — reported so a caller can distinguish a real kill
+ * from a no-op. Before this existed, `tui.stop` returned the string "ok"
+ * unconditionally while never calling `kill()`, so every started TUI survived
+ * the stop and an unattended loop leaked one process per sprint.
+ */
+export interface HarnessStopOutcome {
+  /** false only when the child was still live and kill() could not reach it. */
+  ok: boolean;
+  /** pid of the child we attempted to kill (undefined when nothing was running). */
+  pid?: number;
+  /** true when kill() was invoked and the signal was accepted. */
+  killed: boolean;
+  /** `no_child` | `already_exited` — why no signal was delivered. */
+  reason?: string;
+  /** kill() failure message, when one was raised. */
+  error?: string;
+}
+
 export type AsyncToolDeps = {
-  onStop: () => void;
+  /**
+   * Tear down the current child. Returning an outcome is optional (a `void`
+   * return is treated as plain success) so existing embedders keep compiling:
+   * `| undefined` would reject them, since a void-returning function is not
+   * assignable to one returning undefined.
+   */
+  // biome-ignore lint/suspicious/noConfusingVoidType: deliberate — keeps existing `onStop: () => {}` embedders assignable while the real server reports a HarnessStopOutcome.
+  onStop: () => HarnessStopOutcome | void;
   /** Returns the spawned TUI child PID (undefined when no driver). */
   getPid: () => number | undefined;
   /** Milliseconds since the child process was spawned (undefined when no driver). */
   getStartedAt: () => number | undefined;
+  /** Last tui.start lifecycle transition, so `no_driver` can say WHY. Optional
+   *  for embedders that predate it — omitted reads as "never-started". */
+  getStartState?: () => HarnessStartState;
 };
 
+/** Grace period between the polite kill and the forced one. */
+export const HARNESS_KILL_GRACE_MS = 2_000;
+
+/**
+ * Kill a harness child, tolerating the already-exited case.
+ *
+ * Exported for unit testing: the stop path is otherwise only reachable through
+ * a real spawn, which is exactly what made the "stop does not stop" bug ship.
+ *
+ * Escalation: `kill()` (SIGTERM on POSIX) first; if `exited` has not settled
+ * after HARNESS_KILL_GRACE_MS the child is SIGKILLed. The timer is unref'd so
+ * it never keeps the MCP server process alive.
+ */
+export function killHarnessChild(
+  proc: HarnessSpawnResult["proc"] | null | undefined,
+  exited?: Promise<number> | null,
+  graceMs: number = HARNESS_KILL_GRACE_MS,
+): HarnessStopOutcome {
+  if (!proc) return { ok: true, killed: false, reason: "no_child" };
+  const pid = proc.pid;
+  try {
+    const accepted = proc.kill();
+    if (accepted === false) {
+      // Node returns false when the signal could not be delivered — almost
+      // always because the child is already gone. Not an error for us (no
+      // orphan is left), but it must be visible, not swallowed.
+      console.error(
+        `[agent-harness-core/mcp-server] kill(pid=${String(pid)}) returned false — child already exited or signal undeliverable`,
+      );
+      return { ok: true, killed: false, pid, reason: "already_exited" };
+    }
+  } catch (err) {
+    // POSIX raises ESRCH and Windows "process not found" once the child has
+    // exited. Treat as success (nothing orphaned) but log per the No Silent
+    // Catch Rule — module, operation, message.
+    const message = (err as Error)?.message ?? String(err);
+    console.error(`[agent-harness-core/mcp-server] kill(pid=${String(pid)}) threw: ${message}`);
+    return { ok: true, killed: false, pid, reason: "already_exited", error: message };
+  }
+
+  if (exited && graceMs > 0) {
+    let settled = false;
+    exited.then(
+      () => {
+        settled = true;
+      },
+      (err: unknown) => {
+        settled = true;
+        console.error(
+          `[agent-harness-core/mcp-server] exited promise rejected for pid=${String(pid)}: ${(err as Error)?.message ?? String(err)}`,
+        );
+      },
+    );
+    const timer = setTimeout(() => {
+      if (settled) return;
+      try {
+        proc.kill("SIGKILL");
+        console.error(
+          `[agent-harness-core/mcp-server] child pid=${String(pid)} did not exit within ${graceMs}ms — sent SIGKILL`,
+        );
+      } catch (err) {
+        console.error(
+          `[agent-harness-core/mcp-server] SIGKILL(pid=${String(pid)}) failed: ${(err as Error)?.message ?? String(err)}`,
+        );
+      }
+    }, graceMs);
+    // Never hold the event loop open on account of the escalation timer.
+    (timer as unknown as { unref?: () => void }).unref?.();
+  }
+
+  return { ok: true, killed: true, pid };
+}
+
 export function registerAsyncTools(server: McpServer, getDriver: () => Driver | null, deps: AsyncToolDeps): void {
-  const noDriver = () => ({
-    content: [{ type: "text" as const, text: JSON.stringify({ error: "no_driver", message: "Call tui.start first" }) }],
-    isError: true,
-  });
+  const noDriver = () => noDriverResult(deps.getStartState);
 
   const waitConditionShape = {
     selector: z.string().max(500).optional(),
@@ -617,33 +973,14 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
         "(null if none) — including the complete askcard question text, which tui.query truncates. " +
         "Use this instead of polling a database or log file: modal pauses write no DB row, so a " +
         "poller cannot tell 'waiting for a human' from 'hung'. Pair with tui.wait_for to block.",
-      // Full protocol event set (minus the idle sentinel) so an external agent can
-      // observe lifecycle events — council/sprint/route/askcard, not just toasts.
-      // The Driver accepts any kind; this enum is the MCP-boundary validation.
+      // Derived from LIVE_EVENT_KINDS — the protocol's own runtime projection of
+      // the LiveEvent union, kept exhaustive by a compile-time assertion in
+      // protocol.ts. The hand-copied enum this replaces claimed to be the "full
+      // protocol event set" while omitting `resume-request`, so that one call was
+      // rejected at the MCP boundary. The Driver accepts any kind; this enum is
+      // the MCP-boundary validation.
       inputSchema: {
-        kind: z.enum([
-          "toast",
-          "stream.delta",
-          "llm-token",
-          "llm-done",
-          "council-step",
-          "council-speaker",
-          "council-turn-length",
-          "askcard-open",
-          "askcard-answered",
-          "askcard-cancel",
-          "sprint-stage",
-          "sprint-halt",
-          "sprint-plan-committed",
-          "route-decision",
-          "steer-inject",
-          "usage",
-          "grounding-flag",
-          "ee-timeout",
-          "ee-error",
-          "stream-retry",
-          "disconnect",
-        ]),
+        kind: z.enum(LIVE_EVENT_KINDS),
       },
     },
     async ({ kind }) => {
@@ -660,8 +997,15 @@ export function registerAsyncTools(server: McpServer, getDriver: () => Driver | 
       inputSchema: {},
     },
     async () => {
-      deps.onStop();
-      return { content: [{ type: "text" as const, text: "ok" }] };
+      const outcome = deps.onStop();
+      // `void` (or a successful outcome) keeps the historical "ok" payload so
+      // existing agent scripts keep parsing. A genuine kill failure is the only
+      // case that changes shape — silence there is what P0-3 was about.
+      if (!outcome || outcome.ok) return { content: [{ type: "text" as const, text: "ok" }] };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify({ error: "stop_failed", ...outcome }) }],
+        isError: true,
+      };
     },
   );
 
@@ -867,20 +1211,41 @@ export function createMcpHarnessServer({
 }): McpServer {
   configureHarnessRoots({ repoRoot, entry });
   const server = new McpServer({ name: "muonroi-harness-driver", version: "0.1.0" });
+  // Before ANY registerTool call, so tui.capabilities advertises the real set.
+  recordToolRegistrations(server);
   let currentDriver: Driver | null = null;
   let currentPid: number | undefined;
   let currentStartedAt: number | undefined;
+  // The child handle itself — NOT just its pid. Without this, onStop had no way
+  // to reach kill() and every "stopped" TUI survived as an orphan (P0-3).
+  let currentProc: HarnessSpawnResult["proc"] | null = null;
+  let currentExited: Promise<number> | null = null;
   let stopBridge: (() => void) | null = null;
   /** Bridge caps detected at the most recent tui.start (all-false if client caps unknown). */
   let currentBridgeCaps: BridgeCapabilities = { logging: false, resources: false, sampling: false };
-  const onStop = () => {
+  // The last tui.start lifecycle transition. Read ONLY by no_driver, which
+  // without it cannot tell "you were refused" from "you never called start".
+  let startState: HarnessStartState = { status: "never-started" };
+  const setStartState = (next: HarnessStartState): void => {
+    startState = { ...next, at: Date.now() };
+  };
+  const onStop = (): HarnessStopOutcome => {
     if (stopBridge) {
       stopBridge();
       stopBridge = null;
     }
+    const proc = currentProc;
+    const exited = currentExited;
+    if (currentProc || currentDriver) setStartState({ status: "stopped", pid: currentPid });
     currentDriver = null;
     currentPid = undefined;
     currentStartedAt = undefined;
+    currentProc = null;
+    currentExited = null;
+    // Kill AFTER clearing state, so the server can never be stranded in a
+    // "started" state it cannot stop out of. killHarnessChild never throws —
+    // it converts the already-exited case into an outcome.
+    return killHarnessChild(proc, exited);
   };
 
   // Register the subscribable event-feed resource so clients that advertised
@@ -917,14 +1282,25 @@ export function createMcpHarnessServer({
   server.registerTool(
     "tui.capabilities",
     {
-      description: "Report the harness protocol version and supported feature list.",
+      description:
+        "Report everything needed to drive this TUI with no repo knowledge: protocol version, " +
+        "the full registered tool list, every LiveEvent kind, the semantic role vocabulary, the " +
+        "selector grammar, and the semantic ids present in the CURRENT frame.",
       inputSchema: {},
     },
     async () => ({
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(buildCapabilitiesPayload()),
+          text: JSON.stringify(
+            // Semantic ids are per-render, so they are read off the live frame
+            // rather than published as a static inventory that would be wrong
+            // the moment the UI changes.
+            buildCapabilitiesPayload({
+              frame: currentDriver?.snapshot() ?? null,
+              hasDriver: currentDriver !== null,
+            }),
+          ),
         },
       ],
     }),
@@ -935,7 +1311,9 @@ export function createMcpHarnessServer({
     {
       description: "Spawn the muonroi-cli TUI in agent-mode with sanitized argv/env.",
       inputSchema: {
-        args: z.array(z.string().max(200)).max(20),
+        // Bounds come from the published contract (ARGV_CONTRACT.maxArgs /
+        // maxArgLength) so the schema and the handshake state one number.
+        args: z.array(z.string().max(ARGV_MAX_ARG_LENGTH)).max(ARGV_MAX_ARGS),
         cwd: z.string().max(2000).optional(),
         env: z.record(z.string(), z.string()).optional(),
         mockLlmDir: z.string().max(500).optional(),
@@ -958,14 +1336,35 @@ export function createMcpHarnessServer({
       // --- Security boundary checks (must not be removed or bypassed) ---
       const argCheck = validateStartArgs(input.args);
       if (!argCheck.ok) {
+        // The old payload was `{error, bad}` — WHAT was refused, never what
+        // would be accepted, so an agent could not repair the call from the
+        // message. It now carries the position, the derived reason, and every
+        // accepted form (the same array the allowlist regex is built from).
+        const detail = `args[${argCheck.index}] ${JSON.stringify(argCheck.bad)} is not in the tui.start argv allowlist. ${argCheck.message}`;
+        setStartState({ status: "start-rejected", error: "argv_rejected", detail });
         return {
-          content: [{ type: "text" as const, text: JSON.stringify({ error: "argv_rejected", bad: argCheck.bad }) }],
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify({
+                error: "argv_rejected",
+                bad: argCheck.bad,
+                index: argCheck.index,
+                message: detail,
+                matching: ARGV_CONTRACT.matching,
+                allowed: ARGV_CONTRACT.forms,
+                callExamples: ARGV_CONTRACT.callExamples,
+                contract: "tui.capabilities → argv",
+              }),
+            },
+          ],
           isError: true,
         };
       }
       if (input.cwd) {
         const cwdCheck = validateCwd(input.cwd);
         if (!cwdCheck.ok) {
+          setStartState({ status: "start-rejected", error: "cwd_rejected", detail: cwdCheck.reason });
           return {
             content: [
               { type: "text" as const, text: JSON.stringify({ error: "cwd_rejected", reason: cwdCheck.reason }) },
@@ -975,6 +1374,11 @@ export function createMcpHarnessServer({
         }
       }
       if (input.mockLlmDir && !validateMockLlmPath(input.mockLlmDir)) {
+        setStartState({
+          status: "start-rejected",
+          error: "mock_llm_rejected",
+          detail: "mockLlmDir must resolve inside the muonroi-cli repo root.",
+        });
         return {
           content: [{ type: "text" as const, text: JSON.stringify({ error: "mock_llm_rejected" }) }],
           isError: true,
@@ -1007,6 +1411,9 @@ export function createMcpHarnessServer({
           cwd: input.cwd,
         });
       } catch (err) {
+        const message = (err as Error)?.message ?? String(err);
+        console.error(`[agent-harness-core/mcp-server] tui.start spawn failed (entry=${entry}): ${message}`);
+        setStartState({ status: "spawn-failed", error: "spawn_failed", detail: message });
         return {
           content: [
             {
@@ -1034,18 +1441,34 @@ export function createMcpHarnessServer({
       // onLine already delivers complete newline-stripped lines — no extra
       // splitting required.
       const unsub = onLine(makeLineHandler(driver, eventTee));
-      spawnResult.exited.then(() => {
+      const clearIfCurrent = (exitCode?: number) => {
         unsub();
-        if (currentPid === proc.pid) {
+        // Identity, not pid: a pid can be undefined (or, in principle, reused),
+        // and this handler must only clear the child it belongs to.
+        if (currentProc === proc) {
+          setStartState({ status: "exited", pid: currentPid, exitCode });
           currentDriver = null;
           currentPid = undefined;
           currentStartedAt = undefined;
+          currentProc = null;
+          currentExited = null;
         }
+      };
+      spawnResult.exited.then(clearIfCurrent, (err: unknown) => {
+        // A rejected exit promise must still release the transport, and must
+        // never surface as an unhandled rejection that kills the MCP server.
+        console.error(
+          `[agent-harness-core/mcp-server] child exit promise rejected (pid=${String(proc.pid)}): ${(err as Error)?.message ?? String(err)}`,
+        );
+        clearIfCurrent();
       });
 
       currentDriver = driver;
       currentPid = proc.pid;
       currentStartedAt = Date.now();
+      currentProc = proc;
+      currentExited = spawnResult.exited;
+      setStartState({ status: "running", pid: proc.pid });
 
       // Start the opt-in push bridge. Feature-detect client caps; when the
       // client advertised logging/resources/sampling, forward events via those
@@ -1072,12 +1495,14 @@ export function createMcpHarnessServer({
     },
   );
 
-  registerReadTools(server, () => currentDriver);
-  registerActionTools(server, () => currentDriver);
+  const getStartState = () => startState;
+  registerReadTools(server, () => currentDriver, getStartState);
+  registerActionTools(server, () => currentDriver, getStartState);
   registerAsyncTools(server, () => currentDriver, {
     onStop,
     getPid: () => currentPid,
     getStartedAt: () => currentStartedAt,
+    getStartState,
   });
 
   return server;

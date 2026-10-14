@@ -124,6 +124,40 @@ export interface SubAgentCompactorOptions {
    * Undefined = off (sub-agent path unchanged).
    */
   tailBudgetChars?: number;
+  /**
+   * C1 — the preservation focus the MAIN-CONTEXT agent stated (the `focus`
+   * argument of the `compact` tool, src/tools/registry.ts). Before this the
+   * agent's answer was consumed at tool-engine.ts:2218 and dropped: it could
+   * say HOW to compact and nothing read it.
+   *
+   * Two truthful, non-fuzzy effects, both deterministic:
+   *   1. Protection — a tool result whose preview contains one of the focus's
+   *      concrete terms (exact, case-insensitive substring containment; see
+   *      `extractFocusTerms`) is kept verbatim instead of stubbed.
+   *   2. Visibility — every stub written in this pass names the focus, so the
+   *      model reading a stub can see what it asked to keep and whether this
+   *      particular result matched.
+   * Capped at FOCUS_NOTE_MAX_CHARS so a long focus cannot inflate the prompt.
+   */
+  focusNote?: string;
+  /**
+   * Reports every tool result this pass removed from the model's view — stubbed
+   * by `rewriteOlderToolMessage`, or dropped outright by `sliceMessageHistory`.
+   *
+   * Exists because this compaction is INVISIBLE to tools: it runs in
+   * `prepareStep`, so only the provider sees the rewritten array while tool
+   * execute() is handed the array from before it. The dedup layers therefore
+   * cannot detect the loss by inspecting `ToolCallOptions.messages`; they have
+   * to be told, or they go on pointing at payloads the model can no longer read
+   * (measured: nine identical bash calls, all answered with a dead pointer).
+   * The evidence for that SDK behaviour — and the probe that re-checks it after
+   * an upgrade — lives once in `tool-result-visibility.ts`; do not restate it.
+   *
+   * The set is derived by diffing input against output, not emitted per elision
+   * site, so a future elision path cannot forget to report. Called on every
+   * compacting pass with the same ids — consumers must be idempotent.
+   */
+  onElide?: (toolCallIds: string[]) => void;
 }
 
 /** O2 — floor for the tail-budget keepLast shrink; never break the live step's
@@ -137,6 +171,54 @@ const TAIL_BUDGET_MIN_KEEP = 2;
  * tokens means we compact slightly earlier, which is the safe direction.
  */
 export const CHARS_PER_TOKEN = 4;
+
+/**
+ * C1 — hard cap on the agent's focus note as it is stored and re-rendered into
+ * stubs. Bounds the prompt cost of the visibility half of the feature.
+ */
+export const FOCUS_NOTE_MAX_CHARS = 200;
+
+/** Minimum length of a focus term to be usable for exact-containment protection. */
+const FOCUS_TERM_MIN_CHARS = 4;
+
+/**
+ * C1 — split the agent's focus into CONCRETE terms usable for exact substring
+ * protection. Deliberately NOT fuzzy: a term qualifies only when it is either
+ * path-like/dotted/underscored (`src/foo.ts`, `read_file`, `a.b`) or a word of
+ * at least 6 chars. Common short English words therefore never become terms, so
+ * "keep the current sub-task" cannot accidentally pin every tool result.
+ * Matching is plain case-insensitive `includes` — nothing is inferred.
+ */
+export function extractFocusTerms(focus: string | undefined | null): string[] {
+  if (!focus) return [];
+  const raw = focus.slice(0, FOCUS_NOTE_MAX_CHARS);
+  const out = new Set<string>();
+  for (const tok of raw.split(/[^A-Za-z0-9_./\\:-]+/)) {
+    const t = tok.trim().replace(/^[.\-/\\:]+|[.\-/\\:]+$/g, "");
+    if (t.length < FOCUS_TERM_MIN_CHARS) continue;
+    const concrete = /[/\\._]/.test(t) || t.length >= 6;
+    if (!concrete) continue;
+    out.add(t.toLowerCase());
+  }
+  return [...out];
+}
+
+/** C1 — exact, case-insensitive containment of any focus term in the preview. */
+export function previewMatchesFocus(preview: string, focusTerms: readonly string[]): boolean {
+  if (focusTerms.length === 0 || !preview) return false;
+  const hay = preview.toLowerCase();
+  for (const t of focusTerms) if (hay.includes(t)) return true;
+  return false;
+}
+
+/**
+ * G2 — the fill ratio at which `computeDynamicParams` FIRST judges the context
+ * window to be tightening and starts shrinking the verbatim keep window. Below
+ * it the compactor still considers its default keep window safe, which is
+ * exactly the property the C3 compaction consult needs before it is allowed to
+ * defer a compaction by one step.
+ */
+export const G2_FIRST_ESCALATION_FILL = 0.6;
 
 export const SUBAGENT_COMPACT_DEFAULT_THRESHOLD = 80_000;
 export const SUBAGENT_COMPACT_DEFAULT_KEEP_LAST = 3;
@@ -228,10 +310,15 @@ interface ResolvedOpts {
   ) => void;
   stripOldReasoning: boolean;
   tailBudgetChars: number;
+  focusNote: string | null;
+  focusTerms: string[];
+  onElide?: (toolCallIds: string[]) => void;
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
   const keepIds = new Set((o?.keepToolIds || []).map((s) => String(s).trim()).filter(Boolean));
+  const rawFocus = typeof o?.focusNote === "string" ? o.focusNote.trim().replace(/\s+/g, " ") : "";
+  const focus = rawFocus.length > 0 ? rawFocus.slice(0, FOCUS_NOTE_MAX_CHARS) : null;
   return {
     thresholdChars: o?.thresholdChars ?? SUBAGENT_COMPACT_DEFAULT_THRESHOLD,
     keepLastTurns: Math.max(0, o?.keepLastTurns ?? SUBAGENT_COMPACT_DEFAULT_KEEP_LAST),
@@ -244,6 +331,9 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     persistArtifact: o?.persistArtifact,
     stripOldReasoning: o?.stripOldReasoning ?? false,
     tailBudgetChars: Math.max(0, o?.tailBudgetChars ?? 0),
+    focusNote: focus,
+    focusTerms: extractFocusTerms(focus),
+    onElide: o?.onElide,
   };
 }
 
@@ -304,7 +394,7 @@ function computeDynamicParams(
   const ctxFill = contextWindowTokens > 0 ? promptTokensEst / contextWindowTokens : 0;
   let effectiveKeepLastTurns = keepLastTurns;
   if (ctxFill >= 0.8) effectiveKeepLastTurns = 1;
-  else if (ctxFill >= 0.6) effectiveKeepLastTurns = Math.max(2, Math.floor(keepLastTurns / 2));
+  else if (ctxFill >= G2_FIRST_ESCALATION_FILL) effectiveKeepLastTurns = Math.max(2, Math.floor(keepLastTurns / 2));
 
   return { effectiveThresholdChars, effectiveKeepLastTurns, ctxFill };
 }
@@ -416,6 +506,29 @@ function isStubbedToolResult(msg: ModelMessage): boolean {
   return false;
 }
 
+/**
+ * toolCallIds whose result is present AND still carries real content (i.e. is
+ * not itself an elision marker). Diffing this between the compactor's input and
+ * output yields exactly what the model lost on this pass, with no per-site
+ * bookkeeping to keep in sync.
+ */
+function collectLiveToolResultIds(messages: ReadonlyArray<ModelMessage>): Set<string> {
+  const ids = new Set<string>();
+  for (const msg of messages) {
+    if (msg.role !== "tool" || !Array.isArray(msg.content)) continue;
+    for (const part of msg.content as ReadonlyArray<Record<string, unknown>>) {
+      if (part?.type !== "tool-result") continue;
+      const id = typeof part.toolCallId === "string" ? part.toolCallId : "";
+      if (!id) continue;
+      const out = part.output as Record<string, unknown> | undefined;
+      const value = (out?.value ?? out) as unknown;
+      if (typeof value === "string" && STUB_RE.test(value)) continue;
+      ids.add(id);
+    }
+  }
+  return ids;
+}
+
 function generateShortSummary(toolName: string, content: string): string {
   if (content.length < 500) return `${toolName}: ${content.length} chars`;
   const clean = content.trim().replace(/\s+/g, " ");
@@ -458,6 +571,8 @@ function rewriteOlderToolMessage(
     reason: string,
     summary?: string,
   ) => void,
+  focusNote?: string | null,
+  focusTerms: readonly string[] = [],
 ): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
@@ -470,8 +585,16 @@ function rewriteOlderToolMessage(
     if (isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
       return part; // preserve full original output
     }
+    // C1 — the main-context agent named this content as must-survive. Exact
+    // substring containment only (see extractFocusTerms): keep it verbatim.
+    if (previewMatchesFocus(rawPreview, focusTerms) || previewMatchesFocus(tr.toolName, focusTerms)) {
+      return part;
+    }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
-    const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}]`;
+    // C1 — name the agent's own focus in the stub so the model reading it knows
+    // what it asked to keep and can see this result did not match.
+    const focusSuffix = focusNote ? `; agent focus (kept verbatim where matched): ${focusNote}` : "";
+    const stub = `[earlier tool_result for tool=${tr.toolName} (id=${tr.toolCallId}) — ${fullLen} chars elided by ${label} compactor; output: ${preview}${focusSuffix}]`;
     const summary = generateShortSummary(tr.toolName, rawPreview);
     // Idea 4: for the ones we actually elide, give caller a chance to persist full raw to EE for later on-demand fetch.
     if (persistArtifact && fullLen > 200) {
@@ -495,6 +618,53 @@ function rewriteOlderToolMessage(
 
 export function buildSlimContext(msgs: ModelMessage[]): ModelMessage[] {
   return msgs.slice(-6); // goal + last 2 turns + refs (YAGNI)
+}
+
+/**
+ * C3 — pure, read-only prediction of what `compactSubAgentMessages` WOULD do to
+ * this exact input with these exact options. It mirrors the real gate (same
+ * resolveOpts → computeDynamicParams → slice → tail-budget shrink →
+ * findKeepFromIndex chain) so the compaction consult can decide whether an
+ * automatic compaction is imminent WITHOUT performing one.
+ *
+ * `ctxFill` is 0 when the model's context window is unknown — callers must
+ * treat that as "no headroom information", never as "plenty of headroom".
+ */
+export interface CompactionPressure {
+  /** messages chars + envelope chars — the quantity the compactor thresholds on. */
+  totalChars: number;
+  /** Effective threshold after the G1 token-aware min(). */
+  thresholdChars: number;
+  /** Estimated prompt tokens (totalChars / CHARS_PER_TOKEN). */
+  estPromptTokens: number;
+  /** estPromptTokens / contextWindowTokens, or 0 when the window is unknown. */
+  ctxFill: number;
+  /** True when a call to compactSubAgentMessages with these opts would elide. */
+  wouldCompact: boolean;
+}
+
+export function estimateCompactionPressure(
+  messages: ReadonlyArray<ModelMessage>,
+  opts: SubAgentCompactorOptions = {},
+): CompactionPressure {
+  const resolved = resolveOpts(opts);
+  const totalChars = cumulativeMessageChars(messages) + resolved.envelopeChars;
+  const estPromptTokens = totalChars / CHARS_PER_TOKEN;
+  const { effectiveThresholdChars, effectiveKeepLastTurns, ctxFill } = computeDynamicParams(totalChars, resolved);
+
+  if (totalChars < effectiveThresholdChars) {
+    return { totalChars, thresholdChars: effectiveThresholdChars, estPromptTokens, ctxFill, wouldCompact: false };
+  }
+  const processed = messages.length > 30 ? sliceMessageHistory(messages, 30) : messages;
+  const budgetedKeepLast = shrinkKeepLastToTailBudget(processed, effectiveKeepLastTurns, resolved.tailBudgetChars);
+  const keepFrom = findKeepFromIndex(processed, budgetedKeepLast);
+  return {
+    totalChars,
+    thresholdChars: effectiveThresholdChars,
+    estPromptTokens,
+    ctxFill,
+    wouldCompact: keepFrom > 0,
+  };
 }
 
 /**
@@ -582,7 +752,17 @@ export function compactSubAgentMessages(
         out.push(msg);
         continue;
       }
-      out.push(rewriteOlderToolMessage(msg, outputPreviewChars, label, resolved.keepToolIds, resolved.persistArtifact));
+      out.push(
+        rewriteOlderToolMessage(
+          msg,
+          outputPreviewChars,
+          label,
+          resolved.keepToolIds,
+          resolved.persistArtifact,
+          resolved.focusNote,
+          resolved.focusTerms,
+        ),
+      );
       continue;
     }
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
@@ -599,7 +779,34 @@ export function compactSubAgentMessages(
     }
     out.push(msg);
   }
+  reportElidedToolResults(messages, out, resolved.onElide);
   return out;
+}
+
+/**
+ * Tell the caller which tool results this pass removed from the model's view,
+ * so a layer that still references them (the cross-turn dedup ledger) can stop
+ * pointing at payloads the model can no longer read. Fail-open: a throwing
+ * consumer must not take down a compaction pass.
+ */
+function reportElidedToolResults(
+  before: ReadonlyArray<ModelMessage>,
+  after: ReadonlyArray<ModelMessage>,
+  onElide: ((toolCallIds: string[]) => void) | undefined,
+): void {
+  if (!onElide) return;
+  try {
+    const survived = collectLiveToolResultIds(after);
+    const lost: string[] = [];
+    for (const id of collectLiveToolResultIds(before)) {
+      if (!survived.has(id)) lost.push(id);
+    }
+    if (lost.length > 0) onElide(lost);
+  } catch (err) {
+    console.error(`[subagent-compactor] onElide notification failed: ${(err as Error)?.message}`, {
+      stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+    });
+  }
 }
 
 /**
@@ -623,6 +830,235 @@ function stripAssistantReasoning(msg: ModelMessage): ModelMessage {
   return { ...msg, content: filtered } as unknown as ModelMessage;
 }
 
+/** Marker text shared by the elided-args object and the legacy string form. */
+const ELIDED_ARGS_PREFIX = "[earlier call args elided";
+
+/**
+ * The single key the marker object is written under — and the thing the model
+ * actually copies. It reproduces the SHAPE, inventing the sentence: see
+ * `carriesElidedArgsMarker`, which keys on this rather than on
+ * `ELIDED_ARGS_PREFIX`. No tool schema in this CLI declares a parameter by this
+ * name (the double underscore is what makes that safe to rely on), so its
+ * presence in a tool-call input is never a legitimate argument.
+ */
+const ELIDED_NOTE_KEY = "__elided_note";
+
+/**
+ * F10 — minimum serialised `input` size for an args elision to be worth doing.
+ *
+ * The marker this compactor substitutes is itself 133-137 chars once serialised
+ * (`buildElidedArgsInput` below; the spread is only the digit count of `sz`).
+ * The previous gate was `sz < 80`, i.e. it elided everything from 80 chars up —
+ * so every call in the 80..133 band was replaced by something LARGER. That band
+ * is not an edge case, it is the dominant population: real tool-call arguments
+ * are mostly short paths and one-line shell commands.
+ *
+ * Measured on 703 real tool calls recorded in `tool_calls` (~/.muonroi-cli/
+ * muonroi.db), sizes computed with the identical `JSON.stringify(input)` this
+ * function uses. Distribution: p25=88, p50=115, p75=166, p90=571, max=12704.
+ *
+ *   threshold  markers written  inflated  net chars saved
+ *      80          593            342        146,168
+ *     134          251              0        156,276
+ *     256          111              0        150,713   <- chosen
+ *     512           74              0        142,729
+ *
+ * At the old 80, 342 of 593 elisions (57.7%) made the prompt bigger, wasting
+ * 10,108 chars. Restricted to the band a right-censored replay can see
+ * (80 <= sz < 200, n=449, median 109) the marker was net **-7,430 chars
+ * (-14.1%)** with 76.2% of calls inflated — a token tax, not a compaction.
+ *
+ * 256 is chosen over the 134 break-even because it is better on BOTH axes than
+ * the status quo: it saves MORE chars than 80 did (+4,545) while writing 81.3%
+ * fewer markers (593 -> 111). The marker count matters independently of chars —
+ * the model imitates the shape it keeps seeing (267 imitated calls in one run,
+ * 184 of them `read_file`, then 91 in the re-run after the executor guard
+ * landed). `read_file` markers specifically collapse 235 -> 3 (-98.7%) at 256,
+ * because short-path arguments stop qualifying at all. That makes a tool-name
+ * allowlist unnecessary: the size gate already removes exactly the population
+ * ("arguments that are just a path") such an allowlist would have targeted, and
+ * it does so without a hardcoded tool list to keep in sync.
+ *
+ * Giving up 5,563 chars relative to the 134 optimum (-3.6%) to remove 140 more
+ * imitation exemplars is the trade this constant encodes.
+ */
+export const MIN_ELIDE_ARGS_CHARS = 256;
+
+/**
+ * Build the elided-args replacement object for a call whose serialised input was
+ * `sz` chars. Factored out of `stripAssistantToolCallArgs` so that the marker's
+ * own serialised cost is measurable by the caller (and by tests) rather than
+ * being an unstated constant the threshold has to be kept in sync with by hand.
+ *
+ * The shape must satisfy TWO constraints that pull in opposite directions.
+ *
+ * F3b — it must not read as a plausible tool schema. The original elision was
+ * `{_elided:true,original_chars:N}`, and the LLM hallucinated that shape as its
+ * NEXT tool input (session 101870b4d9bb: read_file called with
+ * `{_elided:true,original_chars:75}` → "path must be string, got undefined").
+ * For the same reason the marker must NOT preserve the real argument keys with
+ * placeholder values: that is strictly more imitable, and a copied
+ * `write_file({file_path:"[elided]",content:"[elided]"})` would pass the
+ * executor's empty-args guard and overwrite a real source file. The single
+ * `__elided_note` key is the least imitable object shape that still satisfies
+ * the wire constraint below.
+ *
+ * It is NOT inert, and this comment used to claim it was. Falsified twice over:
+ * 267 imitated calls in the 2026-09-08 run, then 29 more in `/ideal` run
+ * muc2joffe506 (session bf39c59e4dd1) AFTER the executor guard landed. Inertness
+ * is therefore not a property of the shape and cannot be one — any shape the
+ * model sees in its own context is imitable. The two consequences are handled
+ * elsewhere, on purpose:
+ *
+ *   - it must never RUN: `src/tools/arg-guard.ts` refuses every call carrying
+ *     the marker, for every tool, before `execute`;
+ *   - it must never look like PROGRESS: `carriesElidedArgsMarker` below is the
+ *     one predicate `no-progress-guard.ts` uses to keep a refused call out of
+ *     its novelty key, so `${sz}` (which differs per call) can no longer make a
+ *     stuck loop look like it is learning something. See that module's header.
+ *
+ * `${sz}` stays in the sentence. It is the only per-call diagnostic the marker
+ * carries, and removing it would narrow just one of the three things that varied
+ * across the measured calls (the tool name and the guard's own strike counter
+ * varied too) — so it cannot be the fix, only a cosmetic narrowing of it.
+ *
+ * Wire validity — it must still be an OBJECT. `input` is serialized into OpenAI
+ * `tool_calls[].function.arguments`, which the spec defines as a JSON string
+ * that parses to an object. F3b's fix (a bare string) parses to a JSON *string*,
+ * which is malformed there: StepFun renders history through a Jinja chat
+ * template that does `arguments | fromjson` and then iterates the result, so a
+ * non-object 400s the whole request —
+ * `{"stage":"prefill","error":{"message":"No filter named 'fromjson' found."}}`
+ * (measured 2026-09-03 against step-3.7-flash; proved both directions: wrapping
+ * this value in an object turned the failing request 200, and injecting a bare
+ * string into a passing request turned it 400).
+ */
+export function buildElidedArgsInput(sz: number): Record<string, unknown> {
+  return {
+    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+  };
+}
+
+/**
+ * A3 cache-stability / idempotency: never re-wrap an already-elided marker.
+ * The marker is itself 133-137 chars serialised, so without this guard a second
+ * pass re-wrapped it ("…— 400 chars…" → "…— 134 chars…"), changing the bytes and
+ * churning the cached prefix every call. Once elided, leave it terminal.
+ *
+ * This guard is load-bearing INDEPENDENTLY of MIN_ELIDE_ARGS_CHARS. The marker
+ * happens to serialise below that threshold today, so the size gate would also
+ * decline to re-wrap it — but that is a coincidence of two numbers, not a
+ * contract. Idempotency is asserted here, on the marker's identity.
+ *
+ * Both shapes are recognised: the current object form, and the legacy bare
+ * string still present in histories persisted before the wire-validity fix.
+ *
+ * ## This is NOT the predicate the executor and the loop terminator ask
+ *
+ * Two different questions live in this file and must not be merged:
+ *
+ *   - THIS one — "did THIS compactor write this marker?" It is prefix-EXACT
+ *     because its job is the compactor's own round-trip: recognising output it
+ *     produced itself, so a second pass leaves the bytes alone. Widening it
+ *     would make the compactor treat a sentence the MODEL invented as its own
+ *     prior output and decline to elide a genuinely large argument object.
+ *   - `carriesElidedArgsMarker` below — "does this call carry a compaction note
+ *     at all, whoever wrote the sentence?" That one keys on `ELIDED_NOTE_KEY`,
+ *     because the model reproduces the key and invents the text.
+ *
+ * Exported so the elision specs can ask the round-trip question directly.
+ */
+export function isCompactorElisionMarker(input: unknown): boolean {
+  if (typeof input === "string") return input.startsWith(ELIDED_ARGS_PREFIX);
+  if (input && typeof input === "object") {
+    const note = (input as Record<string, unknown>)[ELIDED_NOTE_KEY];
+    return typeof note === "string" && note.startsWith(ELIDED_ARGS_PREFIX);
+  }
+  return false;
+}
+
+/**
+ * "Does this ONE value carry a compaction note?" — the per-slot half of
+ * `carriesElidedArgsMarker`, applied identically at the top level and to each
+ * argument value so the two cannot drift apart.
+ *
+ * An OBJECT is tested on the KEY, not on the sentence under it. A STRING is
+ * tested on the prefix, because a bare string has no key to test: that branch
+ * exists for the legacy string form and for a marker that landed in an argument
+ * slot (`{"file_path":"[earlier call args elided …]"}`).
+ */
+function carriesElidedNote(value: unknown): boolean {
+  if (typeof value === "string") return value.startsWith(ELIDED_ARGS_PREFIX);
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return Object.hasOwn(value, ELIDED_NOTE_KEY);
+  }
+  return false;
+}
+
+/**
+ * "Does this tool-call input carry a compaction note ANYWHERE the executor will
+ * refuse it?" — at the top level, or landed in an argument slot
+ * (`{"file_path":"[earlier call args elided …]"}`), which passes every presence
+ * check and would otherwise reach the filesystem.
+ *
+ * This is the single named place the whole codebase asks. Two consumers, both of
+ * which must agree exactly or the system is incoherent:
+ *
+ *   - `src/tools/arg-guard.ts` — refuses the call, so it never runs;
+ *   - `src/orchestrator/no-progress-guard.ts` — keeps the refused call out of
+ *     the novelty key, so N of them in a row end the loop.
+ *
+ * If the two ever disagreed, the loop terminator would be counting a population
+ * different from the one the executor blocks — which is exactly the state that
+ * let 29 blocked calls look like 29 fresh discoveries.
+ *
+ * ## Why the KEY and not `ELIDED_ARGS_PREFIX` (measured 2026-09-25)
+ *
+ * This predicate used to test the marker's TEXT. What the model imitates is its
+ * SHAPE: it emits `__elided_note` with a sentence of its own. Over the whole
+ * retained window of `~/.muonroi-cli/muonroi.db` (24,665 rows, 2026-09-11 ..
+ * 2026-09-25, read-only) every one of the three `missing-required-args` blocks
+ * was such a paraphrase, verbatim from the `tool_call` rows that produced them:
+ *
+ *   18776  read_file  {"__elided_note":"[earlier tool result elided — skip and re-read instead]"}
+ *   23864  read_file  {"__elided_note":"[elided by compactor — see match for call #122]"}
+ *   26896  read_file  {"__elided_note":"[earlier tool_call_result elided by compaction]"}
+ *
+ * None starts with `ELIDED_ARGS_PREFIX`, so none was recognised, so each fell
+ * through to `missing-required-args` — the class measured as non-looping and
+ * therefore deliberately left with no terminator (`f265ff23`). A paraphrase thus
+ * escaped the bound `f6738bb5` built for precisely this pathology, and it could
+ * not be bounded by keying on text at all: a freshly invented sentence is a
+ * fresh `sha1(input)` every step.
+ *
+ * Keying on the key MOVES those three calls into `elision-marker-as-args`, in
+ * both consumers at once: the arg guard now gives them the marker refusal
+ * instead of the "without usable arguments" one (still BLOCKED either way — only
+ * the diagnosis changes, to the true one), and the no-progress guard withholds
+ * their key so a run of them ends at `DEFAULT_NO_PROGRESS_STEPS`. Pinned in
+ * `src/orchestrator/no-progress-paraphrased-marker.test.ts`.
+ *
+ * Bounded on purpose: prose that merely MENTIONS elision under some other key is
+ * not a match, and neither is an adjacent key like `__elided_note_v2`. A note
+ * carried alongside genuine arguments IS a match — that was already true for the
+ * verbatim marker, and an "only if it is the sole key" exception would let a
+ * paraphrase become runnable by padding it with one real argument.
+ *
+ * The one call this widening could misjudge is an UNGUARDED tool (arg guard is
+ * installed over the builtins only) that genuinely declares an `__elided_note`
+ * parameter. None does, and the double underscore is why that is safe to rely
+ * on; if one ever appeared the cost is the safe one already reasoned about in
+ * `no-progress-guard.ts` — its step stops resetting the streak, while any real
+ * work in the same step still does.
+ */
+export function carriesElidedArgsMarker(input: unknown): boolean {
+  if (carriesElidedNote(input)) return true;
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    return Object.values(input as Record<string, unknown>).some((v) => carriesElidedNote(v));
+  }
+  return false;
+}
+
 function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
   if (!Array.isArray(msg.content)) return msg;
   const parts = msg.content as ReadonlyArray<Record<string, unknown>>;
@@ -631,24 +1067,24 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     if (part.type !== "tool-call") return part;
     const input = part.input;
     // A3 cache-stability / idempotency: never re-wrap an already-elided marker.
-    // The marker is itself ~95 chars, so without this guard a second pass
-    // re-wrapped it ("…— 200 chars…" → "…— 95 chars…"), changing the bytes and
-    // churning the cached prefix every call. Once elided, leave it terminal.
-    if (typeof input === "string" && input.startsWith("[earlier call args elided")) return part;
+    // The marker is itself 133-137 chars serialised, so without this guard a
+    // second pass re-wrapped it ("…— 400 chars…" → "…— 134 chars…"), changing the
+    // bytes and churning the cached prefix every call. Once elided, terminal.
+    if (isCompactorElisionMarker(input)) return part;
     const sz = typeof input === "string" ? input.length : JSON.stringify(input ?? "").length;
-    if (sz < 80) return part; // tiny calls aren't worth touching
+    // F10 — below this the marker is not worth writing: it costs ~134 chars of
+    // its own, and every marker written is one more exemplar of a shape the
+    // model demonstrably imitates. See MIN_ELIDE_ARGS_CHARS for the measurement.
+    if (sz < MIN_ELIDE_ARGS_CHARS) return part;
+    const elided = buildElidedArgsInput(sz);
+    // F10 — structural no-inflation guard. MIN_ELIDE_ARGS_CHARS already sits far
+    // above the marker's serialised length, so this never fires today. It exists
+    // so that "an elision must never make a call bigger" is enforced by
+    // construction rather than by a constant someone must remember to raise if
+    // the marker sentence ever grows. Measure the real bytes, don't assume them.
+    if (JSON.stringify(elided).length >= sz) return part;
     mutated = true;
-    // F3b — use a STRING marker, not the legacy `{_elided:true,original_chars:N}`
-    // object. The LLM previously hallucinated the elided object shape as its
-    // NEXT tool input (session 101870b4d9bb: read_file called with
-    // `{_elided:true,original_chars:75}` → "path must be string, got undefined").
-    // A plain string in `input` is impossible to confuse with a valid tool
-    // schema (every tool expects an object), so the model is forced to
-    // synthesize fresh args from the user's actual intent.
-    return {
-      ...part,
-      input: `[earlier call args elided by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
-    } as Record<string, unknown>;
+    return { ...part, input: elided } as Record<string, unknown>;
   });
   if (!mutated) return msg;
   return { ...msg, content: next } as unknown as ModelMessage;

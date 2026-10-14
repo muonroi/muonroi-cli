@@ -3,10 +3,11 @@
  * state before chat transcript on cold start.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { bestEffortRemove } from "../../__test-stubs__/cleanup";
 import { parseSections } from "../../flow/parser.js";
 import { createRun, setActiveRunId, updateRunFile } from "../../flow/run-manager.js";
 import { ensureFlowDir } from "../../flow/scaffold.js";
@@ -22,7 +23,7 @@ async function makeTempDir(prefix: string): Promise<string> {
 
 afterEach(async () => {
   for (const d of tempDirs) {
-    await rm(d, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {});
+    await bestEffortRemove(d, "src/orchestrator/__tests__/flow-resume.test.ts");
   }
   tempDirs = [];
 });

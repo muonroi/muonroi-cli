@@ -29,26 +29,43 @@ import { prependDecisionsLock, readDecisionsLock } from "../council/decisions-lo
 import { runCouncil } from "../council/index.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import { phaseDone, phaseError, phaseStart } from "../council/phase-events.js";
-import type { CouncilLLM } from "../council/types.js";
+import type { CouncilLLM, CouncilStats } from "../council/types.js";
+import { beginRecallNagSuppression, RECALL_NAG_SENTINEL } from "../ee/recall-ledger.js";
 import { fireAndForgetWorkflowEvent } from "../ee/workflow-event.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { renderResumeDigest, writeSprintOutcome, writeSprintVerify } from "../flow/run-artifacts.js";
+import {
+  readSprintPlanArtifact,
+  renderResumeDigest,
+  type SprintAdherenceRecord,
+  type SprintItemDebateRecord,
+  type SprintVerifyFixRecord,
+  writeSprintAdherence,
+  writeSprintItemDebate,
+  writeSprintOutcome,
+  writeSprintPlanArtifact,
+  writeSprintVerify,
+  writeSprintVerifyFix,
+} from "../flow/run-artifacts.js";
 import { isContextRailEnabled } from "../gsd/flags.js";
+import { isInteractivePaused } from "../orchestrator/interactive-pause.js";
+import { beginUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
 import { detectProviderForModel } from "../providers/runtime.js";
 import { logInteraction, logUIInteraction } from "../storage/index.js";
-import type { StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
-import { commitToProduct, release } from "../usage/ledger.js";
-import { CapBreachError } from "../usage/types.js";
+import type { CouncilStanceRow, StreamChunk, ToolResult, VerifyRecipe } from "../types/index.js";
+import { runGitSpawn } from "../utils/git-spawn.js";
+import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadline.js";
+import { logger } from "../utils/logger.js";
 import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
 import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
 import { readBacklog } from "./backlog-store.js";
-import { CB1_costProjection, CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
-import { reserveForProduct } from "./cost-scoper.js";
+import { CB2_oscillation, CB3_verifyBlank } from "./circuit-breakers.js";
+import { recordProductSpend } from "./cost-scoper.js";
 import {
+  criterionIdFromText,
   extractAcceptanceCriteria,
   judgeCriteriaAgainstVerify,
   planQualityIssues,
@@ -60,12 +77,42 @@ import { evaluateDoneGate } from "./done-gate.js";
 import type { ContinueFeedback } from "./feedback-routing.js";
 import { buildContinueFeedback } from "./feedback-routing.js";
 import { idealTrace } from "./ideal-trace.js";
+import { applyItemDebateToPlanArtifact } from "./item-debate-apply.js";
+import { runItemDebate } from "./item-debate-runner.js";
+import { formatLayoutConvention, scanLayoutConvention } from "./layout-convention.js";
+import { type CollectedNestedTurn, collectNestedTurn, forwardNestedTurn } from "./nested-turn.js";
+import { deriveNextAction, type TestRunnerEvidence } from "./next-action.js";
 import { postSprintBoundary } from "./phase-tracker-bridge.js";
-import { runPlanAdherenceReview } from "./plan-adherence-review.js";
+import type { AdherenceVerdict, TaskVerdict } from "./plan-adherence-review.js";
+import { boundDeviations, runPlanAdherenceReview } from "./plan-adherence-review.js";
+import { buildVerifyReportBody } from "./verify-report.js";
+
+// Re-exported so existing callers that import extractPlanTargetPaths from this
+// file (its pre-S3a home) keep working unchanged — the implementation moved to
+// plan-target-paths.ts (a leaf module) to share it with sprint-plan-artifact.ts
+// without a circular import; behaviour is byte-identical.
+export { extractPlanTargetPaths } from "./plan-target-paths.js";
+
+import { extractPlanTargetPaths } from "./plan-target-paths.js";
 import { computeProgressSnapshot, renderSnapshotMarkdown } from "./progress-snapshot.js";
 import { appendRoleMemory } from "./role-memory.js";
+import { readRunSpendUsd } from "./run-spend.js";
+import { describeVerdictFailure } from "./run-verdict.js";
+import {
+  buildSprintPlanArtifact,
+  buildTaskChecklistBlock,
+  computePlanHash,
+  type SprintPlanArtifact,
+} from "./sprint-plan-artifact.js";
+import { upsertSprint } from "./sprint-store.js";
+import { mergeDerivedTestCommands } from "./test-command-signal.js";
+import { readCriteriaSnapshot } from "./typed-artifacts.js";
 import type { DriverContext, HaltChunk, IterationState, ProductSpec, RoleSlot } from "./types.js";
+import { readUndebatedGateRecord } from "./undebated-criteria-gate.js";
+import type { FloorDelta } from "./verify-baseline.js";
 import { loadVerifyFailureSignatures, recordVerifyFailureAndMaybePush } from "./verify-failure-tracking.js";
+import { runVerifyFixLoop, type VerifyPassOutcome } from "./verify-fix-loop.js";
+import type { FloorCheck } from "./verify-floor.js";
 import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 
 // P3.7: track one-shot CB-2 retry bonus per run (keyed by runId).
@@ -73,67 +120,789 @@ import { parseVerifyResult, VERIFY_PASS_MARKER } from "./verify-result.js";
 // without touching DriverContext / IterationState shapes.
 const _cb2RetryUsed = new Map<string, boolean>();
 
-/** Watchdog ceiling for the verify stage (ms). Override with MUONROI_SPRINT_VERIFY_TIMEOUT_MS. */
-function getVerifyWatchdogTimeoutMs(): number {
-  const raw = process.env.MUONROI_SPRINT_VERIFY_TIMEOUT_MS;
+function envPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
-  return 10 * 60 * 1000; // 10 min default
+  return fallback;
 }
 
 /**
- * Bound the verify stage with a watchdog timeout.
+ * Manifests that could declare a Python test dependency, in the order a message
+ * should name them: a project with a `pyproject.toml` declares there, and
+ * `requirements.txt` is the fallback qa-platform actually uses.
+ */
+const PYTHON_DECLARATION_MANIFESTS = ["pyproject.toml", "requirements.txt", "setup.cfg", "Pipfile"] as const;
+
+/**
+ * Test trees this working tree actually has, and the manifest that would
+ * declare their runner — the evidence `deriveNextAction` needs to say "declare
+ * pytest in `backend/requirements.txt`" instead of "add a test command".
+ *
+ * Reuses `findPytestTargets` (src/verify/pytest-detect.ts), the same bounded
+ * walk the verify recipe infers from, so the digest can never name a directory
+ * the recipe does not also consider. A target whose directory holds none of
+ * {@link PYTHON_DECLARATION_MANIFESTS} is dropped rather than paired with an
+ * invented filename — naming a file that is not there is worse than staying
+ * generic. Never throws: this feeds a message, and a message must not be able
+ * to fail a sprint.
+ */
+async function measureTestRunnerEvidence(cwd: string): Promise<TestRunnerEvidence[]> {
+  try {
+    const [{ findPytestTargets }, fs, nodePath] = await Promise.all([
+      import("../verify/pytest-detect.js"),
+      import("node:fs"),
+      import("node:path"),
+    ]);
+    const out: TestRunnerEvidence[] = [];
+    for (const target of findPytestTargets(cwd)) {
+      const dirAbs = nodePath.join(cwd, target.dir);
+      const manifest = PYTHON_DECLARATION_MANIFESTS.find((m) => fs.existsSync(nodePath.join(dirAbs, m)));
+      if (!manifest) continue;
+      out.push({
+        dir: target.dir,
+        marker: target.marker,
+        manifest,
+        runner: "pytest",
+        declared: target.pytestDeclared,
+      });
+    }
+    return out;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] could not measure test-runner evidence in ${cwd}: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+      { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+    );
+    return [];
+  }
+}
+
+/**
+ * FLOOR of the verify stage's budget (ms). Override with
+ * MUONROI_SPRINT_VERIFY_TIMEOUT_MS — the same variable that used to set the
+ * whole (flat) budget, with its exact parse semantics preserved: a non-positive
+ * or unparseable value falls back to the default rather than disabling the
+ * watchdog. This stage has never had a `<= 0` disable and does not gain one
+ * here; an unbounded verify is the hang this watchdog exists for.
+ *
+ * 600s is retained as the floor because it is the bound that was already in
+ * production. A derived budget must never come out SMALLER than the constant it
+ * replaces, or a repository with a cheap build would newly start losing sprints
+ * that pass today. It also covers the part of the stage that does NOT scale with
+ * the repo: the verify sub-agent's own LLM turns cost roughly the same whatever
+ * the project's size, so scaling alone under-serves a tiny baseline.
+ */
+export function getVerifyBudgetFloorMs(): number {
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_TIMEOUT_MS", 10 * 60 * 1000);
+}
+
+/**
+ * How many times this run's own measured verify baseline the stage may take.
+ * Override with MUONROI_SPRINT_VERIFY_BUDGET_MULTIPLIER.
+ *
+ * DERIVATION, from the four measured runs of one task. Verify-stage durations
+ * (`sprint_stage verification` → `sprint_stage judgment`, `interaction_logs`):
+ *
+ *     run mttwpmu8ee5b   sprint1 186s   sprint2 230s
+ *     run mtv9v1xu7615   sprint1 412s   sprint2 340s
+ *     run mtw9mpjt1ce3   sprint1 464s   sprint2 600s  ← cut by the flat cap
+ *
+ * The only run with a recorded baseline cost is `mttwpmu8ee5b`: 53,133ms
+ * (`verify-floor.ts:87`). Against it those durations are 3.50x and 4.33x for its
+ * own two sprints, 8.73x for the largest UNCENSORED observation anywhere in the
+ * table (464s), and >= 11.29x for the censored one (600s is a lower bound — the
+ * stage was killed, so its true duration is unknown).
+ *
+ * 20x sits ~1.8x above that censored lower bound. The headroom is the point: the
+ * defect being fixed is that verify cost GROWS as a run accumulates code, so the
+ * multiplier must cover growth beyond the largest value ever observed, not just
+ * match it.
+ *
+ * HONEST LIMIT OF THIS EVIDENCE: runs `mtv9v1xu7615` and `mtw9mpjt1ce3` have no
+ * recorded baseline cost of their own, so their 8.73x / 11.29x ratios assume a
+ * baseline comparable to `mttwpmu8ee5b`'s on the same task. Once `elapsedMs` is
+ * being persisted (this change) a future run can compute its own ratios and this
+ * constant can be re-derived from same-run pairs instead.
+ */
+export function getVerifyBudgetMultiplier(): number {
+  const raw = process.env.MUONROI_SPRINT_VERIFY_BUDGET_MULTIPLIER;
+  const n = raw ? Number(raw) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 20;
+}
+
+/**
+ * ABSOLUTE ceiling on the derived budget (ms). Override with
+ * MUONROI_SPRINT_VERIFY_CEILING_MS.
+ *
+ * A derived bound still needs a hard stop, or a pathological baseline sets a
+ * budget no hang could ever reach. 60 min is chosen to sit above the slowest
+ * verify this code can legitimately produce: `getFloorTimeoutMs()` allows 600s
+ * PER COMMAND, and the recipe measured here is three of them (`dotnet restore`
+ * -> `dotnet build` -> `dotnet test`), so 1800s of command time alone is
+ * reachable without anything being wrong. It is also the same 60 min
+ * `getIsolatedImplCeilingMs()` uses for the neighbouring stage.
+ *
+ * Inside an `/ideal` run there is no absolute ceiling (user decision: no
+ * limits). The clamp it performs is the arbitrary half of the budget — it
+ * overrides a bound this run MEASURED from its own build+test cost with a
+ * constant chosen for a different repository. What survives is the derived
+ * budget itself, and inside `/ideal` `runVerifyWithWatchdog` applies it as a
+ * SILENCE window rather than a total (see there), so a stage that is still
+ * reporting progress is never cut while a stage reporting nothing still is.
+ */
+export function getVerifyBudgetCeilingMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_CEILING_MS", 60 * 60 * 1000);
+}
+
+/** Which term of the clamp produced the budget. Reported, never diagnosed. */
+export type VerifyBudgetBasis = "no-baseline" | "baseline-derived" | "floor" | "ceiling";
+
+export interface VerifyBudget {
+  /** The bound actually armed. */
+  budgetMs: number;
+  basis: VerifyBudgetBasis;
+  /** This run's measured build+test cost, or null when none was recorded. */
+  baselineMs: number | null;
+  /** `baselineMs * multiplier`, before clamping. Null when there was no baseline. */
+  derivedMs: number | null;
+  multiplier: number;
+  floorMs: number;
+  ceilingMs: number;
+}
+
+/**
+ * Size the verify stage's watchdog from the work it is measuring.
+ *
+ * THE DEFECT THIS REPLACES: a flat 600s. The stage shells out to the project's
+ * own build/test recipe, so its cost grows with the amount of code the run has
+ * produced — the budget was fixed while the work it bounds grew monotonically,
+ * which punishes progress: the further a run gets, the likelier verify is
+ * killed. On sprint 2 of run `mtw9mpjt1ce3` it fired on a sprint that had
+ * ALREADY SUCCEEDED (every compile error fixed, `dotnet build` green with 0
+ * errors, confirmed by hand afterwards) and recorded it as `verify: "ERROR"`.
+ * Because both the criteria judge and the F5 goal gate are gated on
+ * `verifyVerdict === "PASS"`, that one number kept `CriteriaMet` at 0 for every
+ * sprint of all four runs and the goal gate never executed in production at all.
+ *
+ * WHY SCALED-FROM-BASELINE AND NOT A CONSTANT IDLE WINDOW. The neighbouring
+ * isolated implementation stage was converted from a flat budget to
+ * silence-plus-ceiling (`withIsolatedImplDeadline`), and the same signal is wired
+ * here — this stage's `onProgress` is handed straight to `runTaskRequest` as its
+ * `onActivity` (`verify/orchestrator.ts:164`). But the two stages differ in the
+ * DENSITY of that signal, and density is what makes an idle rule work:
+ *
+ *   - On the impl stage it is dense: 196 events across 900s, a mean gap of
+ *     4.6s (measured, run `mtv9v1xu7615`). Silence there really is silence.
+ *   - On the verify stage the dominant cost IS one tool call — `dotnet test`
+ *     across ~36 assemblies — so the longest silent gap is a large fraction of
+ *     the stage, and it is precisely the quantity that grows with the codebase.
+ *     A CONSTANT idle window would have to exceed the longest single command,
+ *     i.e. be tuned to the same growing number the flat budget got wrong.
+ *
+ * So the window is not a constant: it is derived from a measurement of that same
+ * command set. `captureVerifyFloorBaseline` already runs the project's build and
+ * test commands once, at run start, before any sprint has touched the tree, and
+ * inside `/ideal` `runVerifyWithWatchdog` arms that derived number as a SILENCE
+ * window rather than a total.
+ *
+ * WHAT THE ACTIVITY SIGNAL IS FOR, AND THE DEFECT THAT MADE IT DECORATIVE. The
+ * sentence that stood here said activity "does not decide, because on this stage
+ * it cannot". That was written while the signal was structurally EMPTY: the
+ * `onActivity` this stage passes was dropped by the implementation on the other
+ * side (`buildVerifyAgent.runTaskRequest` took only `req`), so the only events
+ * ever recorded were the parent's own preparation beats — the last of which,
+ * "Running verify sub-agent", fires immediately BEFORE the child starts. A silence
+ * window anchored on that is a TOTAL budget on the child wearing a silence label,
+ * and it cut run `muc2joffe506` sprint 1 while the child was 6.3x inside the bound.
+ *
+ * With the callback honoured, the density question is answerable by measurement
+ * instead of argument. That run's child session `9f04faf649b3` logged 76
+ * `tool_call` and 77 `tool_result` rows inside the window the parent was silent
+ * for, and the LARGEST gap between consecutive tool events was 125.8s against the
+ * 786.6s armed budget. The budget, multiplier, floor and ceiling are all unchanged
+ * by that wiring — what changed is that the window now measures the child. Pinned
+ * by `__tests__/verify-child-liveness.test.ts`, which also pins the property most
+ * easily lost here: a child that is alive and producing nothing is still cut.
+ *
+ * `baselineMs === null` (no baseline captured, an older record, a different
+ * run's) yields exactly the previous behaviour: the 600s floor.
+ */
+export function computeVerifyBudget(
+  baselineMs: number | null,
+  opts: { multiplier?: number; floorMs?: number; ceilingMs?: number } = {},
+): VerifyBudget {
+  const multiplier = opts.multiplier ?? getVerifyBudgetMultiplier();
+  const floorMs = opts.floorMs ?? getVerifyBudgetFloorMs();
+  // A ceiling below the floor would silently undercut the bound that already
+  // shipped, so the floor wins that contradiction.
+  const ceilingMs = Math.max(opts.ceilingMs ?? getVerifyBudgetCeilingMs(), floorMs);
+  const base = { baselineMs, multiplier, floorMs, ceilingMs };
+
+  if (baselineMs === null || !Number.isFinite(baselineMs) || baselineMs <= 0) {
+    return { ...base, baselineMs: null, derivedMs: null, budgetMs: floorMs, basis: "no-baseline" };
+  }
+  const derivedMs = baselineMs * multiplier;
+  if (derivedMs < floorMs) return { ...base, derivedMs, budgetMs: floorMs, basis: "floor" };
+  if (derivedMs > ceilingMs) return { ...base, derivedMs, budgetMs: ceilingMs, basis: "ceiling" };
+  return { ...base, derivedMs, budgetMs: derivedMs, basis: "baseline-derived" };
+}
+
+/**
+ * What the verify watchdog ACTUALLY observed, as of the moment it fired.
+ * Populated from the stage's own progress callback — the only signal the sprint
+ * has about it — so the timeout message can state facts instead of a narrative.
+ */
+export interface VerifyStageObservation {
+  /**
+   * Progress notifications seen: the orchestration's own preparation beats, PLUS
+   * one per forward-progress chunk from the verify child (its tool calls and tool
+   * results — see `CollectNestedTurnOptions.onActivity`).
+   *
+   * The child half used to be missing, which is what made a healthy stage and a
+   * hung one the same observation. Run `muc2joffe506` sprint 1 reported "observed
+   * 4 stage activity event(s)" — the 4 preparation beats — while the child logged
+   * 302 rows in that same window and worked 9.7 min past the abandonment.
+   */
+  events: number;
+  /** `Date.now()` of the most recent one, or null when none ever arrived. */
+  lastEventAtMs: number | null;
+  /** The text of that most recent one, verbatim. Null when none arrived. */
+  lastDetail: string | null;
+  /**
+   * Milliseconds of this window the watchdog OBSERVED a blocking human card open
+   * (`isInteractivePaused()`), sampled on the re-arm poll so it is accurate to
+   * within one poll interval. Optional so a caller that never measured it says
+   * nothing rather than claiming zero.
+   *
+   * A stage waiting on a human is not a silent stage. Reporting the two facts
+   * apart is the whole point: run `muc2joffe506` sprint 2 was cut at the 600s
+   * silence bound while an `ask_user` card had been open since 14:50:21.922Z.
+   */
+  humanPauseMs?: number;
+}
+
+/**
+ * The verify-stage timeout message.
+ *
+ * It reports ONLY what was measured. The text this replaces asserted a cause on
+ * every single timeout — verbatim from run `mtw9mpjt1ce3`:
+ *
+ *     verify-timeout: verify stage exceeded 600s watchdog and was aborted
+ *     (sprint 2, run mtw9mpjt1ce3) - likely a hung sandbox checkpoint (shuru)
+ *     or a verify sub-agent LLM call with no TTFB timeout
+ *
+ * NEITHER GUESS WAS TRUE. The sandbox was fine and the build had already
+ * succeeded; the sprint was finished and green when the clock cut it. This is
+ * the same anti-pattern `buildIsolatedImplTimeoutMessage` documents next door,
+ * where a canned narrative carried over from a different incident cost a later
+ * investigation an entire hypothesis. Never restate a cause here.
+ *
+ * `basis` is not a diagnosis: it names WHICH term of the clamp set the bound, so
+ * a reader can tell "this project measured slow and still overran" from "no
+ * baseline was recorded, so it got the default".
+ */
+export function buildVerifyTimeoutMessage(args: {
+  sprintN: number;
+  runId: string;
+  budget: VerifyBudget;
+  elapsedMs: number;
+  observation?: VerifyStageObservation;
+  firedAtMs?: number;
+  /**
+   * What the budget bounded. `"total"` is the default and the normal-chat
+   * behaviour; `"silence"` is the `/ideal` shape, where the same number is
+   * measured from the last observed activity event instead of from the start.
+   * Naming it matters for the same reason `cause` does next door: "ran too long"
+   * and "went quiet" are different observations that call for different steps.
+   */
+  mode?: "total" | "silence";
+}): string {
+  const { sprintN, runId, budget, elapsedMs, observation } = args;
+  const firedAt = args.firedAtMs ?? Date.now();
+  const mode = args.mode ?? "total";
+  const ceilingLabel = Number.isFinite(budget.ceilingMs) ? `${Math.round(budget.ceilingMs / 1000)}s` : "none";
+  const s = (ms: number) => (ms / 1000).toFixed(1);
+  const parts: string[] = [
+    mode === "silence"
+      ? `verify stage reported nothing for ${Math.round(budget.budgetMs / 1000)}s (sprint ${sprintN}, run ${runId}) ` +
+        `and was aborted after ${s(elapsedMs)}s — this was a SILENCE budget, not a total`
+      : `verify stage exceeded its ${Math.round(budget.budgetMs / 1000)}s budget (sprint ${sprintN}, run ${runId}) ` +
+        `and was aborted after ${s(elapsedMs)}s`,
+  ];
+
+  switch (budget.basis) {
+    case "baseline-derived":
+      parts.push(
+        `budget = this run's measured verify baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier} ` +
+          `= ${s(budget.derivedMs as number)}s (floor ${Math.round(budget.floorMs / 1000)}s, ` +
+          `ceiling ${ceilingLabel})`,
+      );
+      break;
+    case "floor":
+      parts.push(
+        `budget = the ${Math.round(budget.floorMs / 1000)}s FLOOR — derived ${s(budget.derivedMs as number)}s ` +
+          `(baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier}) was below it`,
+      );
+      break;
+    case "ceiling":
+      parts.push(
+        `budget = the ${ceilingLabel} CEILING — derived ${s(budget.derivedMs as number)}s ` +
+          `(baseline ${s(budget.baselineMs as number)}s x ${budget.multiplier}) was above it`,
+      );
+      break;
+    default:
+      parts.push(
+        `budget = the ${Math.round(budget.floorMs / 1000)}s floor; no verify baseline cost was recorded for this ` +
+          "run, so nothing could be derived from it",
+      );
+      break;
+  }
+
+  if (!observation) {
+    parts.push("no stage activity was instrumented for this call, so nothing further was observed");
+  } else if (observation.events === 0 || observation.lastEventAtMs === null) {
+    parts.push("observed 0 stage activity events — nothing was seen coming from the verify stage");
+  } else {
+    const sinceLastMs = Math.max(0, firedAt - observation.lastEventAtMs);
+    parts.push(
+      `observed ${observation.events} stage activity event(s), the last one ${s(sinceLastMs)}s before the ` +
+        `deadline (at ${new Date(observation.lastEventAtMs).toISOString()}), reading: ` +
+        `"${(observation.lastDetail ?? "").slice(0, 200)}"`,
+    );
+  }
+
+  // A human card holding the stage open is a DIFFERENT fact from a silent stage,
+  // and the two were indistinguishable in the text this replaces. Stated as a
+  // measurement (sampled on the re-arm poll), never as a cause.
+  const humanPauseMs = observation?.humanPauseMs ?? 0;
+  if (humanPauseMs > 0) {
+    parts.push(
+      `a human question was open for ${s(humanPauseMs)}s of that window — the budget did not run while it was, ` +
+        "so this deadline was reached on non-paused time",
+    );
+  }
+
+  parts.push("cause not diagnosed — only the observations above were measured");
+  return parts.join("; ");
+}
+
+/**
+ * Resolve this sprint's verify budget from the run's own baseline record.
+ *
+ * Never throws: a budget that cannot be derived falls back to the floor, which
+ * is exactly the behaviour that shipped before it was derivable at all.
+ */
+export async function resolveVerifyBudget(flowDir: string | undefined, runId: string): Promise<VerifyBudget> {
+  if (!flowDir) return computeVerifyBudget(null);
+  try {
+    const [{ readBaselineVerifyCostMs }, { verifyBaselinePath }] = await Promise.all([
+      import("./verify-floor.js"),
+      import("./verify-baseline.js"),
+    ]);
+    const baselineMs = await readBaselineVerifyCostMs(verifyBaselinePath(flowDir, runId), runId);
+    return computeVerifyBudget(baselineMs);
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-runner] could not derive the verify budget — falling back to the floor", {
+      runId,
+      flowDir,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return computeVerifyBudget(null);
+  }
+}
+
+/**
+ * Bound the verify stage with a watchdog sized to the work it is measuring.
  *
  * `runVerifyOrchestration` can hang indefinitely with no visible signal:
  * `prepareVerifyRun` → `ensureVerifyCheckpoint` spawns the `shuru` sandbox
- * (`spawnWithProgress("shuru", …)`) which stalls on hosts where shuru is
- * unavailable/misconfigured (e.g. Windows), and the verify sub-agent itself has
- * no TTFB timeout. Because sprint-runner previously called it as a bare
+ * (`spawnWithProgress("shuru", …)`) which can stall, and the verify sub-agent
+ * itself has no TTFB timeout. Because sprint-runner once called it as a bare
  * `await runVerifyOrchestration(agent)` with NO abortSignal and NO timeout, a
- * single hung verify BRICKED the whole /ideal run silently — no error, no
- * recovery card — observed live as a 30+ min dead stall right after
- * "Committed: N sprints planned" (the impl turn finished, verify never returned).
+ * single hung verify BRICKED the whole /ideal run silently.
+ *
+ * The bound is no longer a constant. See `computeVerifyBudget` for the defect
+ * that made it one and the derivation that replaced it; `opts.flowDir` is how
+ * this call reaches the run's own baseline measurement. `opts.budget` lets a
+ * caller (and a test) supply the budget directly.
  *
  * On timeout we abort the sub-agent, log with context (No-Silent-Catch), and
  * return an ERROR ToolResult so the sprint loop treats it as a failed verify
  * (Step 5 → verifyVerdict FAIL/ERROR → feedback-routing) instead of hanging
- * forever. The hung sandbox op may leak in the background, but the run recovers
- * and the failure is surfaced + resumable. `onProgress` is forwarded to console
- * so a future hang is diagnosable (e.g. "Creating checkpoint: <name>").
+ * forever. The hung op may leak in the background, but the run recovers and the
+ * failure is surfaced + resumable.
+ *
+ * Progress beats are RECORDED as well as forwarded to the debug console: they
+ * are the only thing the sprint can actually observe about this stage, so they
+ * are what the timeout message reports instead of a guess.
+ *
+ * Inside an `/ideal` run those beats also DECIDE: the budget is armed as a
+ * silence window (time since the last beat) rather than as a total, so a stage
+ * that is still reporting is never cut and a stage reporting nothing still is.
+ * See the `silenceMode` block below.
+ *
+ * A blocking human card is NOT silence. `ask_user` (and the safety-override card,
+ * and a council preflight card) bracket their wait with `beginInteractivePause()`
+ * precisely so a watchdog re-arms instead of aborting; the per-attempt stall
+ * watchdog and the turn-idle watchdog already consult `isInteractivePaused()`
+ * (orchestrator.ts:2594, :3871). This one did not, and run `muc2joffe506` sprint 2
+ * was cut at 14:52:34 while an `ask_user` card opened at 14:50:21.922Z sat
+ * unanswered — "blocked on a human" and "died" were one observation. Both arms
+ * below now re-arm while a card is open, and the pause is REPORTED so the two
+ * facts stay apart in the message.
+ *
+ * A cut stage also no longer loses its work. `buildVerifyAgent.runTaskRequest`
+ * already returns the truncated payload of a killed turn, but the timeout branch
+ * resolved `output: ""` and threw it away: run `muc2joffe506` had genuinely
+ * verified the Docker stack, service health and `/api/health` and `2-verify.md`
+ * recorded only the timeout. After the abort the aborted work gets a bounded
+ * grace to hand its partial report back, and it rides out in `output`.
  */
-async function runVerifyWithWatchdog(
+export async function runVerifyWithWatchdog(
   verifyAgent: VerifyAgentLike,
   runId: string,
   sprintN: number,
+  opts?: { flowDir?: string; budget?: VerifyBudget },
 ): Promise<ToolResult> {
-  const timeoutMs = getVerifyWatchdogTimeoutMs();
+  const budget = opts?.budget ?? (await resolveVerifyBudget(opts?.flowDir, runId));
+  const timeoutMs = budget.budgetMs;
   const controller = new AbortController();
+  const startedAt = Date.now();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  const observation: VerifyStageObservation = {
+    events: 0,
+    lastEventAtMs: null,
+    lastDetail: null,
+    humanPauseMs: 0,
+  };
   const onProgress = (detail: string) => {
+    observation.events += 1;
+    observation.lastEventAtMs = Date.now();
+    observation.lastDetail = detail;
     if (process.env.MUONROI_DEBUG_VERIFY === "1") console.error(`[verify:sprint-${sprintN}] ${detail}`);
   };
+  // Inside an `/ideal` run the SAME number bounds SILENCE instead of total
+  // elapsed (user decision: no limits). This is strictly more permissive —
+  // time-since-last-event is never greater than time-since-start — so no stage
+  // that passes today starts failing, while a stage that is still reporting
+  // progress can no longer be cut. `computeVerifyBudget`'s own doc argues an
+  // idle window would have to exceed the longest single command; re-using the
+  // derived budget as that window is exactly how it clears one, since the budget
+  // IS a measurement of this repo's own build+test cost.
+  const silenceMode = isIdealRunUnlimited();
+  // Set by `fire()` BEFORE it aborts. The abort can settle the work promise in the
+  // SAME tick (an aborted turn that resolves synchronously wins `Promise.race`),
+  // so the race winner is not authoritative about whether the watchdog fired —
+  // this is.
+  let firedMessage: string | null = null;
   const timeout = new Promise<ToolResult>((resolve) => {
-    timer = setTimeout(() => {
+    const fire = () => {
+      const msg = buildVerifyTimeoutMessage({
+        sprintN,
+        runId,
+        budget,
+        elapsedMs: Date.now() - startedAt,
+        observation: { ...observation },
+        mode: silenceMode ? "silence" : "total",
+      });
+      firedMessage = msg;
+      // Cancel the work we are giving up on BEFORE unblocking the caller.
       controller.abort();
-      const msg =
-        `verify stage exceeded ${Math.round(timeoutMs / 1000)}s watchdog and was aborted ` +
-        `(sprint ${sprintN}, run ${runId}) — likely a hung sandbox checkpoint (shuru) or a ` +
-        `verify sub-agent LLM call with no TTFB timeout`;
       console.error(`[sprint-runner] ${msg}`);
+      logger.error("orchestrator", "[sprint-runner] verify watchdog fired", {
+        runId,
+        sprintN,
+        budgetMs: timeoutMs,
+        mode: silenceMode ? "silence" : "total",
+        basis: budget.basis,
+        baselineMs: budget.baselineMs,
+        observedEvents: observation.events,
+        humanPauseMs: observation.humanPauseMs ?? 0,
+        message: msg,
+      });
+      // `output` is filled in by the salvage pass below — the caller composes the
+      // final ToolResult so the aborted stage gets a chance to hand its partial
+      // report back first.
       resolve({ success: false, output: "", error: `verify-timeout: ${msg}` });
-    }, timeoutMs);
+    };
+    // Sampled state for the human-pause gate, shared by both arms.
+    // `pausedSince` is the start of the CURRENT observed pause; `lastPauseSeen` is
+    // the last moment a pause was observed and doubles as the silence anchor, so
+    // the window restarts from the answer rather than from a stale beat.
+    let pausedSince: number | null = null;
+    let lastPauseSeen: number | null = null;
+    /**
+     * True while a blocking card is open; accumulates the observed pause.
+     *
+     * ── READ THIS BEFORE ADDING A BOUND HERE ──────────────────────────────────
+     *
+     * (a) The budget DELIBERATELY does not run while a card is open. Both arms
+     *     below re-arm instead of firing. This is the same gate the per-attempt
+     *     stall watchdog (orchestrator.ts:2594) and the turn-idle watchdog
+     *     (orchestrator.ts:3871) already consult, put in place by the blocking
+     *     card's own `beginInteractivePause()` bracket (orchestrator.ts:4319).
+     *
+     * (b) THE CONSEQUENCE, accepted knowingly: an unattended run can park
+     *     INDEFINITELY on a card. `ask_user` can no longer open one here (the
+     *     verify turn is an unattended turn — see
+     *     orchestrator/unattended-turn.ts), but safety-override and council
+     *     preflight cards still can, and they should park.
+     *
+     * (c) THE INTENDED DETECTION IS THE HARNESS EVENT, NOT A TIMER. The card
+     *     emits `askcard-open` as a `LiveEvent` (use-app-logic.tsx:3217 for
+     *     ask-user, council/planner.ts:304 and council/preflight.ts:102 for the
+     *     others); `tui.last_event {kind:"askcard-open"}` / `tui.wait_for` and the
+     *     JSONL event log are the documented way to watch an unattended run. Note
+     *     it writes NO `interaction_logs` row, so a DB poller is structurally
+     *     blind to it — that blindness is what made this incident look like a hang.
+     *
+     * DECIDED (reviewer, on the run muc2joffe506 fix): do NOT add an auto-dismiss.
+     * The cards that can still open here are approval prompts, and a safety prompt
+     * that dismisses itself after N minutes converts "a human declined to approve"
+     * into "nobody objected" — a silent approval is a worse failure than a visible
+     * stall. If you want a bound anyway, this comment is where to start arguing,
+     * and the argument has to answer that sentence first.
+     */
+    const humanPending = (): boolean => {
+      const now = Date.now();
+      if (isInteractivePaused()) {
+        if (pausedSince === null) pausedSince = now;
+        lastPauseSeen = now;
+        return true;
+      }
+      if (pausedSince !== null) {
+        observation.humanPauseMs = (observation.humanPauseMs ?? 0) + Math.max(0, (lastPauseSeen ?? now) - pausedSince);
+        pausedSince = null;
+      }
+      return false;
+    };
+    const rearm = (fn: () => void, waitMs: number) => {
+      timer = setTimeout(fn, waitMs);
+      (timer as { unref?: () => void }).unref?.();
+    };
+    if (!silenceMode) {
+      // The total arm re-arms too, and EXTENDS itself by the observed pause: time a
+      // human spent deciding is not time the stage ran. `elapsedMs` in the message
+      // still reports true wall clock, with the pause stated separately.
+      const armTotal = () => {
+        if (humanPending()) {
+          rearm(armTotal, Math.min(VERIFY_PAUSE_RECHECK_MS, timeoutMs));
+          return;
+        }
+        const waitMs = startedAt + timeoutMs + (observation.humanPauseMs ?? 0) - Date.now();
+        if (waitMs <= 0) {
+          fire();
+          return;
+        }
+        rearm(armTotal, waitMs);
+      };
+      armTotal();
+      return;
+    }
+    // Self-rearming silence timer, the same shape `withIsolatedImplDeadline`
+    // uses: sleep until the last-seen event would age out, then re-read — if the
+    // stage reported meanwhile, sleep again for the remainder. One live timer,
+    // and a short poll only while a human card is actually open.
+    const armIdle = () => {
+      if (humanPending()) {
+        rearm(armIdle, Math.min(VERIFY_PAUSE_RECHECK_MS, timeoutMs));
+        return;
+      }
+      const anchor = Math.max(observation.lastEventAtMs ?? startedAt, lastPauseSeen ?? 0);
+      const waitMs = anchor + timeoutMs - Date.now();
+      if (waitMs <= 0) {
+        fire();
+        return;
+      }
+      rearm(armIdle, waitMs);
+    };
+    armIdle();
   });
+  type Raced =
+    | { kind: "work"; result: ToolResult }
+    | { kind: "work-threw"; err: unknown }
+    | { kind: "timeout"; result: ToolResult };
+  const work: Promise<Raced> = runVerifyOrchestration(verifyAgent, {
+    abortSignal: controller.signal,
+    onProgress,
+  }).then(
+    (result): Raced => ({ kind: "work", result }),
+    (err): Raced => ({ kind: "work-threw", err }),
+  );
   try {
-    return await Promise.race([
-      runVerifyOrchestration(verifyAgent, { abortSignal: controller.signal, onProgress }),
-      timeout,
-    ]);
+    const raced = await Promise.race<Raced>([work, timeout.then((result): Raced => ({ kind: "timeout", result }))]);
+    if (firedMessage === null) {
+      if (raced.kind === "work-threw") throw raced.err;
+      // `timeout` can only settle via `fire()`, which sets `firedMessage` first.
+      return (raced as { result: ToolResult }).result;
+    }
+    const salvage = await salvageAbortedVerifyOutput(work, runId, sprintN);
+    return {
+      success: false,
+      output: salvage.output,
+      error: `verify-timeout: ${firedMessage}${describeVerifySalvage(salvage)}`,
+    };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error(`[sprint-runner] verify stage threw (sprint ${sprintN}, run ${runId}): ${message}`);
     return { success: false, output: "", error: `verify-error: ${message}` };
   } finally {
     if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * How often the watchdog re-checks while a blocking human card is open.
+ *
+ * A pause ENDS without emitting anything the watchdog can observe, so the end has
+ * to be sampled. One unref'd timer, alive only while a card is open; the silence
+ * window then restarts from the last sampled pause moment, i.e. within this
+ * interval of the human's answer.
+ */
+const VERIFY_PAUSE_RECHECK_MS = 5_000;
+
+/**
+ * How long an aborted verify stage gets to hand back its partial report.
+ *
+ * Bounded because an aborted turn is not guaranteed to settle at all — the
+ * watchdog's own doc notes the hung op may leak in the background. Override with
+ * MUONROI_SPRINT_VERIFY_SALVAGE_MS.
+ *
+ * DECIDED (reviewer, on the run muc2joffe506 fix): 30s stays, and a request to drop
+ * it to 5s was declined. It is only ever spent on a stage that has ALREADY burned
+ * its full budget (>= 600s), so the worst case is ~5% on the rare timeout path, and
+ * a recovered partial report is the entire point of the salvage. If you are here to
+ * shrink it, the thing to weigh is "how long does an aborted nested turn actually
+ * take to unwind" — measure that, do not guess it down.
+ */
+function getVerifySalvageGraceMs(): number {
+  return envPositiveInt("MUONROI_SPRINT_VERIFY_SALVAGE_MS", 30_000);
+}
+
+/**
+ * WHY the empty case is not one case.
+ *
+ * An empty `output` on a timeout is byte-identical to the defect this whole change
+ * fixed (run muc2joffe506 sprint 2: `sprints/2-verify.md` held the timeout text and
+ * nothing else), so a silent empty salvage would read as a regression of it — and
+ * "it looked the same as the old behaviour" is exactly the trap this codebase keeps
+ * falling into. Each outcome therefore gets its own sentence in the artifact:
+ *
+ * - `partial`       the stage answered and had something. The normal good path.
+ * - `empty-payload` the stage answered promptly and had produced nothing. A real,
+ *                   final fact about the stage — not a salvage failure.
+ * - `grace-expired` the stage never answered inside the grace and may still be
+ *                   running. Says nothing about what it had produced.
+ * - `rejected`      the aborted work threw instead of returning. Also not a
+ *                   statement about the payload.
+ */
+type VerifySalvageOutcome = "partial" | "empty-payload" | "grace-expired" | "rejected";
+
+interface VerifySalvage {
+  /** Trimmed partial report, or `""` for every non-`partial` outcome. */
+  output: string;
+  outcome: VerifySalvageOutcome;
+  /** The grace actually applied, so the message can quote the real number. */
+  graceMs: number;
+}
+
+/**
+ * Recover whatever the aborted verify stage had produced.
+ *
+ * MEASURED: run `muc2joffe506` sprint 2 had verified the Docker stack, service
+ * health and `/api/health` (Phases 1-3) before it was cut, and
+ * `sprints/2-verify.md` recorded nothing but the timeout text, because the
+ * timeout branch resolved `output: ""`. The payload was always there —
+ * `buildVerifyAgent.runTaskRequest` returns the truncated output of a killed turn
+ * — the race just discarded it. Every outcome is NAMED (see `VerifySalvageOutcome`)
+ * rather than collapsed into an empty string, and logged (never silently).
+ */
+async function salvageAbortedVerifyOutput(
+  work: Promise<{ kind: string; result?: ToolResult; err?: unknown }>,
+  runId: string,
+  sprintN: number,
+): Promise<VerifySalvage> {
+  const graceMs = getVerifySalvageGraceMs();
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const grace = new Promise<null>((resolve) => {
+    graceTimer = setTimeout(() => resolve(null), graceMs);
+    (graceTimer as { unref?: () => void }).unref?.();
+  });
+  try {
+    const settled = await Promise.race([work, grace]);
+    if (settled === null) {
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage handed back no partial report in time", {
+        runId,
+        sprintN,
+        graceMs,
+      });
+      return { output: "", outcome: "grace-expired", graceMs };
+    }
+    if (settled.kind === "work-threw") {
+      const err = settled.err;
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage rejected instead of returning a partial", {
+        runId,
+        sprintN,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      return { output: "", outcome: "rejected", graceMs };
+    }
+    const output = (settled.result?.output ?? "").trim();
+    if (output.length === 0) {
+      // Distinct from `grace-expired`: the stage DID answer, and the answer was
+      // empty. Logged at error level like the others because a verify stage that
+      // produced no text at all before being cut is itself worth knowing.
+      logger.error("orchestrator", "[sprint-runner] aborted verify stage answered with an empty payload", {
+        runId,
+        sprintN,
+      });
+      return { output: "", outcome: "empty-payload", graceMs };
+    }
+    return { output, outcome: "partial", graceMs };
+  } catch (err) {
+    logger.error("orchestrator", "[sprint-runner] salvaging the aborted verify payload failed", {
+      runId,
+      sprintN,
+      error: err instanceof Error ? err.message : String(err),
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    return { output: "", outcome: "rejected", graceMs };
+  } finally {
+    if (graceTimer) clearTimeout(graceTimer);
+  }
+}
+
+/**
+ * The sentence appended to the timeout message, which is what a reader of
+ * `<n>-verify.md` actually sees.
+ *
+ * One distinct sentence per outcome, on purpose — see `VerifySalvageOutcome`. An
+ * empty payload must never be reported with wording a reader could mistake for
+ * "the salvage was not attempted" or for the pre-fix behaviour.
+ */
+function describeVerifySalvage(salvage: VerifySalvage): string {
+  const s = (ms: number) => (ms / 1000).toFixed(1);
+  switch (salvage.outcome) {
+    case "partial":
+      return (
+        `; the stage's partial report was kept (${salvage.output.length} chars) — read it as a PARTIAL verification ` +
+        "(what it did establish, and what it could not run), never as a verdict"
+      );
+    case "empty-payload":
+      return "; the stage answered the abort but had produced nothing, so there is no partial report to read";
+    case "grace-expired":
+      return (
+        `; the stage did not hand anything back within the ${s(salvage.graceMs)}s salvage grace, so nothing could be ` +
+        "recovered — it may still be running when this returned, and this says NOTHING about what it had produced"
+      );
+    case "rejected":
+      return "; the aborted stage rejected instead of returning a partial, so nothing could be recovered (see the log)";
   }
 }
 
@@ -162,12 +931,79 @@ export function getImplIdleTimeoutMs(): number {
  * NOT reset by chunks, so it catches a hang that keeps the idle guard alive with
  * heartbeat/status chunks. Generous by default so a legitimately large sprint is
  * not cut short; a genuine hang still terminates within this ceiling.
+ *
+ * NOT armed inside an `/ideal` run (user decision: no limits) — it is a total
+ * that fires on a turn which is still streaming, which is the class of cut that
+ * ended run mtv9v1xu7615 on the neighbouring stage. The idle arm of the SAME
+ * watchdog, `getImplIdleTimeoutMs()` (240s of no chunk at all), is untouched and
+ * is what still ends a wedged turn there; `withImplIdleWatchdog` arms the total
+ * only when it is finite.
  */
 export function getImplTotalTimeoutMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
   const raw = process.env.MUONROI_SPRINT_IMPL_TOTAL_MS;
   const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
   if (Number.isFinite(n) && n > 0) return n;
   return 15 * 60 * 1000; // 15 min hard ceiling on a single impl turn
+}
+
+/**
+ * SILENCE budget for the ISOLATED implementation stage (ms). Override with
+ * MUONROI_SPRINT_ISOLATED_IMPL_IDLE_MS.
+ *
+ * Time since the child's LAST sub-agent activity notification (one fires per
+ * tool call it starts) — the isolated path's equivalent of the streamed path's
+ * time-to-next-chunk budget. It defaults to `getImplIdleTimeoutMs()` rather
+ * than a number of its own because `withImplIdleWatchdog` has guarded the SAME
+ * stage with that 4-minute window in production; the two paths differ in the
+ * signal available, not in how long an implementation turn may legitimately go
+ * quiet.
+ *
+ * Derivation, measured on run mtv9v1xu7615: 196 activity events across the 900s
+ * window is a mean gap of 4.6s, and the final gap was 0.8s. 240s is ~52× that
+ * mean, so a child working at anything like the observed cadence is never cut —
+ * while still leaving room for one long-running tool call (a build, a test
+ * suite) between notifications.
+ */
+export function getIsolatedImplIdleTimeoutMs(): number {
+  const raw = process.env.MUONROI_SPRINT_ISOLATED_IMPL_IDLE_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return getImplIdleTimeoutMs();
+}
+
+/**
+ * ABSOLUTE ceiling for the ISOLATED implementation stage (ms). Override with
+ * MUONROI_SPRINT_ISOLATED_IMPL_CEILING_MS.
+ *
+ * An idle-only rule can never end a child that emits a tool call forever, so a
+ * hard stop remains. It is NOT the wedge guard any more — the idle window above
+ * catches silence ~15× sooner — it exists solely to bound a looping child.
+ *
+ * Derivation: run mtv9v1xu7615 was STILL emitting (last event 0.8s earlier) when
+ * the old flat 900s budget cancelled it, so any ceiling at or below 900s
+ * reproduces that defect by construction. That run is the only measurement of
+ * how long a productive isolated stage lasts here, and it is a lower bound, not
+ * a duration — so the ceiling is set 4× above it. At 240× the idle window the
+ * two bounds cannot race: a silent child is always cut by the idle rule first.
+ *
+ * Inside an `/ideal` run there is no ceiling at all (user decision: no limits).
+ * By this function's own derivation the ceiling is no longer the wedge guard —
+ * "it exists solely to bound a looping child" — and a looping child is now ended
+ * by signals that read what it is DOING rather than how long it has taken: the
+ * failing-tool-loop guard (8 consecutive same-class tool failures,
+ * `stall-watchdog.ts:299`) and `createNoProgressStopWhen()` (6 consecutive
+ * repeat-only steps), which `stream-runner.ts:650` arms on the sub-agent loop
+ * precisely when its step cap is non-finite — i.e. inside `/ideal`. The silence
+ * rule above stays armed: `withIsolatedImplDeadline` treats a non-finite ceiling
+ * as "no ceiling", NOT as "no bounds".
+ */
+export function getIsolatedImplCeilingMs(): number {
+  if (isIdealRunUnlimited()) return Number.POSITIVE_INFINITY;
+  const raw = process.env.MUONROI_SPRINT_ISOLATED_IMPL_CEILING_MS;
+  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  if (Number.isFinite(n) && n > 0) return n;
+  return 60 * 60 * 1000; // 60 min — 4× the 900s at which a working child was cut
 }
 
 /**
@@ -248,17 +1084,23 @@ export async function* withImplIdleWatchdog(
 ): AsyncGenerator<StreamChunk, void, unknown> {
   const it = gen[Symbol.asyncIterator]();
   let totalTimer: ReturnType<typeof setTimeout> | undefined;
-  const total = new Promise<never>((_, reject) => {
-    totalTimer = setTimeout(() => {
-      reject(
-        new Error(
-          `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
-            `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
-            `(likely hung after its final response while emitting only heartbeat chunks)`,
-        ),
-      );
-    }, totalMs);
-  });
+  // A non-finite (or non-positive) ceiling means "no total guard" — the state an
+  // `/ideal` run is in, where a turn that is still streaming must never be cut.
+  // The idle arm below is unaffected, so the stage is never left unbounded.
+  const totalArmed = Number.isFinite(totalMs) && totalMs > 0;
+  const total = totalArmed
+    ? new Promise<never>((_, reject) => {
+        totalTimer = setTimeout(() => {
+          reject(
+            new Error(
+              `implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
+                `treated as stalled (sprint ${sprintN}) — the orchestrator turn never completed ` +
+                `(likely hung after its final response while emitting only heartbeat chunks)`,
+            ),
+          );
+        }, totalMs);
+      })
+    : null;
   try {
     while (true) {
       let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -274,8 +1116,10 @@ export async function* withImplIdleWatchdog(
         }, idleMs);
       });
       let res: IteratorResult<StreamChunk, void>;
+      const racers: Array<Promise<IteratorResult<StreamChunk, void>>> = [it.next(), idle];
+      if (total) racers.push(total);
       try {
-        res = await Promise.race([it.next(), idle, total]);
+        res = await Promise.race(racers);
       } finally {
         if (idleTimer) clearTimeout(idleTimer);
       }
@@ -302,11 +1146,10 @@ export async function* withImplIdleWatchdog(
  * ceiling.
  *
  * This races the isolated task against a hard total-elapsed deadline. On
- * timeout it rejects so the caller's existing try/catch converts the wedge into
- * a visible phaseError (the sprint surfaces + can recover), mirroring what
- * `withImplIdleWatchdog` / `runVerifyWithWatchdog` do for the other stages. The
- * suspended sub-agent promise may leak in the background, but the run recovers.
- * `totalMs <= 0` disables the guard (returns the task unchanged).
+ * timeout it ABORTS the child and rejects, so the caller's existing try/catch
+ * converts the wedge into a visible phaseError (the sprint surfaces + can
+ * recover), mirroring what `withImplIdleWatchdog` / `runVerifyWithWatchdog` do
+ * for the other stages. `totalMs <= 0` disables the deadline.
  */
 /**
  * Extract why an isolated implementation task failed, from its ToolResult.
@@ -349,6 +1192,14 @@ export function logSprintImplError(
     implModelId?: string;
     elapsedMs: number;
     isolated: boolean;
+    /**
+     * Which isolated-impl bound fired, when the failure was a deadline. Kept as
+     * its own column rather than left to prose because "went quiet" and "was
+     * still emitting at the ceiling" are the two diagnoses a post-mortem has to
+     * separate, and run mtv9v1xu7615 showed that a single blended sentence sends
+     * the reader down the wrong one.
+     */
+    timeoutCause?: IsolatedImplTimeoutCause;
   },
 ): void {
   try {
@@ -360,6 +1211,7 @@ export function logSprintImplError(
         runId: ctx.runId,
         sprintN: info.sprintN,
         isolated: info.isolated,
+        timeoutCause: info.timeoutCause ?? null,
         message: info.message.slice(0, 2000),
         stack: info.stack,
       },
@@ -373,26 +1225,322 @@ export function logSprintImplError(
   }
 }
 
-export async function withIsolatedImplDeadline<T>(task: Promise<T>, totalMs: number, sprintN: number): Promise<T> {
-  if (!(Number.isFinite(totalMs) && totalMs > 0)) return task;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(
-        new Error(
-          `isolated implementation stage exceeded ${Math.round(totalMs / 1000)}s total watchdog and was ` +
-            `treated as stalled (sprint ${sprintN}) — the isolated sub-agent turn never completed ` +
-            `(hung on the JS side after its final response; the isolated path has no per-chunk stall guard)`,
-        ),
-      );
-    }, totalMs);
-    (timer as { unref?: () => void }).unref?.();
-  });
-  try {
-    return await Promise.race([task, deadline]);
-  } finally {
-    if (timer) clearTimeout(timer);
+/**
+ * What the deadline ACTUALLY observed about the isolated turn, as of the moment
+ * it fired. Populated from the sub-agent's own per-tool activity callback — the
+ * only signal the sprint has about the child — so the timeout message can state
+ * facts instead of a narrative.
+ */
+export interface IsolatedImplObservation {
+  /** Sub-agent activity notifications seen (one per tool call it started). */
+  events: number;
+  /** `Date.now()` of the most recent one, or null when none ever arrived. */
+  lastEventAtMs: number | null;
+}
+
+/**
+ * The isolated-impl timeout message.
+ *
+ * It reports ONLY what was measured. The previous text asserted, on every
+ * timeout, that the turn "never completed (hung on the JS side after its final
+ * response; the isolated path has no per-chunk stall guard)". Both halves were
+ * false for the 2026-09 degenerate run — the sub-agent was emitting a tool call
+ * roughly every 6s when the deadline fired, and a per-chunk stall guard does
+ * exist (`stream-runner.ts` arms `createStallWatchdog` with an any-chunk timer
+ * AND a no-forward-progress timer). That hardcoded narrative was a diagnosis
+ * carried over from a DIFFERENT incident (run mrhc43f0fb9b) and it cost a later
+ * investigation an entire hypothesis. Never restate a cause here.
+ *
+ * `cause` extends that rule rather than bending it: it is not a diagnosis, it
+ * names WHICH measured bound fired. "Went quiet for 240s" and "was still
+ * emitting at the 3600s ceiling" are different observations that call for
+ * different next steps, and run mtv9v1xu7615 proved they must not share a
+ * sentence — its message said "exceeded 900s total watchdog" while also
+ * reporting the child was emitting 0.8s earlier, and reconciling those two
+ * halves is the whole investigation. Defaults to `"ceiling"` so a caller that
+ * predates the idle rule reads exactly as it did before.
+ */
+export type IsolatedImplTimeoutCause = "idle" | "ceiling";
+
+export function buildIsolatedImplTimeoutMessage(args: {
+  sprintN: number;
+  totalMs: number;
+  elapsedMs: number;
+  observation?: IsolatedImplObservation;
+  firedAtMs?: number;
+  cause?: IsolatedImplTimeoutCause;
+  /** The silence budget in force, when one was armed. */
+  idleMs?: number;
+}): string {
+  const { sprintN, totalMs, elapsedMs, observation, idleMs } = args;
+  const cause: IsolatedImplTimeoutCause = args.cause ?? "ceiling";
+  const firedAt = args.firedAtMs ?? Date.now();
+  // A non-finite ceiling means none was armed (an `/ideal` run) — say so rather
+  // than printing "Infinitys", which reads as a bug in the watchdog.
+  const hasCeiling = Number.isFinite(totalMs);
+  const ceilingS = Math.round(totalMs / 1000);
+  const parts: string[] =
+    cause === "idle"
+      ? [
+          `isolated implementation stage saw no sub-agent activity for ${Math.round((idleMs ?? 0) / 1000)}s ` +
+            `(sprint ${sprintN}) and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
+          hasCeiling
+            ? `the ${ceilingS}s absolute ceiling was NOT reached — this was the SILENCE budget`
+            : "no absolute ceiling was armed — the SILENCE budget is the only bound on this stage",
+        ]
+      : [
+          `isolated implementation stage exceeded ${ceilingS}s total watchdog (sprint ${sprintN}) ` +
+            `and was CANCELLED after ${(elapsedMs / 1000).toFixed(1)}s`,
+          idleMs
+            ? `this was the ABSOLUTE ceiling, not the ${Math.round(idleMs / 1000)}s silence budget — ` +
+              "the child was inside its silence budget when it was cut"
+            : "this was the ABSOLUTE ceiling",
+        ];
+  if (!observation) {
+    parts.push("no sub-agent activity was instrumented for this call, so nothing further was observed");
+  } else if (observation.events === 0 || observation.lastEventAtMs === null) {
+    parts.push("observed 0 sub-agent activity events — nothing was seen streaming from the child");
+  } else {
+    const sinceLastMs = Math.max(0, firedAt - observation.lastEventAtMs);
+    parts.push(
+      `observed ${observation.events} sub-agent activity event(s), the last one ` +
+        `${(sinceLastMs / 1000).toFixed(1)}s before the deadline ` +
+        `(at ${new Date(observation.lastEventAtMs).toISOString()}) — ` +
+        `${sinceLastMs < 60_000 ? "the child was still emitting when it was cancelled" : "the child had gone quiet"}`,
+    );
   }
+  parts.push("cause not diagnosed — only the observations above were measured");
+  return parts.join("; ");
+}
+
+/**
+ * The rejection a fired isolated-impl deadline throws. Carries WHICH bound
+ * fired as a field so a consumer can branch on it without regexing prose —
+ * `runSprint` persists it alongside the message.
+ */
+export class IsolatedImplTimeoutError extends Error {
+  readonly timeoutCause: IsolatedImplTimeoutCause;
+  constructor(message: string, timeoutCause: IsolatedImplTimeoutCause) {
+    super(message);
+    this.name = "IsolatedImplTimeoutError";
+    this.timeoutCause = timeoutCause;
+  }
+}
+
+/**
+ * Bound an isolated sub-agent task by SILENCE, with an absolute ceiling behind
+ * it — **and cancel the child when either fires**.
+ *
+ * Previously this was a bare `Promise.race` over an already-started promise,
+ * with no `AbortSignal` anywhere: losing the race abandoned the child, which
+ * kept running. Measured on the 2026-09 degenerate run — the watchdog threw at
+ * 11:13:44 and the sub-agent carried on to 11:17:24, another 220s and 32 steps,
+ * accounting for 29.8% of the whole run's recorded spend AFTER the run had been
+ * declared dead. This repo already knew the failure mode: `llm-deadline.ts:105`
+ * logs "abandoned call rejected after the race settled".
+ *
+ * So `run` is a FACTORY that receives the signal: the deadline aborts it before
+ * rejecting, and the abandoned promise's late rejection is observed and logged
+ * (never left to escape as an unattributable unhandled rejection).
+ * `totalMs <= 0` disables BOTH bounds but still supplies a (never-aborted)
+ * signal, so the call site's wiring is identical in both modes.
+ *
+ * WHY IT IS NO LONGER A FLAT BUDGET. Run mtv9v1xu7615 ended
+ * `outcome:"threw" sprintsRun:0`, reason: "…exceeded 900s total watchdog
+ * (sprint 3) and was CANCELLED after 900.0s; observed 196 sub-agent activity
+ * event(s), the last one 0.8s before the deadline". 196 events across 900s is a
+ * mean gap of 4.6s: the child was working, and it was writing the analyzer unit
+ * tests the previous sprint had failed its engineering floor for
+ * (`zero_coverage`) — 428 lines / 28 `[Fact]` tests were on disk afterwards. A
+ * flat wall clock cannot tell that apart from a wedge, and here it cut the one
+ * sprint that was unblocking the run.
+ *
+ * The signal to tell them apart was already being collected: the sub-agent's
+ * per-tool `onActivity` callback fed `observation`, and `observation` was used
+ * ONLY to phrase the error message. It now decides. `idleMs` is measured from
+ * the LAST observed activity (re-armed each time the child is seen alive), so
+ * this is the same principle `withImplIdleWatchdog` applies to the streamed
+ * path's time-to-next-chunk — the isolated path cannot wrap a stream, but it
+ * has an equivalent signal.
+ *
+ * The ceiling stays because an idle rule alone can never end a child that emits
+ * a tool call forever in a loop. It is not the wedge guard any more: the
+ * mrhc43f0fb9b wedge (2 files written, final `llm-done`, then 30+ min of
+ * silence with an idle process) starts its silence immediately, so `idleMs`
+ * ends it in ~4 min instead of at the ceiling.
+ *
+ * NO ACTIVITY SIGNAL (`observe` omitted): the idle rule is not armed and the
+ * behaviour degrades to exactly the pre-existing flat `totalMs` budget. With no
+ * observations every instant is indistinguishable from silence, so an idle rule
+ * would either fire immediately or never; and dropping the bound altogether
+ * would reinstate the wedge this function exists for. The one production call
+ * site (`runIsolatedImplWithDeadline`) always wires it — this arm is for
+ * legacy/test callers.
+ *
+ * THREE `totalMs` MODES, and the difference between the last two matters:
+ *   - finite, > 0  → ceiling armed, silence rule armed (normal).
+ *   - non-finite   → NO ceiling, silence rule still armed. This is what an
+ *     `/ideal` run passes: no wall clock may cut work that is still running,
+ *     but the stage keeps a liveness bound.
+ *   - <= 0 / NaN   → BOTH bounds off (the pre-existing explicit opt-out).
+ */
+export async function withIsolatedImplDeadline<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  totalMs: number,
+  sprintN: number,
+  observe?: () => IsolatedImplObservation,
+  idleMs?: number,
+): Promise<T> {
+  const controller = new AbortController();
+  const startedAt = Date.now();
+  // `totalMs <= 0` (or NaN) keeps its pre-existing meaning: disable BOTH bounds.
+  if (!(totalMs > 0)) return run(controller.signal);
+  // A non-finite `totalMs` means NO ABSOLUTE CEILING while the silence rule
+  // stays armed — the shape an `/ideal` run asks for. It must be distinct from
+  // the opt-out above: dropping the idle rule too would leave the stage with no
+  // liveness signal at all, which is a worse failure than the ceiling (it hangs
+  // silently and forever — the mrhc43f0fb9b wedge this function exists for).
+  const ceilingArmed = Number.isFinite(totalMs);
+
+  const idleArmed = !!observe && Number.isFinite(idleMs) && (idleMs as number) > 0;
+  const idleBudget = idleArmed ? (idleMs as number) : 0;
+  // Nothing left to arm. Report it rather than returning a bound-looking call
+  // that silently has none — production always wires `observe` + `idleMs`
+  // (`runIsolatedImplWithDeadline`), so reaching this is a call-site defect.
+  if (!ceilingArmed && !idleArmed) {
+    logger.warn("orchestrator", "[sprint-runner] isolated impl task is UNBOUNDED: no ceiling and no activity signal", {
+      sprintN,
+      totalMs,
+      idleMs: idleMs ?? null,
+      hasObserver: !!observe,
+    });
+    return run(controller.signal);
+  }
+
+  let settled = false;
+  let deadlineFired = false;
+  let timeoutMessage = "";
+  let firedCause: IsolatedImplTimeoutCause = "ceiling";
+
+  const work = run(controller.signal).catch((err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (settled) {
+      // The race already resolved — nobody is awaiting this. Log with context
+      // (No-Silent-Catch: reported, just not rethrown into a dead race).
+      logger.error("orchestrator", "[sprint-runner] cancelled isolated impl task rejected after the deadline race", {
+        sprintN,
+        totalMs,
+        error: msg,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3).join(" | ") : undefined,
+      });
+      return undefined as T;
+    }
+    // Our own cancellation surfaced first — report the deadline, not the abort.
+    if (deadlineFired) throw new IsolatedImplTimeoutError(timeoutMessage, firedCause);
+    throw err;
+  });
+
+  let ceilingTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const clearTimers = () => {
+    if (ceilingTimer) clearTimeout(ceilingTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+  };
+
+  const deadline = new Promise<never>((_, reject) => {
+    const fire = (cause: IsolatedImplTimeoutCause) => {
+      if (deadlineFired) return;
+      deadlineFired = true;
+      firedCause = cause;
+      clearTimers();
+      timeoutMessage = buildIsolatedImplTimeoutMessage({
+        sprintN,
+        totalMs,
+        elapsedMs: Date.now() - startedAt,
+        observation: observe?.(),
+        cause,
+        ...(idleArmed ? { idleMs: idleBudget } : {}),
+      });
+      // Cancel the work we are giving up on BEFORE unblocking the caller.
+      controller.abort(new DOMException(timeoutMessage, "TimeoutError"));
+      logger.error("orchestrator", "[sprint-runner] isolated impl deadline fired — child cancelled", {
+        sprintN,
+        cause,
+        totalMs,
+        idleMs: idleArmed ? idleBudget : null,
+        message: timeoutMessage,
+      });
+      reject(new IsolatedImplTimeoutError(timeoutMessage, cause));
+    };
+
+    if (ceilingArmed) {
+      ceilingTimer = setTimeout(() => fire("ceiling"), totalMs);
+      (ceilingTimer as { unref?: () => void }).unref?.();
+    }
+
+    if (!idleArmed) return;
+    // Self-rearming silence timer. `observe` is a PULL snapshot (the child
+    // pushes nothing to us), so instead of polling we sleep until the moment
+    // the current last-seen event would age out, then re-read: if the child
+    // emitted meanwhile, `lastEventAtMs` has moved and we sleep again for the
+    // remainder. Exact to the millisecond, one live timer, no polling cost.
+    const armIdle = () => {
+      if (deadlineFired || settled) return;
+      const lastSeen = observe?.().lastEventAtMs ?? startedAt;
+      const waitMs = lastSeen + idleBudget - Date.now();
+      if (waitMs <= 0) {
+        fire("idle");
+        return;
+      }
+      idleTimer = setTimeout(armIdle, waitMs);
+      (idleTimer as { unref?: () => void }).unref?.();
+    };
+    armIdle();
+  });
+
+  try {
+    return await Promise.race([work, deadline]);
+  } finally {
+    settled = true;
+    clearTimers();
+  }
+}
+
+/**
+ * The REAL isolated-implementation invocation, extracted so the
+ * deadline → `abortSignal` wiring is exercised by tests at the call site
+ * itself rather than only on the helper.
+ *
+ * This repo has twice shipped a helper whose unit test passed while the
+ * production call site passed nothing into it. `runSprint` calls exactly this
+ * function, so a test that asserts `runIsolatedTask` receives
+ * `withIsolatedImplDeadline`'s signal cannot pass while the call site is
+ * unwired. @testonly-seam (the export exists so the wiring is pinnable).
+ */
+export async function runIsolatedImplWithDeadline(args: {
+  runIsolatedTask: NonNullable<DriverContext["runIsolatedTask"]>;
+  request: import("../types/index.js").TaskRequest;
+  /** Absolute ceiling — `getIsolatedImplCeilingMs()` in production. */
+  totalMs: number;
+  sprintN: number;
+  /** Silence budget — `getIsolatedImplIdleTimeoutMs()` in production. */
+  idleMs?: number;
+}): Promise<ToolResult> {
+  const observation: IsolatedImplObservation = { events: 0, lastEventAtMs: null };
+  return withIsolatedImplDeadline(
+    (signal) =>
+      args.runIsolatedTask(args.request, {
+        abortSignal: signal,
+        onActivity: () => {
+          observation.events += 1;
+          observation.lastEventAtMs = Date.now();
+        },
+      }),
+    args.totalMs,
+    args.sprintN,
+    () => ({ ...observation }),
+    args.idleMs,
+  );
 }
 
 export {
@@ -469,28 +1617,6 @@ export async function persistSprintPlan(planPath: string, synthesis: string): Pr
 }
 
 /**
- * Extract repo-relative target file paths a sprint plan names (src/…, packages/…,
- * tests/…). Deduped, capped. Used by Wave 3 (existing targets → continue) and 4A
- * (missing targets → completeness re-check). Never throws.
- */
-export function extractPlanTargetPaths(planSynthesis: string, cap = 40): string[] {
-  try {
-    const tokens = new Set<string>();
-    const re = /\b((?:src|packages|tests|scripts|lib|app|apps)\/[\w./@-]+\.[a-z]{1,5})\b/gi;
-    let m: RegExpExecArray | null = re.exec(planSynthesis);
-    while (m !== null) {
-      tokens.add(m[1]!.replace(/\\/g, "/"));
-      if (tokens.size >= cap) break;
-      m = re.exec(planSynthesis);
-    }
-    return [...tokens];
-  } catch (err) {
-    console.error(`[sprint-runner] extractPlanTargetPaths failed: ${(err as Error).message}`);
-    return [];
-  }
-}
-
-/**
  * Wave 3: plan-named target file paths that ALREADY EXIST on disk, so the impl
  * turn continues them rather than re-scaffolding in a new location. Empty on a
  * greenfield sprint (files don't exist yet) → no injection.
@@ -523,6 +1649,11 @@ const DEFERRAL_MARKER_RE =
  * marker onto shared enumeration lines (e.g. a `folderStructure` string listing
  * several files at once) and wrongly defers files named beside a deferred one.
  *
+ * Only checks FILE tokens (`extractPlanTargetPaths`), same as before D1 —
+ * see the module doc on `computeMissingPlanTargets` below for why this
+ * deliberately stays files-only rather than also walking
+ * `extractPlanTargetDirs`.
+ *
  * Best-effort and deliberately conservative: the completeness re-check is a soft
  * nudge (a re-check miss never fails the sprint), so over-excluding a genuinely
  * needed file just defers its detection to the verify gate — far cheaper than the
@@ -553,10 +1684,30 @@ export function extractDeferredTargetPaths(planSynthesis: string, window = 1): s
 }
 
 /**
- * 4A: plan-named target file paths that STILL DO NOT EXIST after the impl turn —
- * i.e. action items the implementer left unaddressed. Drives the post-impl
- * completeness re-check (spend an extra turn ONLY when there is proven-incomplete
- * work, unlike an unconditional reviewer pass). Empty ⇒ every named target landed.
+ * 4A: plan-named target FILE paths that STILL DO NOT EXIST after the impl
+ * turn — i.e. action items the implementer left unaddressed. Drives the
+ * post-impl completeness re-check (spend an extra turn ONLY when there is
+ * proven-incomplete work, unlike an unconditional reviewer pass). Empty ⇒
+ * every named target landed.
+ *
+ * D1 note — deliberately stays files-only, NOT extended to
+ * `extractPlanTargetDirs`, even though `extractPlanTargetPaths` no longer
+ * misclassifies a dotted directory (e.g. `src/Acme.Widgets.Tests`) as a
+ * file. Measured while building D1: wiring `extractPlanTargetDirs` in here
+ * made ANY bare directory mentioned ANYWHERE in the plan's prose — including
+ * a directory named only as scope context, e.g. "set up src/Acme.Widgets",
+ * never meant as a literal "this empty directory must exist" deliverable —
+ * count as a missing target whenever the mocked/real impl turn hadn't
+ * separately created it, firing an unwanted extra completeness-recheck turn
+ * every time (regression caught by
+ * `sprint-plan-artifact-integration.test.ts`'s existing "appends the S3b
+ * task checklist" case). That is exactly the false-positive failure mode
+ * this function's own docs warn about (a spurious re-check can spawn a
+ * plan-CONTRADICTING repair turn), so a bare directory target — dotted or
+ * not — is left out of this specific re-check on purpose. A dotted directory
+ * genuinely worth verifying still gets checked at the verify gate, and
+ * `sprint-plan-artifact.ts`'s `targetDirs` / S3b's `touchedTargets` still
+ * track it for observability.
  *
  * Paths the plan explicitly DEFERRED (post-MVP / phase 2) are excluded — the
  * re-check must not force-create files the plan asked NOT to build this sprint.
@@ -581,19 +1732,182 @@ export function getImplRecheckEnabled(): boolean {
   return process.env.MUONROI_SPRINT_IMPL_RECHECK !== "0";
 }
 
+/**
+ * Build the `sprints/<n>-adherence.json` record for a plan-adherence review
+ * that ran to completion (approved, no-progress stop, or round-cap stop).
+ * Pure — kept separate from the write so it is unit-testable without a real
+ * filesystem (see `product-loop/__tests__/plan-adherence-artifact.test.ts`).
+ */
+export function buildAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  reviewModelId: string;
+  fixModelId: string;
+  verdict: AdherenceVerdict;
+  startedAt: string;
+  finishedAt?: string;
+}): SprintAdherenceRecord {
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: true,
+    rounds: args.verdict.roundRecords,
+    finalVerdict: args.verdict.adherent,
+    // Bounded for the PERSISTED record only — `args.verdict.deviations` itself
+    // (which the caller folds into `iter.nextFocus`) is left untouched, so
+    // next-sprint behaviour never sees a truncated deviation.
+    residualDeviations: boundDeviations(args.verdict.deviations),
+    stopReason: args.verdict.stopReason,
+    reviewModelId: args.reviewModelId,
+    fixModelId: args.fixModelId,
+    startedAt: args.startedAt,
+    finishedAt: args.finishedAt ?? new Date().toISOString(),
+    // Slice H — copied through verbatim (already bounded at scan time by
+    // `SUPPRESSION_DETAIL_MAX`). Omitted, never defaulted to an empty scan, when
+    // the review scanned no diff: absence and "none found" are different facts.
+    ...(args.verdict.suppressions ? { suppressions: args.verdict.suppressions } : {}),
+  };
+}
+
+/**
+ * Build the adherence record for a sprint that never ran the review — either
+ * `MUONROI_IDEAL_ADHERENCE_REVIEW=0`, no isolated-task capability on this
+ * ctx, or an empty plan synthesis. `finalVerdict: true` mirrors the review
+ * function's own behaviour when it has nothing to check (vacuously adherent);
+ * `enabled: false` is what distinguishes this from an actual approval.
+ */
+export function buildDisabledAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  startedAt?: string;
+}): SprintAdherenceRecord {
+  const now = new Date().toISOString();
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: false,
+    rounds: [],
+    finalVerdict: true,
+    residualDeviations: [],
+    stopReason: "disabled",
+    startedAt: args.startedAt ?? now,
+    finishedAt: now,
+  };
+}
+
+/**
+ * Build the adherence record for a sprint where the review threw before
+ * producing a verdict. The review was attempted (`enabled: true`) but its
+ * outcome is unknown, so `finalVerdict: false` and `residualDeviations: []`
+ * — nothing to fold into the next sprint's focus, only the error to surface.
+ */
+export function buildErrorAdherenceRecord(args: {
+  sprintN: number;
+  runId: string;
+  startedAt: string;
+  error: unknown;
+}): SprintAdherenceRecord {
+  return {
+    version: 1,
+    sprintN: args.sprintN,
+    runId: args.runId,
+    enabled: true,
+    rounds: [],
+    finalVerdict: false,
+    residualDeviations: [],
+    stopReason: "error",
+    startedAt: args.startedAt,
+    finishedAt: new Date().toISOString(),
+    errorMessage: args.error instanceof Error ? args.error.message : String(args.error),
+  };
+}
+
+/**
+ * D10 — the judge's diff summary source. Moved off a bare `spawnSync` (whose
+ * spawn-level failures, e.g. `ETIMEDOUT`, set `.error` on the result rather
+ * than throwing — so the surrounding try/catch never caught them and an
+ * empty `stdout` was reported to the judge as `"(no diff detected)"`,
+ * indistinguishable from a genuinely clean diff) onto the shared, resilient
+ * `runGitSpawn` helper, whose `ok: false` is never confused with a real empty
+ * diff. Pure wrapper around one git call — exported for direct unit testing
+ * (mocking `runGitSpawn`) without driving the whole sprint generator.
+ */
+export function buildJudgeDiffSummary(cwd: string, sprintN: number, runId: string): string {
+  const statResult = runGitSpawn(["diff", "--stat", "HEAD"], cwd, "judgeDiffSummary", "sprint-runner");
+  if (!statResult.ok) {
+    logger.warn(
+      "orchestrator",
+      `[sprint-runner] judge diff --stat failed for sprint ${sprintN} (run ${runId}): ${statResult.error}`,
+      {
+        runId,
+        sprintN,
+        error: statResult.error,
+      },
+    );
+    return "(diff unavailable)";
+  }
+  return statResult.stdout.slice(0, 4000) || "(no diff detected)";
+}
+
+/**
+ * S3b — fold the plan-adherence reviewer's per-task verdicts into a
+ * `SprintPlanArtifact`: `status` flips to "done" ONLY when the matching
+ * `TaskVerdict.done` is true (never from diff-touch alone); `evidence`,
+ * `deviation` and `touchedTargets` are copied through for observability. A
+ * task the reviewer gave no verdict for this round (its id absent from
+ * `taskVerdicts`) is left exactly as it was. `planHash` is untouched — task
+ * status is not part of the plan-text staleness key. Pure and unit-testable
+ * without a real filesystem.
+ */
+export function applyTaskVerdictsToPlanArtifact(
+  artifact: SprintPlanArtifact,
+  taskVerdicts: TaskVerdict[],
+): SprintPlanArtifact {
+  const verdictById = new Map(taskVerdicts.map((v) => [v.taskId, v]));
+  const notes = [...artifact.notes];
+  const tasks = artifact.tasks.map((t) => {
+    const v = verdictById.get(t.id);
+    if (!v) return t;
+    if (v.done && v.touchedTargets === false) {
+      notes.push(
+        `Task ${t.id} was marked done by the plan-adherence reviewer, but its declared target(s) were not touched in the diff.`,
+      );
+    }
+    return {
+      ...t,
+      status: v.done ? ("done" as const) : ("pending" as const),
+      evidence: v.evidence || t.evidence,
+      touchedTargets: v.touchedTargets,
+      ...(v.deviation ? { deviation: v.deviation } : {}),
+    };
+  });
+  return { ...artifact, tasks, notes };
+}
+
 export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChunk, IterationState, unknown> {
   const { sprintN, ctx, productSpec, roleAssignments, history, carryOver, phaseScope } = args;
   const runDir = path.join(ctx.flowDir, "runs", ctx.runId);
   const cwd = ctx.cwd ?? runDir;
 
-  // ── Step 1: Cost projection (CB-1) DISABLED ───────────────────────────────
-  // Provider pricing is missing for several models (e.g. siliconflow/deepseek),
-  // so the EWMA projection becomes meaningless and halts sprints with bogus
-  // numbers like "projection $13200 exceeds headroom $50" when the real cap is
-  // $50 and nothing has actually been spent. Re-enable once per-provider price
-  // discovery + reliable usage→cost normalisation lands. The CB1_costProjection
-  // function and its unit tests are kept intact for that future re-wire.
-  void CB1_costProjection;
+  // ── Step 1: no cost projection ────────────────────────────────────────────
+  // CB-1 (halt when projected spend exceeds the cap's headroom) was deleted, not
+  // merely disabled: `/ideal` has no spend cap (user decision), so there is
+  // nothing to re-wire it to. Spend is still MEASURED for this sprint below.
+
+  // N4(a) — snapshot the authoritative spend gauge at sprint entry so the
+  // sprint's `Cost:` line in iterations.md is a MEASURED delta. It was
+  // hardcoded `costUsd: 0` ("observed via the per-product ledger"), which is why
+  // run mttwpmu8ee5b reported `Cost: 0.000` for both sprints of a $0.78 run.
+  const sprintSpendStart = readRunSpendUsd(ctx.sessionId);
+  if (!sprintSpendStart.known) {
+    logger.warn("orchestrator", `[budget] sprint ${sprintN} started with an unreadable spend gauge`, {
+      runId: ctx.runId,
+      sprintN,
+      reason: sprintSpendStart.reason,
+    });
+  }
 
   // ── Step 2: Detect verify recipe BEFORE the planner spends any token ──────
   // CB-3 fires deterministically on sprint 1 if recipe is null or coverage === 0.
@@ -655,9 +1969,29 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   if (cb3.halt && !greenfieldBuildFirst) {
     // Yield a structured halt chunk so the TUI can render an actionable recovery
     // card (Task 5.2). Do NOT throw — callers must discriminate on chunk.type.
+    // The card renders `detail` above its options (halt-recovery-card.tsx). It
+    // used to be absent, so the card named three options and no reason to prefer
+    // any of them, while the resume digest — written from the SAME failure
+    // vocabulary — said "Retry sprint N". Both now read `deriveNextAction`, so
+    // the card and the digest cannot recommend opposite things again.
+    const cb3Advice = deriveNextAction({
+      sprintN,
+      verdict: { pass: false, score: 0, failedCondition: "engineering_floor", reason: cb3.reason ?? "no_recipe" },
+      testRunnerEvidence: await measureTestRunnerEvidence(cwd),
+      // CB-3 halts on `isClaimedZeroCoverage` — a figure the verify sub-agent
+      // wrote into its own recipe, which nothing measured (circuit-breakers.ts).
+      coverageZeroProvenance: "claimed",
+    });
     const haltChunk: HaltChunk = {
       type: "halt",
       reason: cb3.reason ?? "no_recipe",
+      detail: cb3Advice.action,
+      // The SAME advice object `detail` was phrased from, so the card's
+      // recommendation is derived from the verdict rather than guessed:
+      // `deriveHaltRecommendation` reads its locus to decide which offered
+      // option performs the fix. A second deriveNextAction call here would be
+      // the parallel rule this avoids.
+      advice: cb3Advice,
       recovery_options: [
         {
           id: "init_new",
@@ -785,6 +2119,51 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     // Non-critical — proceed without backlog anchor if read fails.
   }
 
+  // F4b — the repo's OWN layout, stated with the counts as evidence.
+  //
+  // This sits deliberately next to `Folder structure:` below, which is the
+  // structure the model INVENTED during scoping. On tcis-libraries that
+  // invention put nine `.cs` files into `src/analyzers/`, a directory the
+  // solution does not reference — nothing compiled, no test ran — while 50
+  // projects under `src/src/` and 48 under `src/tests/` sat in plain sight. The
+  // planner needs the observed evidence adjacent to the guess so it has
+  // something to check the guess against.
+  //
+  // Report-only: an inconclusive layout or a failed scan contributes nothing
+  // and never blocks planning. Cost is one bounded walk (measured 153ms on
+  // tcis-libraries, 142 project files).
+  let layoutContext = "";
+  try {
+    const convention = await scanLayoutConvention(cwd);
+    if (convention) layoutContext = `\n${formatLayoutConvention(convention)}\n`;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] layout-convention scan failed for "${cwd}": ${(err as Error)?.message}`,
+      (err as Error)?.stack?.split("\n").slice(0, 3),
+    );
+  }
+
+  // S7 — a correction line when the scoping-synthesized spec's
+  // folderStructure mismatched the repo's observed layout convention. The
+  // check itself ran once, at CB-1 scoping (spec-layout-check.ts), against
+  // the ProductSpec text; it is read back here rather than re-derived so this
+  // never drifts from what scoping actually recorded. Best-effort: absence
+  // (the common case — most runs never hit "mismatch") or a read failure
+  // contributes nothing to the planner's context.
+  let specLayoutCorrection = "";
+  try {
+    const { readSpecLayoutCheck } = await import("../flow/run-artifacts.js");
+    const { formatSpecLayoutCorrection } = await import("./spec-layout-check.js");
+    const specLayoutResult = await readSpecLayoutCheck(ctx.flowDir, ctx.runId);
+    const correction = specLayoutResult ? formatSpecLayoutCorrection(specLayoutResult) : null;
+    if (correction) specLayoutCorrection = `\n${correction}\n`;
+  } catch (err) {
+    console.error(
+      `[sprint-runner] spec-layout-check read failed for run "${ctx.runId}": ${(err as Error)?.message}`,
+      (err as Error)?.stack?.split("\n").slice(0, 3),
+    );
+  }
+
   const councilTopic =
     `Plan sprint ${sprintN} for product: ${productSpec.idea}\n\n` +
     `Persona: ${productSpec.persona}\n` +
@@ -792,10 +2171,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     `Architecture: ${productSpec.architecture}\n` +
     `IO contract: ${productSpec.ioContract}\n` +
     `Folder structure: ${productSpec.folderStructure}\n` +
+    layoutContext +
+    specLayoutCorrection +
     `${carryOverContext}${focusContext}${assumptionContext}${projectContextStr}${backlogAnchor}\n` +
     `Goal: produce concrete edits and verifications that move the criteria toward "met".`;
 
-  const productLlm = createProductLlm(ctx.llm, ctx.runId, ctx.flags.maxCost);
+  const productLlm = createProductLlm(ctx.llm, ctx.runId);
   const sessionModelId =
     roleAssignments.get("Architect")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
 
@@ -810,6 +2191,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // run4 src/engine/), so the impl turn re-scaffolded instead of continuing.
   const planPath = sprintPlanPath(runDir, sprintN);
   let planSynthesis = await readPersistedSprintPlan(planPath);
+  // S3a: hoisted so the criteria-seeding block below can read
+  // `planCouncilStats.structuredActionItems` after this if/else closes. Stays
+  // undefined on the "reused persisted plan" branch — the fast path's raw
+  // action-item objects only ever exist in-memory during the run that
+  // produced them; a resumed sprint instead prefers a previously persisted
+  // `sprints/<n>-plan.json`, see below.
+  let planCouncilStats: CouncilStats | undefined;
   if (planSynthesis) {
     idealTrace("sprint.planCouncil.reused", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
     yield {
@@ -818,6 +2206,12 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     };
   } else {
     idealTrace("sprint.planCouncil.before", { runId: ctx.runId, sprintN });
+    // Passed by reference: `runCouncil` mutates this to say WHY it bailed
+    // (see CouncilStats.bailReason) — the generator's own return value
+    // collapses every bail path AND a genuinely empty synthesis to a bare
+    // `null`, which is not enough to tell "no reachable provider" apart from
+    // "synthesis ran and came back empty" below.
+    planCouncilStats = { calls: 0, startMs: Date.now(), phases: [] };
     const planGen = runCouncil(
       councilTopic,
       sessionModelId,
@@ -832,6 +2226,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         cwd,
         runDir,
         suppressInlineMeta: isContextRailEnabled(),
+        councilStats: planCouncilStats,
         // The product plan + spec were already debated (CB-1) and approved at the
         // `/ideal` preflight. Re-gating and re-researching each sprint's internal
         // plan strands the loop before implementation is ever reached (the exact
@@ -848,15 +2243,62 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       },
     );
 
-    while (true) {
-      const step = await planGen.next();
-      if (step.done) {
-        planSynthesis = step.value ?? "";
-        break;
-      }
-      yield step.value as StreamChunk;
+    // Structural guarantee at the seam: this council is a SUB-STEP, so a
+    // `{type:"done"}` from it is NOT this turn's terminator — forwarding one
+    // tore the entire product-loop run down mid-sprint (the P0-1 wedge).
+    // `runCouncil` suppresses these under `sprintPlanningMode`; forwardNestedTurn
+    // keeps the invariant enforced at the boundary that actually owns it.
+    const planTurn = yield* forwardNestedTurn(planGen);
+    // `runCouncil` returns `null` from every early-bail path (no reachable
+    // provider, user abort, no openings, cancelled intent card). Distinguish
+    // that from a real (possibly empty-ish) synthesis so the bail becomes an
+    // accountable sprint failure below instead of an empty plan the impl
+    // stage silently builds against.
+    const planBailed = planTurn.value == null;
+    planSynthesis = planTurn.value ?? "";
+    idealTrace("sprint.planCouncil.after", {
+      runId: ctx.runId,
+      sprintN,
+      planSynthesisLen: planSynthesis.length,
+      planBailed,
+      bailReasonKind: planCouncilStats.bailReason?.kind,
+    });
+    if (planBailed || planSynthesis.trim().length === 0) {
+      // A sprint with no plan cannot implement anything. Fail loudly: the caller
+      // (product-loop/index.ts `catch` around runSprint) turns a throw into a
+      // persisted `sprint_halt`, a manifest verdict and the TUI recovery card —
+      // a terminal state the driver can see. Previously this fell through with
+      // `planSynthesis === ""` and the run continued (or, with the leaked `done`,
+      // vanished) with no verdict at all.
+      //
+      // The single blanket sentence this used to be — "council bailed before
+      // synthesis — check provider reachability and API keys" — is FALSE for
+      // most of these bail kinds: measured live (session 1f9f57415170, run
+      // mu3ks8zwe8d5), the debate ran fine and synthesis was billed 17 times
+      // before coming back empty every time, which has nothing to do with
+      // provider reachability. Build the message from what `runCouncil`
+      // actually recorded instead of asserting a cause it does not know.
+      const bail = planCouncilStats.bailReason;
+      const baseMsg = `Sprint ${sprintN} planning council produced no plan`;
+      const reason = !bail
+        ? `${baseMsg} (no bail detail was recorded — check debug.log for this run).`
+        : bail.kind === "no-reachable-participants"
+          ? `${baseMsg} — no reachable provider: ${bail.detail}`
+          : bail.kind === "no-openings"
+            ? `${baseMsg} — council bailed before synthesis: ${bail.detail}`
+            : bail.kind === "aborted"
+              ? `${baseMsg} — cancelled before synthesis: ${bail.detail}`
+              : `${baseMsg} — the synthesizer ran but returned no usable output: ${bail.detail}`;
+      console.error(`[sprint-runner] ${reason} (run ${ctx.runId})`);
+      yield phaseError({
+        phaseId: planPhaseId,
+        kind: "sprint_stage",
+        label: `Sprint ${sprintN} — Planning`,
+        startedAt: planStartedAt,
+        errorMessage: reason,
+      });
+      throw new Error(reason);
     }
-    idealTrace("sprint.planCouncil.after", { runId: ctx.runId, sprintN, planSynthesisLen: planSynthesis.length });
     // Persist so a resumed/retried sprint reuses this exact plan (and target folder).
     await persistSprintPlan(planPath, planSynthesis);
   }
@@ -868,6 +2310,25 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // with no gate) and fold any issues into a corrective note for the impl prompt.
   let planQualityNote = "";
   try {
+    // N4(b) — the PHASE's own successCriteria are seeded FIRST, unconditionally.
+    // Measured defect (run mttwpmu8ee5b): phases.md carried 5 successCriteria
+    // across P1–P4, yet iterations.md recorded TotalCriteria: 0 for both sprints
+    // and gray-areas.md stayed 1 byte. Only the sprint plan's `acceptance_criteria`
+    // were ever seeded, and neither sprint plan carried any (sprint-1-plan.md is a
+    // truncated JSON blob, sprint-2-plan.md is three prose bullets). `phaseScope`
+    // was passed in and used ONLY as a filter over an empty store, so the phase's
+    // criteria never became Criterion rows and the loop could not notice it had
+    // shipped against unmet criteria. The criteria ARE assessed downstream —
+    // `judgeCriteriaAgainstVerify` grades every unmet row against verify + diff —
+    // so seeding is the whole fix; no new assessment is invented here.
+    const phaseCriteriaTexts = phaseScope?.criteria ?? [];
+    const seededPhase = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, phaseCriteriaTexts, sprintN);
+    if (seededPhase > 0) {
+      yield {
+        type: "content",
+        content: `\n> [criteria] Seeded ${seededPhase} phase success criteria (the done-gate now counts them).\n`,
+      };
+    }
     const planCriteria = extractAcceptanceCriteria(planSynthesis ?? "");
     const seeded = await seedCriteriaFromPlan(ctx.flowDir, ctx.runId, planCriteria, sprintN);
     if (seeded > 0) {
@@ -889,6 +2350,102 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
   } catch {
     /* non-critical — a missing criteria seed degrades to the prior empty-criteria behavior */
+  }
+
+  // S3b — hoisted so it survives past the S3a build/persist try block below:
+  // both the implementation-prompt checklist and the task-aware
+  // plan-adherence review read it. Stays null when nothing could be built —
+  // every consumer below treats null the same as "no tasks known".
+  let planArtifact: SprintPlanArtifact | null = null;
+
+  // S3a — persist the sprint's structured OUTCOME + task plan as
+  // `sprints/<n>-plan.json`, right here at the criteria-seeding point where
+  // `planSynthesis` is finally known. S3b reads `planArtifact` (hoisted above
+  // this try so it survives past it) to append the task checklist to the
+  // implementation prompt and to drive the per-task plan-adherence review —
+  // this block itself still only READS `planSynthesis`/`planCouncilStats`,
+  // it never mutates either. Best-effort: a failure here is logged and the
+  // sprint continues, and `planArtifact` simply stays null (no checklist, no
+  // task-aware review — degrades to the pre-S3b behaviour for this sprint).
+  try {
+    // A resumed sprint prefers a plan artifact persisted by the run that
+    // first planned this sprint — that copy still carries the fast path's
+    // real `dependsOn` (from the in-memory side-channel), which a fresh
+    // rebuild from only the persisted TEXT could not recover (the flattened
+    // prose loses `depends_on`, see sprint-plan-artifact.ts). Only rebuild
+    // when nothing was persisted yet, OR when what's persisted no longer
+    // matches the CURRENT planSynthesis (planHash mismatch) — a stale
+    // artifact from a different plan text is worse than none, since S3b will
+    // drive implementation off these tasks.
+    planArtifact = await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN);
+    const currentPlanHash = computePlanHash(planSynthesis ?? "");
+    if (planArtifact && planArtifact.planHash !== currentPlanHash) {
+      logger.debug("orchestrator", "[sprint-plan] persisted plan artifact is stale — rebuilding", {
+        runId: ctx.runId,
+        sprintN,
+        persistedHash: planArtifact.planHash,
+        currentHash: currentPlanHash,
+      });
+      planArtifact = null;
+    }
+    if (!planArtifact) {
+      // D5 — real, non-invented fallbacks for the artifact's `outcome.goal` /
+      // `outcome.acceptance` when the fast-path plan text carries neither
+      // (run `muauw6u93e1c`: both empty). Best-effort: a read failure here
+      // just means the corresponding fallback stays undefined — the builder
+      // itself never invents either field.
+      let backlogFocus: string | undefined;
+      try {
+        const backlogForFallback = await readBacklog(ctx.flowDir, ctx.runId);
+        const sprintKey = `sprint-${sprintN}`;
+        const activeForFallback = backlogForFallback?.items.find(
+          (item) => item.status === "in_sprint" && item.assigned_sprint === sprintKey,
+        );
+        if (activeForFallback) {
+          backlogFocus = [activeForFallback.title, activeForFallback.description]
+            .map((s) => s?.trim())
+            .filter((s): s is string => !!s)
+            .join(" — ");
+        }
+      } catch (err) {
+        console.error(
+          `[sprint-runner] backlog read for plan-artifact goal fallback failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+        );
+      }
+
+      let criteriaFallback: string[] | undefined;
+      try {
+        const criteriaSnapshot = await readCriteriaSnapshot(ctx.flowDir, ctx.runId);
+        const sprintRows = criteriaSnapshot.filter((c) => c.sprint === sprintN).map((c) => c.id);
+        if (sprintRows.length > 0) criteriaFallback = sprintRows;
+      } catch (err) {
+        console.error(
+          `[sprint-runner] criteria.json read for plan-artifact acceptance fallback failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+        );
+      }
+
+      planArtifact = buildSprintPlanArtifact({
+        sprintN,
+        runId: ctx.runId,
+        planSynthesis: planSynthesis ?? "",
+        structuredActionItems: planCouncilStats?.structuredActionItems,
+        sprintFocus: carryOver?.focus,
+        backlogFocus,
+        criteriaFallback,
+      });
+      await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, planArtifact);
+    }
+    // Replace the S1 placeholder goal in sprint-plan.json now that the real
+    // one is known. `upsertSprint` merges by field, so this never disturbs
+    // status/itemIds/timestamps `markSprintStarted` already set for this
+    // sprint. Never writes an invented goal.
+    if (planArtifact.outcome.goal.trim()) {
+      await upsertSprint(ctx.flowDir, ctx.runId, sprintN, { goal: planArtifact.outcome.goal });
+    }
+  } catch (err) {
+    console.error(
+      `[sprint-runner] sprint plan artifact build/persist failed for sprint ${sprintN} (run ${ctx.runId}): ${(err as Error).message}`,
+    );
   }
 
   // P4-C: close the planning phase row before opening implementation.
@@ -978,8 +2535,33 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     }
   }
 
+  // S3b — append the sprint's task checklist LAST, after every other prompt
+  // addition above, so the model sees the full plan/context first and the
+  // ordered work list last. `source === "none"` (no tasks known — including
+  // every empty-plan case) leaves `implPrompt` byte-identical to pre-S3b:
+  // `buildTaskChecklistBlock` returns an empty block for an empty task list,
+  // so this is a no-op rather than a conditional the caller has to reason
+  // about twice.
+  if (planArtifact && planArtifact.source !== "none" && planArtifact.tasks.length > 0) {
+    const { block: taskChecklistBlock, notes: taskChecklistNotes } = buildTaskChecklistBlock(planArtifact.tasks);
+    if (taskChecklistBlock) {
+      implPrompt = `${implPrompt}${taskChecklistBlock}`;
+      yield {
+        type: "content",
+        content: `\n> [task-checklist] ${planArtifact.tasks.length} sprint task(s) queued for this sprint, in topological order.\n`,
+      };
+      if (taskChecklistNotes.length > 0) {
+        yield {
+          type: "content",
+          content: `\n> [task-checklist] ${taskChecklistNotes.length} ordering note(s): ${taskChecklistNotes.join("; ")}\n`,
+        };
+      }
+    }
+  }
+
   let implError: string | null = null;
   let implErrorStack: string | undefined;
+  let implTimeoutCause: IsolatedImplTimeoutCause | undefined;
   if (ctx.processMessageFn && implPrompt.trim()) {
     const useIsolated = shouldUseIsolatedImpl(!!ctx.runIsolatedTask);
     try {
@@ -1008,20 +2590,30 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             content: `\n> [impl-model] Running implementation on ${implModelId} (override of session model ${ctx.sessionModelId}).\n`,
           };
         }
-        // Wall-clock deadline: the isolated path has no per-chunk stall guard,
-        // so a post-finish JS-side hang would wedge this await forever (observed
-        // live, run mrhc43f0fb9b). Racing the total-elapsed ceiling turns a wedge
-        // into a phaseError via the try/catch below. See withIsolatedImplDeadline.
-        const result = await withIsolatedImplDeadline(
-          ctx.runIsolatedTask({
+        // TWO bounds on the isolated turn: a SILENCE budget (measured from the
+        // child's last activity notification) and an absolute ceiling behind
+        // it. It was a single flat 15-min budget until run mtv9v1xu7615 hit it
+        // at 900.0s with 196 activity events on record and the last one 0.8s
+        // earlier — a working child, cut mid-sprint. (Correction to an earlier
+        // comment here: the isolated path DOES have a per-chunk stall guard —
+        // stream-runner.ts arms createStallWatchdog with both an any-chunk and
+        // a no-forward-progress timer. What it lacked was an OUTER bound that
+        // cancels, and the first one shipped was a wall clock.)
+        // Losing either race aborts the child instead of orphaning it, and the
+        // rejection becomes a phaseError via the try/catch below.
+        // See runIsolatedImplWithDeadline / withIsolatedImplDeadline.
+        const result = await runIsolatedImplWithDeadline({
+          runIsolatedTask: ctx.runIsolatedTask,
+          request: {
             agent: "general",
             description: `Sprint ${sprintN} implementation`,
             prompt: implPrompt,
             modelId: implModelId,
-          }),
-          getImplTotalTimeoutMs(),
+          },
+          totalMs: getIsolatedImplCeilingMs(),
+          idleMs: getIsolatedImplIdleTimeoutMs(),
           sprintN,
-        );
+        });
         if (!result.success) {
           implError = resolveImplFailureReason(result);
         } else if (result.output?.trim()) {
@@ -1031,13 +2623,22 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         const implGen = ctx.processMessageFn(implPrompt);
         // Guard the impl turn with an idle-chunk watchdog so a post-finish
         // orchestrator hang surfaces as a phaseError instead of a silent wedge.
-        for await (const chunk of withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN)) {
-          yield chunk as StreamChunk;
+        // forwardNestedTurn strips the turn's `done` — it is the TURN's
+        // terminator, and forwarding it ended the whole /ideal run (run
+        // mtwnfp8p3869). A turn that ENDED in failure fails this stage, the same
+        // outcome the isolated path already gives a stalled or thrown child
+        // (`!result.success` → implError above; stream-runner.ts:1230, :1316).
+        const implTurn = yield* forwardNestedTurn(withImplIdleWatchdog(implGen, getImplIdleTimeoutMs(), sprintN));
+        if (implTurn.failure) {
+          implError = `implementation turn ended in failure: ${implTurn.failure}`;
+          console.error(`[sprint-runner] ${implError} (sprint ${sprintN}, run ${ctx.runId})`);
         }
       }
     } catch (e) {
       implError = e instanceof Error ? e.message : String(e);
       implErrorStack = e instanceof Error ? e.stack?.split("\n").slice(0, 4).join(" | ") : undefined;
+      // Carried as a field, not re-derived from the message text.
+      implTimeoutCause = e instanceof IsolatedImplTimeoutError ? e.timeoutCause : undefined;
       // No-Silent-Catch: the finally below surfaces a phaseError chunk, but log
       // here too so the hang/failure is diagnosable from stderr / MUONROI logs.
       // Persisting happens at the single convergence point below — a thrown
@@ -1092,8 +2693,9 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       implModelId: process.env.MUONROI_IDEAL_IMPL_MODEL?.trim() || ctx.sessionModelId,
       elapsedMs: Date.now() - implStartedAt,
       isolated: shouldUseIsolatedImpl(!!ctx.runIsolatedTask),
+      ...(implTimeoutCause ? { timeoutCause: implTimeoutCause } : {}),
     });
-    throw new Error(implError);
+    throw implTimeoutCause ? new IsolatedImplTimeoutError(implError, implTimeoutCause) : new Error(implError);
   }
 
   // ── Step 4b: 4A completeness re-check ─────────────────────────────────────
@@ -1126,8 +2728,16 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       let recheckErr: string | null = null;
       try {
         const recheckGen = ctx.processMessageFn(recheckPrompt);
-        for await (const chunk of withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN)) {
-          yield chunk as StreamChunk;
+        // Measured, run mtwnfp8p3869: this turn was forked into a sub-session and
+        // killed by the turn watchdog at 08:41:14; its `error` then `done` were
+        // forwarded verbatim and the `done` ended the whole /ideal run. Strip the
+        // terminator, keep the error visible, and close this stage as FAILED
+        // rather than `done` — it did not finish. Still not a sprint failure (see
+        // the Step 4b note above): verify remains the gate.
+        const recheckTurn = yield* forwardNestedTurn(withImplIdleWatchdog(recheckGen, getImplIdleTimeoutMs(), sprintN));
+        if (recheckTurn.failure) {
+          recheckErr = `completeness re-check turn ended in failure: ${recheckTurn.failure}`;
+          console.error(`[sprint-runner] ${recheckErr} (sprint ${sprintN}, run ${ctx.runId})`);
         }
       } catch (e) {
         recheckErr = e instanceof Error ? e.message : String(e);
@@ -1177,9 +2787,61 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // sprint's focus (Step 9) so "chưa tuân thủ" work continues rather than being
   // silently dropped after the review.
   let residualPlanDeviations: string[] = [];
+  // S3b — unfinished sprint tasks (the reviewer's own verdict, never diff-touch
+  // alone) survive into the next sprint's focus the same way, right below.
+  let unfinishedTasks: Array<{ id: string; title: string }> = [];
+  // S5 — a build break the verify floor could NOT honestly excuse as
+  // pre-existing (run-introduced or unattributable, see describeBuildMustFix in
+  // verify-baseline.ts) carries into the next sprint's focus the same way.
+  let floorMustFixNote: string | undefined;
+  // The floor's own evidence for the LAST pass this sprint reached, hoisted out
+  // of `runVerifyAndFloorPass` / the S4 loop so the end-of-sprint message can
+  // quote it. Without it a `gate-could-not-run` failure — which already knows
+  // the exact missing module (`detectGateCouldNotRun`) — reached the user as the
+  // done-gate's coarse `verify_FAIL` and the precise fact was discarded.
+  let floorDeltaFinal: FloorDelta | undefined;
+  let floorChecksFinal: FloorCheck[] | undefined;
+  // The floor's formatted per-command record for the LAST pass this sprint
+  // reached, persisted into `sprints/<n>-verify.md`. Hoisted for the same reason
+  // as the two above, and needed for one more: the floor's measured build/test
+  // results were previously absent from that artifact on EVERY path — it only
+  // ever reached `verifyResult.error` on a downgrade — so a sprint whose gates
+  // ran green left no record of it having happened at all.
+  let floorDetailFinal: string | undefined;
+  // S6 — the final project-registration-check result for this sprint (the
+  // last verify+floor pass the S4 loop reached), used to write
+  // `sprints/<n>-structure.json` and a note in `sprints/<n>-verify.md`.
+  let structureCheckFinal: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
+  /**
+   * F5/K — the commit this run started from, for the goal gate's committed half.
+   *
+   * Assigned inside `runVerifyAndFloorPass` off the SAME baseline record the
+   * project-registration check there already loads, rather than by a second git
+   * call or a second file read: `verify-baseline.json`'s `gitCommit` is the only
+   * SHA the run records anywhere (`SprintOutcome` in ../flow/run-artifacts.ts has
+   * no such field, and a scan of run muc2joffe506's sprint artifacts for a 40-hex
+   * string found none). Declared at THIS scope, not inside that pass, because the
+   * goal gate runs after the pass returns; re-assignment across verify-fix rounds
+   * writes the same value.
+   *
+   * Null when no baseline was captured — `readChangeDiff` then uses its bounded
+   * fallback range, which is still not a one-commit window.
+   *
+   * It is a RUN base, not a per-sprint one, so from sprint 2 on it also covers
+   * earlier sprints' commits. That is the safe direction for a gate:
+   * over-inclusion costs at worst one iteration, under-inclusion is the rubber
+   * stamp measured in goal-contradiction-gate.ts.
+   */
+  let goalGateBaseCommit: string | null = null;
+  // Only pass tasks into a task-aware review when the artifact actually named
+  // some (`source !== "none"`) — an empty/absent array falls the review back
+  // to the legacy plan-text-only path, unchanged.
+  const adherenceTasks =
+    planArtifact && planArtifact.source !== "none" && planArtifact.tasks.length > 0 ? planArtifact.tasks : undefined;
   if (ctx.runIsolatedTask && planSynthesis.trim() && process.env.MUONROI_IDEAL_ADHERENCE_REVIEW !== "0") {
     const adhPhaseId = `sprint-${sprintN}-adherence`;
     const adhStartedAt = Date.now();
+    const adhStartedAtIso = new Date(adhStartedAt).toISOString();
     yield phaseStart({
       phaseId: adhPhaseId,
       kind: "sprint_stage",
@@ -1195,7 +2857,13 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         reviewModelId,
         fixModelId: ctx.sessionModelId,
         runIsolatedTask: ctx.runIsolatedTask,
-        maxRounds: Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS ?? "2", 10) || 2,
+        // No default round ceiling (user decision: `/ideal` has no limits); the
+        // review ends on approval or when a fix round makes no progress. An
+        // explicit MUONROI_IDEAL_ADHERENCE_ROUNDS is still honoured.
+        maxRounds: process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS
+          ? Number.parseInt(process.env.MUONROI_IDEAL_ADHERENCE_ROUNDS, 10) || undefined
+          : undefined,
+        ...(adherenceTasks ? { tasks: adherenceTasks } : {}),
       });
       idealTrace("sprint.adherence.after", {
         runId: ctx.runId,
@@ -1205,8 +2873,51 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         deviations: verdict.deviations.length,
       });
       if (!verdict.adherent) residualPlanDeviations = verdict.deviations;
+      // S3b — fold the reviewer's per-task verdicts back into
+      // sprints/<n>-plan.json (status/evidence/touchedTargets) and carry
+      // unfinished task ids+titles into this sprint's nextFocus (Step 9).
+      // Best-effort: a write failure is logged and the sprint continues —
+      // losing this update must never break `/ideal`, same as the S3a build.
+      if (verdict.taskVerdicts && verdict.taskVerdicts.length > 0) {
+        try {
+          const baseArtifact = planArtifact ?? (await readSprintPlanArtifact(ctx.flowDir, ctx.runId, sprintN));
+          if (baseArtifact) {
+            const updatedArtifact = applyTaskVerdictsToPlanArtifact(baseArtifact, verdict.taskVerdicts);
+            const persisted = await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, updatedArtifact);
+            if (persisted) {
+              planArtifact = updatedArtifact;
+            } else {
+              console.error(
+                `[sprint-runner] could not persist task-verdict statuses for sprint ${sprintN} (run ${ctx.runId})`,
+              );
+            }
+          }
+        } catch (err) {
+          console.error(
+            `[sprint-runner] applying plan-adherence task verdicts failed (sprint ${sprintN}, run ${ctx.runId}): ${(err as Error).message}`,
+          );
+        }
+        unfinishedTasks = verdict.taskVerdicts.filter((v) => !v.done).map((v) => ({ id: v.taskId, title: v.title }));
+      }
+      await writeSprintAdherence(
+        ctx.flowDir,
+        ctx.runId,
+        buildAdherenceRecord({
+          sprintN,
+          runId: ctx.runId,
+          reviewModelId,
+          fixModelId: ctx.sessionModelId,
+          verdict,
+          startedAt: adhStartedAtIso,
+        }),
+      );
     } catch (err) {
       console.error(`[sprint-runner] plan-adherence review failed (sprint ${sprintN}): ${(err as Error).message}`);
+      await writeSprintAdherence(
+        ctx.flowDir,
+        ctx.runId,
+        buildErrorAdherenceRecord({ sprintN, runId: ctx.runId, startedAt: adhStartedAtIso, error: err }),
+      );
     } finally {
       yield phaseDone({
         phaseId: adhPhaseId,
@@ -1215,71 +2926,674 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
         startedAt: adhStartedAt,
       });
     }
+  } else {
+    await writeSprintAdherence(ctx.flowDir, ctx.runId, buildDisabledAdherenceRecord({ sprintN, runId: ctx.runId }));
   }
 
   // ── Step 5: Verify stage ──────────────────────────────────────────────────
   yield { type: "content", content: `\n## Sprint ${sprintN} — Verification\n` };
-  const verifyPhaseId = `sprint-${sprintN}-verification`;
-  const verifyStartedAt = Date.now();
-  yield phaseStart({
-    phaseId: verifyPhaseId,
-    kind: "sprint_stage",
-    label: `Sprint ${sprintN} — Verification`,
-    detail: "Running verify recipe",
-    startedAt: verifyStartedAt,
-  });
-  // 2.5c — verification stage entry
-  try {
-    const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-      | { emitEvent: (e: unknown) => void }
-      | undefined;
-    _ar?.emitEvent({ t: "event", kind: "sprint-stage", sprintIndex: sprintN, stage: "verification", runId: ctx.runId });
-  } catch {
-    /* best-effort */
-  }
-  logUIInteraction(ctx.sessionId, {
-    subtype: "sprint_stage",
-    data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
-  });
-  // A — "Skip verify" recovery option: the user chose to bypass a broken verify
-  // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
-  // every sprint). Treat verify as a PASS with an explicit synthetic output so
-  // the done-gate is not blocked, and log loudly so the bypass is auditable.
-  // The env var is set by the recovery-card handler and reset on the next fresh
-  // `/ideal "<idea>"` start, so a new run re-enables verification.
-  const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
-  let verifyResult: ToolResult;
-  if (skipVerify) {
-    console.error(
-      `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
-    );
-    verifyResult = {
-      success: true,
-      // Include the canonical PASS marker so parseVerifyResult → PASS (the user
-      // explicitly opted to treat verify as satisfied for this recovery).
-      output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
-    };
-    yield {
-      type: "content",
-      content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
-    };
-  } else {
-    verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN);
-  }
-  yield phaseDone({
-    phaseId: verifyPhaseId,
-    kind: "sprint_stage",
-    label: `Sprint ${sprintN} — Verification`,
-    startedAt: verifyStartedAt,
-  });
-  let verifyVerdict = parseVerifyResult(verifyResult);
-  const recipeFromVerify =
-    (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
 
-  // Tier 3 — opt-in self-verify gate. Only fires when recipe PASSED and the
-  // sprint touched UI / harness watched surfaces. Failure downgrades the
-  // sprint verdict to FAIL so the loop iterates again with feedback.
-  // Default OFF; opt-in via MUONROI_SPRINT_SELF_VERIFY=1.
+  /**
+   * D2 — the deterministic floor ALONE (`runVerifyFloor`), with no verify
+   * sub-agent call. Factored out of `runVerifyAndFloorPass` so its full pass
+   * (below) and the cheap verify-fix re-check (`runFloorRecheck`, wired into
+   * `runVerifyFixLoop` further down) share ONE floor invocation — the same
+   * `cwd`/`runId`/`baselinePath` call site, never a duplicated copy. May
+   * throw (same as `runVerifyFloor` itself); each caller applies its own
+   * handling for that — the full pass downgrades a claimed PASS to ERROR
+   * (unchanged, see the try/catch below), the cheap re-check treats a throw
+   * as inconclusive and falls back to a full pass.
+   */
+  async function runDeterministicFloorOnly(): Promise<import("./verify-floor.js").VerifyFloorResult> {
+    const { runVerifyFloor } = await import("./verify-floor.js");
+    const { verifyBaselinePath } = await import("./verify-baseline.js");
+    return runVerifyFloor({
+      cwd,
+      runId: ctx.runId,
+      baselinePath: verifyBaselinePath(ctx.flowDir, ctx.runId),
+    });
+  }
+
+  /**
+   * S4 — the verify-agent + deterministic-floor pass, extracted into ONE
+   * reusable routine so a verify-fix re-verify round (below) runs through the
+   * EXACT same code path as the sprint's first verification — never a forked
+   * copy that could silently drift out of sync. `roundLabel` only affects
+   * phase-id/label/event text; the logic inside is identical on every call.
+   */
+  async function* runVerifyAndFloorPass(roundLabel: string): AsyncGenerator<StreamChunk, VerifyPassOutcome, unknown> {
+    const roundSuffix = roundLabel ? ` (${roundLabel})` : "";
+    const verifyPhaseId = `sprint-${sprintN}-verification${roundLabel ? `-${roundLabel}` : ""}`;
+    const verifyStartedAt = Date.now();
+    yield phaseStart({
+      phaseId: verifyPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Verification${roundSuffix}`,
+      detail: "Running verify recipe",
+      startedAt: verifyStartedAt,
+    });
+    // 2.5c — verification stage entry
+    try {
+      const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+        | { emitEvent: (e: unknown) => void }
+        | undefined;
+      _ar?.emitEvent({
+        t: "event",
+        kind: "sprint-stage",
+        sprintIndex: sprintN,
+        stage: "verification",
+        runId: ctx.runId,
+      });
+    } catch {
+      /* best-effort */
+    }
+    logUIInteraction(ctx.sessionId, {
+      subtype: "sprint_stage",
+      data: { sprintIndex: sprintN, stage: "verification", runId: ctx.runId },
+    });
+    // A — "Skip verify" recovery option: the user chose to bypass a broken verify
+    // stage (e.g. shuru sandbox unavailable on Windows that hangs the watchdog
+    // every sprint). Treat verify as a PASS with an explicit synthetic output so
+    // the done-gate is not blocked, and log loudly so the bypass is auditable.
+    // The env var is set by the recovery-card handler and reset on the next fresh
+    // `/ideal "<idea>"` start, so a new run re-enables verification.
+    const skipVerify = process.env.MUONROI_SPRINT_SKIP_VERIFY === "1";
+    let verifyResult: ToolResult;
+    if (skipVerify) {
+      console.error(
+        `[sprint-runner] MUONROI_SPRINT_SKIP_VERIFY=1 — verify stage bypassed (sprint ${sprintN}, run ${ctx.runId})`,
+      );
+      verifyResult = {
+        success: true,
+        // Include the canonical PASS marker so parseVerifyResult → PASS (the user
+        // explicitly opted to treat verify as satisfied for this recovery).
+        output: `${VERIFY_PASS_MARKER}\nverify skipped by user recovery choice (MUONROI_SPRINT_SKIP_VERIFY=1)`,
+      };
+      yield {
+        type: "content",
+        content: `\n> [skip-verify] Verify stage bypassed for sprint ${sprintN} (user recovery choice).\n`,
+      };
+    } else {
+      // `flowDir` is how the watchdog reaches THIS run's measured build+test cost
+      // (`verify-baseline.json`, written by captureVerifyFloorBaseline before any
+      // sprint ran) and sizes itself to the project instead of to a constant.
+      verifyResult = await runVerifyWithWatchdog(verifyAgent, ctx.runId, sprintN, { flowDir: ctx.flowDir });
+    }
+    yield phaseDone({
+      phaseId: verifyPhaseId,
+      kind: "sprint_stage",
+      label: `Sprint ${sprintN} — Verification${roundSuffix}`,
+      startedAt: verifyStartedAt,
+    });
+    let verifyVerdict = parseVerifyResult(verifyResult);
+    // `let`, not `const`: the deterministic floor below MEASURES coverage from the
+    // project's own test output, and that measurement replaces whatever number the
+    // verify sub-agent asserted here (see the merge after applyVerifyFloor).
+    let recipeFromVerify =
+      (verifyResult as ToolResult & { verifyRecipe?: VerifyRecipe | null }).verifyRecipe ?? verifyRecipe;
+
+    // ── Deterministic verify FLOOR ───────────────────────────────────────────
+    // Everything above this line is the verify sub-agent's OPINION: the verdict
+    // came from `parseVerifyResult`, which passes as soon as the model's narration
+    // contains `VERIFY_PASS`. No exit code was involved, so a sprint could commit
+    // code that does not compile and still be scored PASS.
+    //
+    // The floor runs the project's own build/typecheck and test commands —
+    // discovered from the working tree, never from the model's recipe (see
+    // verify-floor.ts) — and its exit codes are authoritative in BOTH directions.
+    //
+    // The gate used to be `verifyVerdict === "PASS"`, so the floor could veto but
+    // never admit: a sprint whose sub-agent emitted no verdict marker at all was
+    // scored UNKNOWN and the floor never ran. Measured, run `mttwpmu8ee5b`: a
+    // baseline costing 53s of real build+test work was captured and then never
+    // read, both sprints ended `engineering_floor` / score 0, and the run shipped
+    // nothing. It was then widened to `PASS || UNKNOWN` — and `FAIL`/`ERROR` were
+    // left out, which left the floor running only when the narration was
+    // OPTIMISTIC. A pessimistic narration was accepted with no measurement at all.
+    //
+    // ## Why the floor now runs on EVERY verdict
+    //
+    // Measured, run `muc2joffe506` sprint 1: the verify sub-agent's own narration
+    // reported "Build ✓, Tests 12/12 ✓, Lint 0 errors ✓, `npm run verify` ✓" and
+    // ended `VERIFY_FAIL` because the host's Docker daemon was down (the
+    // `docker-desktop` WSL distro was Stopped) so its Phase 3 app-start could not
+    // run. `sprints/1-verify.md` carries NOT ONE floor line — no `- [build]`, no
+    // `- [test]`, no `Rule applied` — and `sprints/1-outcome.json` records
+    // `{"verify":"FAIL","failedCondition":"engineering_floor","reason":"verify_FAIL"}`.
+    // The build and the test suite demonstrably passed and the record preserves no
+    // measured evidence of it. `sprints/1-verify-fix.json` shows the cost of that
+    // blindness: `failureKeyBefore: "verify_verdict:FAIL:"` — the fix loop had no
+    // floor evidence to aim at and burned a 600s round.
+    //
+    // ## What the measurement is allowed to MEAN
+    //
+    // Running the floor is NOT the same as letting it adjudicate. `applyVerifyFloor`
+    // already draws that line and this call site does not redraw it: `UNKNOWN` is the
+    // ABSENCE of a claim so exit codes may supply the verdict the model did not,
+    // while `FAIL`/`ERROR` are POSITIVE claims the floor's command set cannot
+    // disprove — the sub-agent may have failed on something the floor never
+    // executes, which is exactly the Phase 3 app start above. So a green floor on a
+    // model FAIL is RECORDED, never an upgrade. The measurement's value here is
+    // evidentiary, not adjudicative: it lands in `sprints/<n>-verify.md`, it feeds
+    // `deriveNextAction` (which can then say the code-level gates are green and name
+    // the environment fact instead of "verify_FAIL"), and it reaches the verify-fix
+    // loop, whose rounds previously overwrote real floor evidence with `undefined`.
+    let floorDelta: FloorDelta | undefined;
+    let floorChecks: FloorCheck[] | undefined;
+    let floorMustFixNoteLocal: string | undefined;
+    /**
+     * The floor's own formatted record for this pass (`- [build] … → OK (Nms)`,
+     * `Rule applied: …`), persisted verbatim into `sprints/<n>-verify.md`.
+     *
+     * It is deliberately NOT written to `verifyResult.error`: `parseVerifyResult`
+     * maps ANY non-empty `error` to ERROR, so routing the floor's measurement
+     * through that field would rewrite the verdict one line later (the same trap
+     * the upgrade branch below documents). A separate channel keeps the record and
+     * the verdict independent, which is the whole point — the measurement must
+     * exist for every sprint without deciding any of them.
+     */
+    let floorDetailLocal: string | undefined;
+    /**
+     * The DISK-DERIVED test commands this pass resolved, or undefined when the
+     * floor resolved none (a floor that threw resolved nothing this caller can
+     * see). Consumed once, at the return — see `foldDerivedTestCommandsIntoRecipe`.
+     */
+    let floorTestCommands: string[] | undefined;
+    // S6 — set inside the project-registration check below; carried into the
+    // returned VerifyPassOutcome so the verify-fix loop can trigger on it even
+    // when the floor (above) passed.
+    let structureCheckResult: import("./project-registration-check.js").ProjectRegistrationCheckResult | undefined;
+    {
+      const verdictBeforeFloor = verifyVerdict;
+      try {
+        const { applyVerifyFloor } = await import("./verify-floor.js");
+        // Thread the run identity so the floor can compare against THIS run's
+        // baseline instead of against zero. Without it the floor stays in
+        // ABSOLUTE mode and fails any repo that already had a failing test —
+        // measured: run mttwpmu8ee5b scored 0.00 on both sprints because 31
+        // infra-dependent tests (PostgreSql/SqlServer/Kafka) fail for want of a
+        // database, none of them related to what the run was writing.
+        const { describeBuildMustFix } = await import("./verify-baseline.js");
+        // D2 — reuses `runDeterministicFloorOnly` so this full pass and the
+        // verify-fix loop's cheap re-check run through the SAME floor call.
+        const floor = await runDeterministicFloorOnly();
+        const applied = applyVerifyFloor(verifyVerdict, floor);
+        verifyVerdict = applied.verdict;
+        floorDelta = floor.delta;
+        floorChecks = floor.checks;
+        // Recorded on EVERY path, including the model-FAIL one this block used to
+        // skip — that is the half of run muc2joffe506 sprint 1 the artifact lost.
+        floorDetailLocal = floor.detail;
+        // A MEASUREMENT BEATS AN ASSERTION. `recipeFromVerify.coverage` is
+        // otherwise a number the verify sub-agent typed into its own recipe JSON
+        // (`normalizeVerifyRecipe`), which is the only thing the done-gate's
+        // coverage condition has ever had to read. The floor just ran the
+        // project's OWN test commands and parsed their real output, so when it
+        // produced a figure that figure wins here, stamped `"measured"` so the
+        // sprint's recipe says which it is. When it measured nothing the recipe is
+        // left exactly as it was — overwriting an asserted number with null would
+        // discard information, and null is not "zero" anyway.
+        if (floor.measuredCoverage !== null && recipeFromVerify) {
+          recipeFromVerify = {
+            ...recipeFromVerify,
+            coverage: floor.measuredCoverage,
+            coverageSource: "measured",
+          };
+        }
+        // The disk-derived set THIS pass resolved, reused below instead of
+        // probing again — see `foldDerivedTestCommandsIntoRecipe`. Read
+        // defensively although the field is required on `VerifyFloorResult`:
+        // this whole block's catch downgrades a claimed PASS to ERROR, so a read
+        // that exists only to feed a REASON STRING must not be able to fail the
+        // sprint. Absent → the fold re-derives the set itself.
+        floorTestCommands = floor.commandsDiscovered?.test;
+        // S5 — a build break the floor could not honestly call pre-existing
+        // (run-introduced or unattributable) must reach the next sprint as a
+        // must-fix item, the same way S3b carries unfinished tasks.
+        if (floor.delta) {
+          const mustFix = describeBuildMustFix(floor.delta);
+          if (mustFix) floorMustFixNoteLocal = mustFix;
+        }
+        if (applied.downgraded) {
+          verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] ${floor.detail}`;
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to FAIL — the project's own gates failed (${floor.elapsedMs}ms).\n`,
+          };
+        } else if (applied.upgraded) {
+          // Deliberately NOT written to `verifyResult.error`: that field is the
+          // next sprint's failure feedback, and `parseVerifyResult` maps ANY
+          // non-empty error to ERROR — writing the floor's PASS note there would
+          // undo the upgrade one line later. The adjudicated verdict reaches the
+          // done-gate as `verifyVerdict` instead (see the evaluateDoneGate call).
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict upgraded ${verdictBeforeFloor} → PASS — the verify agent emitted no verdict, but the project's own gates passed (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+          };
+        } else if (floor.verdict === "pass" && (verdictBeforeFloor === "FAIL" || verdictBeforeFloor === "ERROR")) {
+          // The one combination this block could not previously reach, and the one
+          // whose wording matters most: the measurement is green and the verdict
+          // stays red. Saying "Deterministic gates PASSED" alone here would read as
+          // a contradiction of the sprint's own FAIL, so the line states both halves
+          // and why the floor is not entitled to lift the model's claim — the same
+          // reasoning `applyVerifyFloor` documents, restated where a human reads it.
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN}: the project's own gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms) — RECORDED, not an upgrade. The verify stage reported ${verdictBeforeFloor} on something the floor does not execute, and a green build does not disprove it.\n`,
+          };
+        } else if (floor.verdict === "pass") {
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Deterministic gates PASSED (${floor.checks.length} command(s), ${floor.elapsedMs}ms).\n`,
+          };
+        } else {
+          // "unavailable" — surfaced loudly so a verdict with no exit code behind it
+          // is never mistaken for a verified one.
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] No deterministic evidence for sprint ${sprintN}: ${floor.detail}\n`,
+          };
+        }
+      } catch (err) {
+        // A floor that cannot run must not silently read as success. Downgrade to
+        // ERROR so the sprint loop routes it as a failed verification instead of
+        // shipping on an unverified claim, and log per the No Silent Catch rule.
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(
+          "orchestrator",
+          `[sprint-runner] verify floor threw (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+          {
+            operation: "runVerifyFloor",
+            runId: ctx.runId,
+            sprintN,
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          },
+        );
+        // A floor that THREW while confirming a claimed PASS must not read as
+        // success: that claim now rests on nothing. But a floor that threw on an
+        // UNKNOWN verdict has changed nothing — it never had a claim to confirm,
+        // and rewriting UNKNOWN → ERROR here would report the floor's own crash as
+        // a verify-harness failure in this sprint's failure signatures.
+        if (verdictBeforeFloor === "PASS") {
+          verifyVerdict = "ERROR";
+          verifyResult.error = `${verifyResult.error ?? ""}\n\n[verify-floor] floor could not run: ${message}`;
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN} verdict downgraded to ERROR — the deterministic floor could not run: ${message}\n`,
+          };
+        } else {
+          yield {
+            type: "content",
+            content: `\n> [verify-floor] Sprint ${sprintN}: the deterministic floor could not run (${message}) — verdict left at ${verdictBeforeFloor}.\n`,
+          };
+        }
+      }
+    }
+
+    // ── S6 — project registration check ──────────────────────────────────
+    // Runs UNCONDITIONALLY — every path through this routine, not just
+    // `verifyVerdict === "PASS" || "UNKNOWN"` and not gated on the floor
+    // above. This was the acceptance-review's blocker #1: in run
+    // `mu54vrme4c87` SPRINT 1 was itself a FAIL, which is exactly the case
+    // this check exists for — a check nested inside the PASS/UNKNOWN branch
+    // never ran for it. The check is a `git status`/`git diff` + a few file
+    // reads (no build, no test), so paying for it on a FAIL/ERROR/skip-verify
+    // pass costs nothing material, and skip-verify in particular is the ONE
+    // path where NOTHING else validated the tree — the structural fact is
+    // more worth knowing there, not less. It never rewrites `verifyVerdict`
+    // or `floorDelta` (done-gate math and the floor's own pass/fail stay
+    // exactly as computed above); it only adds a must-fix note the verify-fix
+    // loop can act on, the same way `describeBuildMustFix` does for a
+    // run-introduced build break.
+    try {
+      const { checkProjectRegistration, formatProjectRegistrationMustFix, hasProjectRegistrationViolations } =
+        await import("./project-registration-check.js");
+      const { verifyBaselinePath: baselinePathOf, floorBaselineWitnessPath } = await import("./verify-baseline.js");
+      // Prefer the out-of-tree witness, for the same reason the floor does: the
+      // in-tree copy sits in the working tree this very sprint just edited, and
+      // has been observed overwritten by a project script (see verify-baseline.ts).
+      const witnessPath = floorBaselineWitnessPath(ctx.runId);
+      const baselinePath = baselinePathOf(ctx.flowDir, ctx.runId);
+      let baselineRaw: string | null = null;
+      if (witnessPath) {
+        try {
+          baselineRaw = await readFile(witnessPath, "utf8");
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          // A witness miss is ordinary (older run, or capture skipped); the
+          // in-tree read below reports whatever it finds.
+          logger.debug(
+            "orchestrator",
+            `[project-registration] no baseline witness at ${witnessPath} (${code ?? "read error"}) — falling back to the in-tree copy`,
+            { operation: "checkProjectRegistration", sprintN, runId: ctx.runId },
+          );
+        }
+      }
+      try {
+        if (baselineRaw === null) baselineRaw = await readFile(baselinePath, "utf8");
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        baselineRaw = null;
+        // ENOENT (no baseline captured yet, e.g. baseline capture disabled or
+        // this is the very first pass before it was written) is the expected
+        // steady-state case for a fair share of runs — logging it at error
+        // level would be noise on every such sprint. Anything else (EACCES,
+        // a transient FS error, …) is unexpected and gets logged.
+        if (code === "ENOENT") {
+          logger.debug(
+            "orchestrator",
+            `[project-registration] no baseline at ${baselinePath} — using git status fallback`,
+            { operation: "checkProjectRegistration", sprintN, runId: ctx.runId },
+          );
+        } else {
+          console.error(
+            `[sprint-runner] could not read verify-baseline.json for structure check (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      const parsedBaseline = baselineRaw
+        ? ((): import("./verify-baseline.js").VerifyBaseline | null => {
+            try {
+              return JSON.parse(baselineRaw) as import("./verify-baseline.js").VerifyBaseline;
+            } catch (err) {
+              console.error(
+                `[sprint-runner] verify-baseline.json parse failed for structure check (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+              );
+              return null;
+            }
+          })()
+        : null;
+      // The one recorded SHA in the run — see `goalGateBaseCommit`'s declaration.
+      goalGateBaseCommit = parsedBaseline?.gitCommit ?? null;
+      structureCheckResult = await checkProjectRegistration({ cwd, baseline: parsedBaseline });
+      if (hasProjectRegistrationViolations(structureCheckResult)) {
+        const structureMustFix = formatProjectRegistrationMustFix(structureCheckResult);
+        if (structureMustFix) {
+          floorMustFixNoteLocal = floorMustFixNoteLocal
+            ? `${floorMustFixNoteLocal}\n${structureMustFix}`
+            : structureMustFix;
+        }
+        yield {
+          type: "content",
+          content: `\n> [project-registration] Sprint ${sprintN}: a new project is not registered in its solution.\n${structureMustFix ?? ""}\n`,
+        };
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(
+        `[sprint-runner] project-registration check failed (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+        { stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined },
+      );
+    }
+
+    // ── THE DISK BEATS AN OMISSION ───────────────────────────────────────────
+    // The last thing every pass does, on EVERY path through it, for the same
+    // reason a measurement beats an assertion above: `recipeFromVerify.testCommands`
+    // is the value `verify-floor.ts:21-29` explicitly refuses to run its own gates
+    // from ("a model that emitted `testCommands: []` would silently disarm its own
+    // gate") — and it was the only thing the done-gate's `hasTests` condition had
+    // to read. Measured, run muc2joffe506 (qa-platform sprint 1): the floor
+    // executed a test command (`sprints/1-verify.md`) and `sprints/1-outcome.json`
+    // still recorded `reason: "no_test_commands"`, because the recipe leaving here
+    // carried an empty array.
+    //
+    // It is applied HERE rather than beside the coverage merge inside the floor
+    // branch above for belt-and-braces: the branch now runs on every verdict, but
+    // it is wrapped in a try/catch whose FAIL/ERROR path deliberately leaves the
+    // verdict alone, so a floor that throws still reaches this line with nothing
+    // resolved — and the unmerged recipe from such a pass would overwrite the
+    // merged one (`cur = next` in verify-fix-loop.ts).
+    recipeFromVerify = await foldDerivedTestCommandsIntoRecipe(recipeFromVerify, floorTestCommands);
+
+    return {
+      verifyResult,
+      verifyVerdict,
+      recipeFromVerify,
+      structureCheck: structureCheckResult,
+      floorDelta,
+      floorChecks,
+      floorDetail: floorDetailLocal,
+      floorMustFixNote: floorMustFixNoteLocal,
+    };
+  }
+
+  /**
+   * Union the run's disk-derived test commands into the recipe leaving a verify
+   * pass, so the done-gate's engineering floor judges `hasTests` from the same
+   * source the floor actually executes. The fold itself (and the argument for a
+   * union rather than a replacement) lives in `test-command-signal.ts`.
+   *
+   * `alreadyResolved` is `VerifyFloorResult.commandsDiscovered.test` when the
+   * floor ran — reused verbatim, so the happy path adds NO probe. When the floor
+   * did not run (a model-reported FAIL/ERROR never reaches it) this resolves the
+   * set with `resolveFloorCommands`, the SAME function, the same `cwd` and the
+   * same bounds the floor would have used. Once per verify pass either way, never
+   * per criterion and never per command.
+   *
+   * Never throws: `resolveFloorCommands` already degrades a failed probe to
+   * `{build: [], test: []}` and logs it, and a recipe that gains nothing is
+   * simply the recipe the model emitted.
+   */
+  async function foldDerivedTestCommandsIntoRecipe(
+    recipe: VerifyRecipe | null,
+    alreadyResolved: string[] | undefined,
+  ): Promise<VerifyRecipe | null> {
+    if (!recipe) return null;
+    let derived = alreadyResolved;
+    if (!derived) {
+      try {
+        const { resolveFloorCommands } = await import("./verify-floor.js");
+        derived = resolveFloorCommands(cwd).test;
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.error(
+          "orchestrator",
+          `[sprint-runner] could not derive test commands for the done-gate (sprint ${sprintN}, run ${ctx.runId}): ${message}`,
+          {
+            operation: "foldDerivedTestCommandsIntoRecipe",
+            runId: ctx.runId,
+            sprintN,
+            cwd,
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          },
+        );
+        derived = [];
+      }
+    }
+    return mergeDerivedTestCommands(recipe, derived);
+  }
+
+  const initialVerifyPass = yield* runVerifyAndFloorPass("");
+  let verifyResult = initialVerifyPass.verifyResult;
+  let verifyVerdict = initialVerifyPass.verifyVerdict;
+  let recipeFromVerify = initialVerifyPass.recipeFromVerify;
+  if (initialVerifyPass.floorMustFixNote) floorMustFixNote = initialVerifyPass.floorMustFixNote;
+  if (initialVerifyPass.structureCheck) structureCheckFinal = initialVerifyPass.structureCheck;
+  floorDeltaFinal = initialVerifyPass.floorDelta;
+  floorChecksFinal = initialVerifyPass.floorChecks;
+  floorDetailFinal = initialVerifyPass.floorDetail;
+
+  // ── S4 — bounded verify -> fix -> re-verify loop ─────────────────────────
+  // A FAIL used to go straight to judgment, and the NEXT sprint re-planned from
+  // scratch instead of fixing the break — live run mu54vrme4c87: two sprints,
+  // both `engineering_floor: zero_coverage` (a package downgrade this run made
+  // broke the build; new projects were never registered in the solution), and
+  // neither sprint attempted a fix. This gives THIS sprint a bounded chance to
+  // fix what the floor just found — skipping the user's own pre-existing
+  // breakage — before judgment ever sees the failure. Opt out with
+  // MUONROI_IDEAL_VERIFY_FIX_ROUNDS=0.
+  const verifyFixStartedAtIso = new Date().toISOString();
+  const verifyFixOpenTasks =
+    planArtifact && planArtifact.source !== "none"
+      ? planArtifact.tasks.filter((t) => t.status !== "done").map((t) => `[${t.id}] ${t.title}`)
+      : [];
+  let verifyFixRecord: SprintVerifyFixRecord | undefined;
+  try {
+    const fixLoop = yield* runVerifyFixLoop({
+      sprintN,
+      planSynthesis,
+      openTasks: verifyFixOpenTasks,
+      fixModelId: ctx.sessionModelId,
+      runIsolatedTask: ctx.runIsolatedTask,
+      initial: {
+        verifyResult,
+        verifyVerdict,
+        recipeFromVerify,
+        floorDelta: initialVerifyPass.floorDelta,
+        floorChecks: initialVerifyPass.floorChecks,
+        floorDetail: initialVerifyPass.floorDetail,
+        floorMustFixNote: initialVerifyPass.floorMustFixNote,
+        structureCheck: initialVerifyPass.structureCheck,
+      },
+      runVerifyPass: (roundLabel) => runVerifyAndFloorPass(roundLabel),
+      // D2 — the cheap deterministic re-check: reuses `runDeterministicFloorOnly`,
+      // the SAME floor call `runVerifyAndFloorPass` above uses, so a round that
+      // is still failing deterministically never pays for another verify
+      // sub-agent turn. A throw here is inconclusive, not a failure to
+      // propagate — the loop falls back to a full pass for that round.
+      runFloorRecheck: async (roundLabel) => {
+        try {
+          const floor = await runDeterministicFloorOnly();
+          let floorMustFixNoteLocal: string | undefined;
+          if (floor.delta) {
+            const { describeBuildMustFix } = await import("./verify-baseline.js");
+            const mustFix = describeBuildMustFix(floor.delta);
+            if (mustFix) floorMustFixNoteLocal = mustFix;
+          }
+          return {
+            ranOk: floor.verdict !== "unavailable",
+            floorDelta: floor.delta,
+            floorChecks: floor.checks,
+            floorDetail: floor.detail,
+            floorMustFixNote: floorMustFixNoteLocal,
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          logger.error(
+            "orchestrator",
+            `[sprint-runner] verify-fix cheap floor re-check threw (sprint ${sprintN}, run ${ctx.runId}, ${roundLabel}): ${message}`,
+            {
+              operation: "runFloorRecheck",
+              runId: ctx.runId,
+              sprintN,
+              roundLabel,
+              stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+            },
+          );
+          return { ranOk: false };
+        }
+      },
+      // S4 fix — this was previously never wired, so nothing could stop the
+      // loop in production. `ctx.abortSignal` is the run's real abort signal
+      // (`this.abortController.signal`, threaded from `orchestrator.ts`
+      // through `DriverContext` — see `product-loop/types.ts`), the SAME
+      // controller that already gates `ctx.runIsolatedTask`.
+      abortSignal: ctx.abortSignal,
+      onRoundStart: (_round) => {
+        // The fixer edits code — the same class of work as the sprint's main
+        // implementation stage. No new harness stage kind was added for this;
+        // "implementation" is the existing value that fits.
+        try {
+          const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+            | { emitEvent: (e: unknown) => void }
+            | undefined;
+          _ar?.emitEvent({
+            t: "event",
+            kind: "sprint-stage",
+            sprintIndex: sprintN,
+            stage: "implementation",
+            runId: ctx.runId,
+          });
+        } catch {
+          /* best-effort */
+        }
+        // `round` has no field on SprintStagePayload — the per-round detail is
+        // already visible via the `[verify-fix] Round N: …` transcript chunks
+        // this loop yields, so nothing is lost by not threading it through here.
+        logUIInteraction(ctx.sessionId, {
+          subtype: "sprint_stage",
+          data: { sprintIndex: sprintN, stage: "implementation", runId: ctx.runId },
+        });
+      },
+    });
+    verifyResult = fixLoop.final.verifyResult;
+    verifyVerdict = fixLoop.final.verifyVerdict;
+    recipeFromVerify = fixLoop.final.recipeFromVerify;
+    if (fixLoop.final.floorMustFixNote) floorMustFixNote = fixLoop.final.floorMustFixNote;
+    if (fixLoop.final.structureCheck) structureCheckFinal = fixLoop.final.structureCheck;
+    // The loop's final pass supersedes the initial one — a round that fixed the
+    // build must not leave the end-of-sprint message quoting the stale break.
+    if (fixLoop.final.floorDelta) floorDeltaFinal = fixLoop.final.floorDelta;
+    if (fixLoop.final.floorChecks) floorChecksFinal = fixLoop.final.floorChecks;
+    if (fixLoop.final.floorDetail) floorDetailFinal = fixLoop.final.floorDetail;
+    verifyFixRecord = {
+      version: 1,
+      sprintN,
+      runId: ctx.runId,
+      enabled: fixLoop.enabled,
+      triggered: fixLoop.triggered,
+      skippedReason: fixLoop.skippedReason,
+      rounds: fixLoop.rounds,
+      stopReason: fixLoop.stopReason,
+      fixModelId: ctx.sessionModelId,
+      // Re-running the S3b per-task reviewer costs another LLM call, so the fix
+      // loop does not re-run it — task status still reflects the pre-fix
+      // review. Recorded so the decision is auditable, not silently skipped.
+      taskStatusRefresh: {
+        ran: false,
+        reason:
+          "re-running the plan-adherence per-task reviewer costs another LLM call; skipped — task status reflects the pre-fix review only",
+      },
+      startedAt: verifyFixStartedAtIso,
+      finishedAt: new Date().toISOString(),
+    };
+    await writeSprintVerifyFix(ctx.flowDir, ctx.runId, verifyFixRecord);
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`[sprint-runner] verify-fix loop failed (sprint ${sprintN}): ${message}`, {
+      stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+    });
+    verifyFixRecord = {
+      version: 1,
+      sprintN,
+      runId: ctx.runId,
+      enabled: true,
+      triggered: false,
+      rounds: [],
+      stopReason: "error",
+      fixModelId: ctx.sessionModelId,
+      startedAt: verifyFixStartedAtIso,
+      finishedAt: new Date().toISOString(),
+      errorMessage: message,
+    };
+    await writeSprintVerifyFix(ctx.flowDir, ctx.runId, verifyFixRecord);
+  }
+
+  // S6 — persist the project-registration check's final result as its own
+  // small artifact (`sprints/<n>-structure.json`), separate from
+  // `<n>-verify-fix.json`: that file's schema (SprintVerifyFixRecord) is owned
+  // by the S4 loop's own bookkeeping (rounds/stopReason/taskStatusRefresh), and
+  // folding a second, independently-evolving concern into it would couple two
+  // artifacts that should stay separately inspectable and testable — the same
+  // reasoning that already gives plan-adherence its own `<n>-adherence.json`
+  // beside it. Best-effort: a write failure is logged and never derails the
+  // sprint, same discipline as every other sprint artifact write.
+  if (structureCheckFinal) {
+    try {
+      const { writeSprintStructure } = await import("../flow/run-artifacts.js");
+      await writeSprintStructure(ctx.flowDir, ctx.runId, sprintN, structureCheckFinal);
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not persist the project-registration check record (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Tier 3 — self-verify gate. Only fires when recipe PASSED and the sprint
+  // touched UI / harness watched surfaces. Failure downgrades the sprint verdict
+  // to FAIL so the loop iterates again with feedback.
+  // Default ON in local dev; OFF in CI, and opt out with
+  // MUONROI_SPRINT_SELF_VERIFY=0 (see isEnabled() in sprint-self-verify.ts:66).
   if (verifyVerdict === "PASS") {
     try {
       const { runSprintSelfVerify } = await import("./sprint-self-verify.js");
@@ -1301,9 +3615,200 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
           content: `\n> [self-verify] Tier 1 PASS (${sv.elapsedMs}ms) — UI/harness regressions checked.\n`,
         };
       }
-    } catch {
-      /* self-verify must NEVER block the sprint pipeline */
+    } catch (err) {
+      // Self-verify is ADDITIVE (Tier 1 heuristic UI/harness QA), so a wiring or
+      // spawn failure here does not invalidate the deterministic floor that
+      // already ran above — the verdict is left standing. But it must not vanish:
+      // the previous bare `catch {}` violated the No Silent Catch rule and made
+      // "self-verify found nothing" and "self-verify never ran" indistinguishable
+      // in the transcript.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[sprint-runner] self-verify failed to run (sprint ${sprintN}, run ${ctx.runId}): ${message}`, {
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      verifyResult.error = `${verifyResult.error ?? ""}\n\n[self-verify] did not run: ${message}`;
+      yield {
+        type: "content",
+        content: `\n> [self-verify] Tier 1 self-QA did not run for sprint ${sprintN}: ${message}\n`,
+      };
     }
+  }
+
+  // ── F5 — the goal-contradiction gate ─────────────────────────────────────
+  // Every gate above this line asks "did it work?" — the sub-agent's narration,
+  // the project's own exit codes, the UI self-QA. None of them asks "does this
+  // serve what was asked for?", which is why two independent runs (the full
+  // loop, and a single sub-agent with no council, no sprints and no floor) both
+  // committed a change that builds, tests green, and cannot do the one thing the
+  // user asked for. See goal-contradiction-gate.ts for the measured artefact.
+  //
+  // It FAILS THE SPRINT rather than warning, deliberately. The warning was
+  // already tried on this exact run: the leader's "2 of 5 criteria still unmet"
+  // closing verdict was a warning, and the loop walked past it 23 seconds later.
+  // Failing the sprint is the loop's OWN feedback channel — the same one the
+  // verify floor and self-verify use — so a fire costs one iteration and carries
+  // the contradiction text into the next sprint's focus via `verifyResult.error`,
+  // instead of costing the 98 minutes run 1 spent building on top of the defect.
+  //
+  // It runs on EVERY sprint, not only before ship, for two measured reasons:
+  // the loop-less run had exactly one unit of work and no ship stage at all, so
+  // a ship-only gate would have had nothing to inspect; and in the looped run
+  // two further sprints were planned on top of the broken change. The gate
+  // belongs at the smallest unit of completed work.
+  if (verifyVerdict === "PASS") {
+    // The judge's identity, declared out here so the catch below can still name
+    // it in the record it writes when the gate never got as far as running —
+    // but RESOLVED inside the try, because model resolution is itself allowed to
+    // throw (the zero-hardcode rule forbids a fallback string), and moving that
+    // call outside the guard would turn a resolution failure into a dead sprint.
+    let goalJudgeModelId = "";
+    try {
+      goalJudgeModelId = resolveLeaderModel(ctx.sessionModelId);
+      const { runGoalContradictionGate, toGoalGateRecord, writeGoalGateRecord } = await import(
+        "./goal-contradiction-gate.js"
+      );
+      const goalGate = await runGoalContradictionGate({
+        // The user's literal text, never a restatement of it — the whole defect
+        // is a run that satisfied its own paraphrase. `productSpec.mvp` is what
+        // the loop already treats as this run's success criteria (index.ts:1160).
+        goal: { idea: ctx.idea, successCriteria: productSpec.mvp },
+        cwd,
+        llm: productLlm,
+        // Decision-grade judgement: pinned to the leader, never downshifted, and
+        // deliberately NOT overridable by MUONROI_IDEAL_REVIEW_MODEL the way the
+        // plan-adherence reviewer is. See SUB_TASK_TIER in src/council/leader.ts:
+        // a wrong answer here either ships the defect or costs a sprint, which is
+        // exactly the class of call that table pins to the leader.
+        modelId: goalJudgeModelId,
+        // The run writes its own artifacts under flowDir. Measured on a live
+        // run, 49 of the 57 untracked files in the judged repository were that
+        // paperwork — including, now, this gate's own verdict. Feeding a judge
+        // its previous answer as "the change that was made" is not a check.
+        excludeDir: ctx.flowDir,
+        // The sprint's change is what it COMMITTED plus what it left pending —
+        // never whichever half happens to be non-empty. Measured on run
+        // muc2joffe506 sprint 2: four stray `.db` files in the working tree hid
+        // four commits of real work, and the gate reported the sprint aligned on
+        // 1,103 characters of leftover test databases. `null` here is honest
+        // (no baseline for this run) and degrades to the gate's bounded commit
+        // range, not to the `HEAD~1` window that missed three of those four.
+        sinceCommit: goalGateBaseCommit ?? undefined,
+      });
+      idealTrace("sprint.goal-gate.after", {
+        runId: ctx.runId,
+        sprintN,
+        fired: goalGate.fired,
+        source: goalGate.source,
+        contradictions: goalGate.contradictions.length,
+      });
+      // EVERY outcome is recorded, including the ones that change nothing.
+      // idealTrace above is a no-op unless MUONROI_IDEAL_TRACE is set and the
+      // TUI eats stderr, so before this the only trace of a verdict was a
+      // transcript chunk nothing persists — a live run's gate decision could
+      // not be found afterwards in the DB, the debug log, or the run artifacts.
+      await writeGoalGateRecord(
+        ctx.flowDir,
+        toGoalGateRecord(goalGate, { runId: ctx.runId, sprintN, modelId: goalJudgeModelId }),
+      );
+      if (goalGate.fired) {
+        verifyVerdict = "FAIL";
+        verifyResult.error = `${verifyResult.error ?? ""}\n\n[goal-gate] ${goalGate.detail}`;
+        yield {
+          type: "content",
+          content:
+            `\n> [goal-gate] Sprint ${sprintN} verdict downgraded to FAIL — the change works against the stated goal ` +
+            `(${goalGate.source}).\n${goalGate.detail}\n`,
+        };
+      } else if (goalGate.source === "aligned") {
+        yield {
+          type: "content",
+          content: `\n> [goal-gate] The change serves the stated goal (judged on the ${goalGate.diffOrigin} diff).\n`,
+        };
+      } else if (goalGate.source !== "disabled") {
+        // Fail-open paths are ANNOUNCED. "the gate found nothing" and "the gate
+        // never ran" must never look the same in the transcript.
+        yield {
+          type: "content",
+          content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal (${goalGate.source}): ${goalGate.detail}\n`,
+        };
+      }
+    } catch (err) {
+      // Wiring/infrastructure failure. The deterministic floor above already
+      // ran, so the verdict stands — but per No Silent Catch this is logged and
+      // surfaced, never swallowed.
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error("orchestrator", `[sprint-runner] goal-contradiction gate failed to run (sprint ${sprintN})`, {
+        runId: ctx.runId,
+        sprintN,
+        error: message,
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      // The gate never produced an outcome, so nothing above recorded one — and
+      // "the gate could not run" is precisely the state an auditor must not have
+      // to infer. A second failure here (the module itself is what threw) still
+      // must not derail the sprint, so the write is guarded on its own.
+      try {
+        const { toGoalGateRecord, writeGoalGateRecord } = await import("./goal-contradiction-gate.js");
+        await writeGoalGateRecord(
+          ctx.flowDir,
+          toGoalGateRecord(
+            { fired: false, source: "gate-error", detail: message, contradictions: [] },
+            { runId: ctx.runId, sprintN, modelId: goalJudgeModelId },
+          ),
+        );
+      } catch (recordErr) {
+        logger.error("orchestrator", `[sprint-runner] could not record the goal gate's failure (sprint ${sprintN})`, {
+          runId: ctx.runId,
+          sprintN,
+          error: recordErr instanceof Error ? recordErr.message : String(recordErr),
+          stack: recordErr instanceof Error ? recordErr.stack?.split("\n").slice(0, 3) : undefined,
+        });
+      }
+      yield {
+        type: "content",
+        content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal: ${message}\n`,
+      };
+    }
+  } else {
+    // The gate did not run because the whole block above is gated on PASS. That
+    // is a SKIP, and a skip must leave an artefact: the gate's own principle is
+    // that "found nothing" and "never ran" must never look alike, and this is
+    // the arm where nothing was written at all. MEASURED: across four real runs
+    // of one task verify never once reached PASS, so this branch was every
+    // sprint of every run — the gate has never executed in production, and that
+    // had to be inferred from `<N>-outcome.json` rather than read off a record.
+    //
+    // Same writer, same shape, no second format. `modelId` is empty because no
+    // judge was ever chosen: resolving one here would spend a call (and can
+    // throw) to fill in a field describing work that did not happen.
+    try {
+      const { toGoalGateRecord, writeGoalGateRecord } = await import("./goal-contradiction-gate.js");
+      await writeGoalGateRecord(
+        ctx.flowDir,
+        toGoalGateRecord(
+          {
+            fired: false,
+            source: "verdict-not-pass",
+            detail: `goal gate skipped — the verify verdict was ${verifyVerdict}, and the gate only runs on PASS`,
+            contradictions: [],
+          },
+          { runId: ctx.runId, sprintN, modelId: "", verifyVerdict },
+        ),
+      );
+    } catch (err) {
+      // A lost audit trail must not take down the sprint it describes.
+      logger.error("orchestrator", `[sprint-runner] could not record the skipped goal gate (sprint ${sprintN})`, {
+        runId: ctx.runId,
+        sprintN,
+        verifyVerdict,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+    }
+    yield {
+      type: "content",
+      content: `\n> [goal-gate] Sprint ${sprintN} was NOT checked against the goal — verify verdict was ${verifyVerdict}, not PASS.\n`,
+    };
   }
 
   // P3.3: Track repeating failures; push to EE judge-worker when count hits 3.
@@ -1358,14 +3863,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   try {
     const judgeModelId =
       roleAssignments.get("Reviewer")?.modelId ?? roleAssignments.get("PO")?.modelId ?? ctx.sessionModelId;
-    let diffSummary = "";
-    try {
-      const { spawnSync } = await import("node:child_process");
-      const stat = spawnSync("git", ["diff", "--stat", "HEAD"], { cwd, encoding: "utf8", timeout: 15000 });
-      diffSummary = (stat.stdout ?? "").slice(0, 4000) || "(no diff detected)";
-    } catch {
-      diffSummary = "(diff unavailable)";
-    }
+    const diffSummary = buildJudgeDiffSummary(cwd, sprintN, ctx.runId);
     const verifyOutputForJudge = (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim();
     const { judged, total } = await judgeCriteriaAgainstVerify({
       flowDir: ctx.flowDir,
@@ -1394,7 +3892,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // sees only the scoped subset.
   let evalCriteria = currentCriteria;
   if (phaseScope && phaseScope.criteria.length > 0) {
-    const wanted = new Set(phaseScope.criteria.map((s) => s.trim()));
+    // N4(b): match on the SAME id derivation the seeder uses. Comparing raw
+    // phase text to a Criterion.id silently missed every criterion longer than
+    // ID_MAX_LEN (criterionIdFromText truncates and appends a hash), which would
+    // have collapsed the scoped gate back to the permissive fallback below.
+    const wanted = new Set(phaseScope.criteria.map((s) => criterionIdFromText(s).trim()));
     const filtered = currentCriteria.filter((c) => wanted.has(c.id.trim()));
     // Permissive fallback: if phase.successCriteria text doesn't map to any Criterion.id
     // (gray-areas headings are slugs, not verbatim spec text), fall back to full set
@@ -1405,6 +3907,11 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
 
   const verdict = await evaluateDoneGate({
     lastVerify: verifyResult,
+    // Hand over the verdict the verify FLOOR already adjudicated. Without
+    // this the gate re-parses `verifyResult` and sees only the sub-agent's
+    // narration, so a floor upgrade (green exit codes, silent model) would be
+    // discarded here and the sprint would still score `engineering_floor`.
+    verifyVerdict,
     recipe: recipeFromVerify,
     criteria: evalCriteria,
     history,
@@ -1468,6 +3975,21 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // ── Step 8: Persist iteration state, role memory, EE boundary ────────────
   const scoreBefore = history.length > 0 ? history[history.length - 1].scoreAfter : 0;
 
+  // N4(a) — measured sprint spend (usage_events.cost_micros over this session's
+  // chain, sub-agents included). Unreadable at either boundary ⇒ 0 with a LOUD
+  // log, never a silent zero passed off as "this sprint was free".
+  const sprintSpendEnd = readRunSpendUsd(ctx.sessionId);
+  let sprintCostUsd = 0;
+  if (sprintSpendStart.known && sprintSpendEnd.known) {
+    sprintCostUsd = Math.max(0, sprintSpendEnd.usd - sprintSpendStart.usd);
+  } else {
+    logger.error("orchestrator", `[budget] sprint ${sprintN} cost is UNMEASURED — the gauge was blind`, {
+      runId: ctx.runId,
+      sprintN,
+      reason: sprintSpendStart.known ? (sprintSpendEnd as { reason: string }).reason : sprintSpendStart.reason,
+    });
+  }
+
   const iter: IterationState = {
     sprintN,
     stage: verdict.pass ? "shipped" : "retrospective",
@@ -1477,13 +3999,37 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     criteriaPartial: currentCriteria.filter((c) => c.status === "partial").length,
     criteriaUnmet: currentCriteria.filter((c) => c.status === "unmet").length,
     totalCriteria: currentCriteria.length,
-    costUsd: 0, // Per-sprint cost is observed via the per-product ledger; field kept for compat.
-    actualCost: 0,
+    costUsd: sprintCostUsd,
+    actualCost: sprintCostUsd,
     score: verdict.score,
     lastVerifyResult: verifyVerdict,
   };
 
   await appendIteration(ctx.flowDir, ctx.runId, iter);
+
+  // What would actually change this sprint's outcome. ONE derivation, read by
+  // every surface below: the resume digest (which `/ideal resume` prints back —
+  // src/product-loop/index.ts:2214-2220), the transcript line the user reads at
+  // this moment, and the carry-over focus the next sprint is planned against.
+  //
+  // It replaces `Retry sprint ${sprintN}: ${describeVerdictFailure(verdict)}`,
+  // which fired for EVERY non-pass verdict and named no action at all — run
+  // muc2joffe506 ended with "Next action: Retry sprint 2: engineering_floor:
+  // no_test_commands" while the real action was to declare pytest in
+  // `backend/requirements.txt`.
+  const nextActionAdvice = deriveNextAction({
+    sprintN,
+    verdict,
+    verifyVerdict,
+    floorDelta: floorDeltaFinal,
+    floorChecks: floorChecksFinal,
+    // The sub-agent's narration, so a floor-green/model-red sprint can have the
+    // un-runnable gate it hit named from the narration's own measured line rather
+    // than reported as a code failure. Read only in that branch — see
+    // `NextActionInput.verifyOutput`.
+    verifyOutput: verifyResult.output ?? undefined,
+    testRunnerEvidence: verdict.pass ? undefined : await measureTestRunnerEvidence(cwd),
+  });
 
   // Update Resume Digest in state.md so PIL Layer 5 + future resume can pick it up
   const stateMap = (await readArtifact(runDir, "state.md")) ?? { preamble: "", sections: new Map() };
@@ -1492,9 +4038,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     renderResumeDigest({
       stage: `sprint-${sprintN}`,
       lastCompleted: `sprint-${sprintN} ${iter.stage}`,
-      nextAction: verdict.pass
-        ? "Definition-of-Done met — advance to the next phase or ship"
-        : `Retry sprint ${sprintN}: ${verdict.failedCondition ?? "continue toward Definition-of-Done"}`,
+      nextAction: nextActionAdvice.action,
       sprintN,
       score: verdict.score,
       verify: verifyVerdict,
@@ -1513,21 +4057,84 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       score: verdict.score,
       verify: verifyVerdict,
       failedCondition: verdict.failedCondition ?? undefined,
+      // F9 - the done-gate computed a precise cause (`no_recipe` |
+      // `no_test_commands` | `zero_coverage` | `verify_FAIL` for the
+      // engineering floor, and an equally specific string for every other
+      // condition) and this record used to drop it on the floor. A sprint that
+      // failed with verify=PASS and failedCondition=engineering_floor left the
+      // cause unrecoverable from the artifacts, the DB and the logs alike.
+      reason: verdict.reason ?? undefined,
+      // The same derivation `state.md`'s digest and the transcript line below
+      // show, persisted so the machine-readable record names an ACTION and not
+      // only a gate label. See `SprintOutcome.nextAction`.
+      nextAction: nextActionAdvice.action,
+      fixLocus: nextActionAdvice.locus,
+      sprintCanCarryIt: nextActionAdvice.sprintCanCarryIt,
+      // The floor's own verdict, alongside — never folded into `verify`, because
+      // `{"verify":"FAIL","floorVerdict":"pass"}` is a fact the reader needs.
+      // `floorDetailFinal` is set iff the floor RETURNED, and `runVerifyFloor`
+      // attaches a delta on exactly the pass/fail paths (the `unavailable` returns
+      // carry none), so the pair distinguishes all three outcomes from "no floor
+      // ran at all" without carrying a fourth parallel field.
+      floorVerdict: floorDetailFinal === undefined ? undefined : (floorDeltaFinal?.verdict ?? "unavailable"),
       criteriaMet: iter.criteriaMet,
       criteriaPartial: iter.criteriaPartial,
       criteriaUnmet: iter.criteriaUnmet,
       finishedAt: new Date().toISOString(),
     });
-    const verifyReport =
-      (verifyResult.error?.trim() ? verifyResult.error : (verifyResult.output ?? "")).trim() || "(no verify output)";
+    // BOTH channels, not either/or. A stage the watchdog cut still carries the work
+    // it had done in `output` (see `salvageAbortedVerifyOutput`); this used to take
+    // `error` and drop it, which is how run muc2joffe506's three verified phases
+    // became the single word ERROR. `buildVerifyReportBody` keeps a single-channel
+    // result byte-identical to before.
+    const verifyReport = buildVerifyReportBody({ error: verifyResult.error, output: verifyResult.output });
+    // S4 — only when the verify-fix loop actually ran something: with it
+    // disabled or never triggered, this report stays byte-identical to before
+    // S4 (no addendum line for a loop that never acted).
+    const verifyFixNote =
+      verifyFixRecord?.enabled && verifyFixRecord.triggered
+        ? `\nVerify-fix: ${verifyFixRecord.rounds.length} round(s), stopReason=${verifyFixRecord.stopReason}\n`
+        : "";
+    // S6 — a project-registration note, only when there is something to say
+    // (see formatProjectRegistrationNote); a sprint that added no new project
+    // manifest keeps this file byte-identical to before S6.
+    let structureNote = "";
+    try {
+      const { formatProjectRegistrationNote } = await import("./project-registration-check.js");
+      const note = formatProjectRegistrationNote(structureCheckFinal);
+      if (note) structureNote = `\n${note}\n`;
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not format the project-registration note (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // The MEASUREMENT, in its own section, above the narration.
+    //
+    // Run muc2joffe506 sprint 1's report contains not one floor line — no
+    // `- [build]`, no `- [test]`, no `Rule applied` — because the floor's detail
+    // only ever reached this file through `verifyResult.error`, which is written
+    // on a DOWNGRADE alone. So a sprint whose gates ran green left no record of
+    // them having run, and a model-FAIL sprint ran no gates at all. Kept OUT of
+    // `verifyResult.error` on purpose: `parseVerifyResult` maps any non-empty
+    // error to ERROR, so a record routed through that field would rewrite the
+    // verdict it exists to stand beside.
+    const floorNote = floorDetailFinal
+      ? `\n## Deterministic verify floor\n\n\`\`\`\n${floorDetailFinal.slice(0, 4000)}\n\`\`\`\n`
+      : "";
     await writeSprintVerify(
       ctx.flowDir,
       ctx.runId,
       sprintN,
-      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
+      `# Sprint ${sprintN} verify — ${verifyVerdict} (score ${verdict.score.toFixed(2)})\n${verifyFixNote}${structureNote}${floorNote}\n\`\`\`\n${verifyReport.slice(0, 8000)}\n\`\`\`\n`,
     );
-  } catch {
-    /* non-critical — sprint artifacts are a review surface, never derail the loop */
+  } catch (err) {
+    // Non-critical — sprint artifacts are a review surface, never derail the loop.
+    // Still logged: a swallowed write is how a review surface goes quietly missing.
+    console.error(
+      `[sprint-runner] could not persist the sprint ${sprintN} outcome/verify artifacts (run ${ctx.runId}): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
   }
 
   // Emit ProgressSnapshot on sprint boundary so the user sees rolling progress.
@@ -1577,13 +4184,14 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     kind: "sprint-execution",
     phaseRef: `runs/${ctx.runId}#sprint-${sprintN}`,
     sessionId: ctx.runId,
-    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${verdict.failedCondition ? ` — ${verdict.failedCondition}` : ""}`,
+    text: `Sprint ${sprintN} ${verdict.pass ? "passed" : "failed"} (score ${verdict.score.toFixed(2)}, verify ${verifyVerdict})${describeVerdictFailure(verdict) ? ` — ${describeVerdictFailure(verdict)}` : ""}`,
     payload: {
       sprintN,
       pass: verdict.pass,
       score: verdict.score,
       verify: verifyVerdict,
       failedCondition: verdict.failedCondition ?? null,
+      reason: verdict.reason ?? null,
     },
   });
 
@@ -1598,10 +4206,30 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
             .map((d) => `- ${d}`)
             .join("\n")}`
         : "";
-    iter.nextFocus = `${fb.focus}${deviationNote}`;
+    // S3b — carry unfinished sprint tasks (the reviewer's own verdict, never
+    // diff-touch alone) into the next sprint's focus, same as plan deviations.
+    const taskCarryOverNote =
+      unfinishedTasks.length > 0
+        ? `\n\nUnfinished sprint tasks (continue these):\n${unfinishedTasks
+            .map((t) => `- [${t.id}] ${t.title}`)
+            .join("\n")}`
+        : "";
+    // S5 — carry a run-introduced/unattributable build break into the next
+    // sprint's focus as a must-fix item, same as plan deviations and tasks.
+    const floorMustFixText = floorMustFixNote ? `\n\n${floorMustFixNote}` : "";
+    // The next sprint is planned against this text, so it leads with the derived
+    // action rather than `fb.focus` alone. When the fix is not one a sprint owns
+    // (a manifest declaration, a missing dependency, a human decision) say so —
+    // otherwise the next sprint is told to "fix verify failures" over a log that
+    // never mentioned the cause, which is the same defect one layer down.
+    const cannotCarryNote = nextActionAdvice.sprintCanCarryIt
+      ? ""
+      : ` This is NOT something a sprint's code changes can resolve (${nextActionAdvice.locus}) — surface it rather than re-attempting the same work.`;
+    const nextActionNote = `What would change the outcome: ${nextActionAdvice.action}${cannotCarryNote}`;
+    iter.nextFocus = `${nextActionNote}\n\n${fb.focus}${deviationNote}${taskCarryOverNote}${floorMustFixText}`;
     yield {
       type: "content",
-      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${verdict.failedCondition ?? "unknown"}). Next focus: ${fb.focus}\n`,
+      content: `\n> Sprint ${sprintN} did not satisfy Definition-of-Done (${describeVerdictFailure(verdict) ?? "unknown"}).\n> Next action: ${nextActionAdvice.action}\n`,
     };
   } else {
     yield {
@@ -1610,12 +4238,118 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
     };
   }
 
+  // ── C5 — per-item debate: argue only the few plan items worth arguing ────
+  // Runs AFTER S4 (verify-fix, above) and after this sprint's verdict/outcome/
+  // criteria counts are already computed and durably written (Step 6-8 above,
+  // all before this line) — everything below reads `planArtifact` /
+  // `currentCriteria` / `verifyFixRecord` / `structureCheckFinal` but never
+  // touches `verdict`, `iter.score*`, `iter.criteria*`, or re-invokes
+  // `evaluateDoneGate` / `writeSprintOutcome`. A ruling can therefore only
+  // change the PLAN (this sprint's `<n>-plan.json`, folded in by C4) and the
+  // carry-over focus for the NEXT sprint — this sprint's own sealed verdict
+  // and outcome file are structurally out of reach from this point on.
+  //
+  // `planArtifact` null (no structured plan — `source: "none"`, e.g. this
+  // sprint's planSynthesis was pure unparsed prose) means C1 has no tasks to
+  // select from either way, so the block is skipped outright: no record, no
+  // model call, same as a disabled feature.
+  if (planArtifact) {
+    const itemDebateStartedAtIso = new Date().toISOString();
+    let itemDebateStanceRows: CouncilStanceRow[] | undefined;
+    try {
+      const undebatedRecord = await readUndebatedGateRecord(runDir);
+      itemDebateStanceRows = undebatedRecord?.stanceRows;
+    } catch (err) {
+      console.error(
+        `[sprint-runner] could not read undebated-criteria stance rows for item-debate (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const itemDebateResult = yield* runItemDebate({
+      plan: planArtifact,
+      criteria: currentCriteria,
+      stanceRows: itemDebateStanceRows,
+      structureCheck: structureCheckFinal,
+      verifyFix: verifyFixRecord ? { triggered: verifyFixRecord.triggered } : undefined,
+      councilTopic,
+      sessionModelId: ctx.sessionModelId,
+      runId: ctx.runId,
+      cwd,
+      runDir,
+      llm: productLlm,
+      respondToQuestion: ctx.respondToQuestion,
+      respondToPreflight: ctx.respondToPreflight,
+      processMessageFn: ctx.processMessageFn ?? noopProcess,
+      abortSignal: ctx.abortSignal,
+    });
+
+    // `stopReason === "disabled"` means MUONROI_IDEAL_ITEM_DEBATE=0 — no
+    // record is written at all so a disabled sprint stays byte-identical to
+    // one that never had this feature (see item-debate-runner.ts doc).
+    if (itemDebateResult.stopReason !== "disabled") {
+      const itemDebateRecord: SprintItemDebateRecord = {
+        version: 1,
+        sprintN,
+        runId: ctx.runId,
+        enabled: itemDebateResult.triggered,
+        items: itemDebateResult.items,
+        stopReason: itemDebateResult.stopReason,
+        ...(itemDebateResult.leaderModelId ? { leaderModelId: itemDebateResult.leaderModelId } : {}),
+        startedAt: itemDebateStartedAtIso,
+        finishedAt: new Date().toISOString(),
+        ...(itemDebateResult.errorMessage ? { errorMessage: itemDebateResult.errorMessage } : {}),
+        // D6 — record the debate's own escalation outcome honestly: whenever
+        // this fires for an item debate it is `auto: true` by construction
+        // (sprintPlanningMode forces autoAcceptEscalation), so the artifact
+        // itself explains a stalled-looking item without anyone guessing
+        // whether an askcard was silently skipped.
+        ...(itemDebateResult.escalation ? { escalation: itemDebateResult.escalation } : {}),
+      };
+      await writeSprintItemDebate(ctx.flowDir, ctx.runId, itemDebateRecord);
+
+      if (itemDebateResult.triggered && itemDebateResult.items.length > 0) {
+        try {
+          const applied = applyItemDebateToPlanArtifact(planArtifact, itemDebateRecord);
+          const persisted = await writeSprintPlanArtifact(ctx.flowDir, ctx.runId, applied.artifact);
+          if (persisted) planArtifact = applied.artifact;
+          const changedLines = applied.changes
+            .filter((c) => c.changeKind !== "none" && c.ok)
+            .map((c) => `[${c.itemId}] ${c.detail}`);
+          const argued = itemDebateResult.items.map((it) => it.taskId ?? it.criterionId ?? "?").join(", ");
+          const summary =
+            `Argued ${itemDebateResult.items.length} item(s) (${argued})` +
+            (changedLines.length > 0 ? ` — changed: ${changedLines.join("; ")}.` : " — no plan change.");
+          yield { type: "content", content: `\n> [item-debate] ${summary}\n` };
+          if (changedLines.length > 0) {
+            const note = `\n\nItem-debate rulings for next sprint:\n${changedLines.map((l) => `- ${l}`).join("\n")}`;
+            iter.nextFocus = `${iter.nextFocus ?? ""}${note}`;
+          }
+        } catch (err) {
+          console.error(
+            `[sprint-runner] applying the item-debate ruling failed (sprint ${sprintN}, run ${ctx.runId}): ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      } else if (itemDebateResult.stopReason === "error") {
+        yield {
+          type: "content",
+          content: `\n> [item-debate] Sprint ${sprintN}'s per-item debate did not complete: ${itemDebateResult.errorMessage ?? "unknown error"}.\n`,
+        };
+      }
+    }
+  }
+
   return iter;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
-function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
+/**
+ * Exported so the child-liveness test drives the PRODUCTION closure rather than a
+ * stand-in — the standard `maintain/__tests__/maintain-verify-turn-failure.test.ts`
+ * already holds itself to ("exercises the production closure … rather than a
+ * stand-in"). The live path is sprint-runner.ts:1914; this changes visibility only.
+ */
+export function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
   let sandbox: SandboxSettings = {} as SandboxSettings;
   return {
     getCwd: () => cwd,
@@ -1627,18 +4361,100 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
       if (ctx.detectVerifyRecipe) return ctx.detectVerifyRecipe();
       return null; // Treat as fail-closed — CB-3 will halt on sprint 1.
     },
-    runTaskRequest: async (req) => {
+    // ── BOTH of these used to be dropped here ─────────────────────────────────
+    // `verify/orchestrator.ts:164` calls this with THREE arguments —
+    // `(taskRequest, options.onProgress, options.abortSignal)` — and the
+    // implementation took only `req`, so the second and third went on the floor.
+    //
+    // `onActivity` is the CHILD's liveness: without it the verify silence watchdog
+    // had nothing from the child to measure and fell back to the parent's own
+    // preparation beats, the last of which ("Running verify sub-agent") is emitted
+    // immediately BEFORE the child starts — a silence window anchored there is a
+    // TOTAL budget on the child wearing a silence label.
+    //
+    // `abortSignal` is the watchdog's CANCELLATION: `runVerifyWithWatchdog` calls
+    // `controller.abort()` before it resolves, and with the signal discarded nothing
+    // ever stopped the collection loop, so the abandoned child kept burning tokens
+    // (measured: ~10 min and 125 further rows past the abandonment on run
+    // `muc2joffe506` sprint 1). The two are one defect and are fixed together: the
+    // activity half stops the watchdog firing on healthy children, which makes the
+    // firings that remain far likelier to be genuinely hung ones — exactly the case
+    // where the abort has to land.
+    //
+    // See `CollectNestedTurnOptions` for both, including why the signal is honoured
+    // by unwinding the stream rather than passed down (nothing below takes one).
+    runTaskRequest: async (req, onActivity, abortSignal) => {
       // If a host process loop is wired, run the verify prompt through it. Otherwise
       // return a deterministic synthetic result so the loop can still complete in tests.
       if (!ctx.processMessageFn) {
         return { success: true, output: "" } as ToolResult;
       }
-      const gen = ctx.processMessageFn(req.prompt);
-      let output = "";
-      for await (const chunk of gen) {
-        if (chunk.type === "content" && typeof chunk.content === "string") {
-          output += chunk.content;
-        }
+      // ── The machine-read boundary ─────────────────────────────────────────
+      // The loop below concatenates EVERY `content` chunk into the string that
+      // `parseVerifyResult` (and then `sprints/<n>-verify.md`) reads. That
+      // stream is not model text alone: the tool engine yields each PreToolUse
+      // hook `additionalContext` as a `content` chunk, and the EE recall nag
+      // rides in exactly there. Measured, run `mttwpmu8ee5b`: both nag lines
+      // opened `sprints/1-verify.md`, inside the verdict payload.
+      //
+      // The boundary is declared HERE, at the one place that knows this stream
+      // is machine-read, and enforced at the EMITTERS (hooks/index.ts,
+      // message-processor.ts) which consult `isRecallNagSuppressed()`. It is
+      // deliberately not a downstream filter: filtering leaves the feature
+      // writing into a channel it has no business in, and the next notice
+      // someone adds would have to be filtered all over again.
+      const releaseNagSuppression = beginRecallNagSuppression();
+      // ── The no-human boundary ─────────────────────────────────────────────
+      // Declared at the same one place, for the same reason. This turn runs
+      // through `ctx.processMessageFn`, i.e. as a normal top-level turn, so it
+      // inherits the MAIN tool set — `ask_user` included, with a live handler
+      // behind it (use-app-logic.tsx:3217 wires a real blocking card). Nobody is
+      // watching a card opened from inside an autonomous sprint stage. Measured,
+      // run `muc2joffe506` sprint 2: one `ask_user` at 14:50:21.922Z burned the
+      // whole 600s silence budget, the stage was recorded `verify: "ERROR"`, and
+      // the card was finally answered 10.5 hours later. The scope removes the
+      // tool for the duration of this turn (registry.ts) and the prompt tells the
+      // model what to do instead (buildVerifyTaskPrompt's unattended directive).
+      const releaseUnattended = beginUnattendedTurn();
+      let turn: CollectedNestedTurn;
+      try {
+        turn = await collectNestedTurn(ctx.processMessageFn(req.prompt), { onActivity, abortSignal });
+      } finally {
+        releaseUnattended();
+        releaseNagSuppression();
+      }
+      const output = turn.output;
+      // Tripwire, not a parser: if a nag reached the payload anyway the boundary
+      // has a hole, and a silent hole is how this defect survived a whole run.
+      // Checked BEFORE the failure return, so a killed turn is still inspected.
+      if (output.includes(RECALL_NAG_SENTINEL)) {
+        logger.error(
+          "orchestrator",
+          "[sprint-runner] EE recall nag reached the verify payload despite suppression — the machine-read boundary has a hole",
+          { operation: "buildVerifyAgent.runTaskRequest", cwd },
+        );
+      }
+      // A turn that was KILLED (turn watchdog at orchestrator.ts:3708-3709, a
+      // provider stall, a thrown provider error) leaves a TRUNCATED payload. It
+      // used to be returned as `{success:true}`, so `parseVerifyResult` scored
+      // the sprint on a verify that never finished — and a partial narration
+      // that already said `VERIFY_PASS` read as a green run. Reporting the
+      // failure in `error` makes parseVerifyResult return ERROR (never PASS),
+      // which fails the done-gate's engineering floor with `verify_FAIL`. The
+      // partial output still rides along: it is the only evidence there is, and
+      // the next sprint's feedback is built from it.
+      if (turn.failure) {
+        logger.error("orchestrator", "[sprint-runner] verify turn ended in failure — payload is truncated", {
+          operation: "buildVerifyAgent.runTaskRequest",
+          cwd,
+          failure: turn.failure,
+          outputChars: output.length,
+        });
+        return {
+          success: false,
+          output,
+          error: `verify turn ended in failure: ${turn.failure}`,
+        } as ToolResult;
       }
       return { success: true, output } as ToolResult;
     },
@@ -1650,98 +4466,119 @@ function buildVerifyAgent(ctx: DriverContext, cwd: string): VerifyAgentLike {
  * cost report break out PO/Customer/moderator/leader spend without changing
  * the CouncilLLM signature. Unknown → undefined (entry still tagged callsite).
  */
-function detectRoleFromSystem(system: string): string | undefined {
+/**
+ * Exported so `detectRoleFromSystem(ITEM_RULING_SYSTEM_PROMPT)` can be pinned
+ * by a test — a mismatch here means item-debate ruling calls silently fall
+ * back to `role: undefined` in `usage forensics`, indistinguishable from
+ * every other unlabeled call (measured: this happened until the branch below
+ * was added, since `ITEM_RULING_SYSTEM_PROMPT` never matched any existing
+ * check).
+ */
+export function detectRoleFromSystem(system: string): string | undefined {
   const s = system.toLowerCase();
   if (s.startsWith("you are the product owner")) return "po";
   if (s.startsWith("you are the customer")) return "customer";
   if (s.startsWith("you are the debate moderator")) return "moderator";
+  // C5 — item-debate-runner.ts's per-item ruling call. Checked before the
+  // generic "leader"+"council" pair below: that prompt says "leader" but
+  // never "council", so it would fall through to `judge`/undefined without
+  // this branch, and `usage forensics` could not separate its cost from
+  // every other unlabeled call.
+  if (s.startsWith("you are the leader of a product-engineering debate panel")) return "item-debate-ruling";
   if (s.includes("leader") && s.includes("council")) return "leader";
   if (s.includes("judge")) return "judge";
   return undefined;
 }
 
 /**
- * Wraps a CouncilLLM with per-product reserve/commit semantics so every model
- * call is metered against BOTH the monthly and per-product ledgers (cost-scoper).
+ * Wraps a CouncilLLM so every model call's spend is METERED against the monthly
+ * and per-product ledgers (cost-scoper). It never refuses a call: `/ideal` has no
+ * spend cap (user decision). It used to reserve against `--max-cost` and the
+ * monthly cap first, and throw `Cost cap breached` on either breach.
  */
-function createProductLlm(base: CouncilLLM, runId: string, capUsd: number): CouncilLLM {
+export function createProductLlm(base: CouncilLLM, runId: string): CouncilLLM {
   return {
-    async generate(modelId, system, prompt, maxTokens) {
+    // `onDiagnostics` (7th param) is forwarded so the council candidate-failure
+    // forensics survive this wrapper. `signal` (6th param) is now forwarded too
+    // (D3) — this wrapper used to hardcode `undefined` regardless of what a
+    // caller passed, so an in-flight `generate` call could never be cancelled;
+    // the item-debate ruling call (item-debate-runner.ts's `requestItemRuling`)
+    // is the first caller that passes an explicit per-call signal and needs
+    // Esc/its own deadline to actually reach the provider mid-call, not just
+    // gate whether the NEXT call is issued. An already-aborted signal rejects
+    // BEFORE `base.generate` is ever called (no cost recorded, no retry, no
+    // fallback — mirrors the same guard in orchestrator/retry-stream.ts). A
+    // signal that aborts mid-call rejects through `base.generate`'s own
+    // AbortError, which `classifyStreamError` (retry-classifier.ts) already
+    // classifies as non-transient — this wrapper adds no retry or fallback of
+    // its own either way.
+    async generate(modelId, system, prompt, maxTokens, _onUsage, signal, onDiagnostics) {
+      if (signal?.aborted) {
+        throw new DOMException("Aborted before first attempt", "AbortError");
+      }
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((system.length + prompt.length) / 4);
-      const estOut = maxTokens ?? 2048;
-      const tok = await reserveForProduct(
-        { provider, model: modelId, estInputTokens: estIn, estOutputTokens: estOut },
-        runId,
-        capUsd,
-      );
-      if (tok instanceof CapBreachError) {
-        throw new Error(`Cost cap breached: ${tok.message}`);
-      }
       const startedAt = Date.now();
       // Capture real usage from the underlying council LLM via the onUsage
       // side-channel (added in Session 4). When the provider returns no usage
       // we fall back to chars/4 — preserves prior behavior.
       let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
-      try {
-        const text = await base.generate(modelId, system, prompt, maxTokens, (u) => {
+      const text = await base.generate(
+        modelId,
+        system,
+        prompt,
+        maxTokens,
+        (u) => {
           captured = u;
-        });
-        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
-        const actualOut =
-          captured?.outputTokens && captured.outputTokens > 0
-            ? captured.outputTokens
-            : Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+        },
+        signal,
+        onDiagnostics,
+      );
+      const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+      const actualOut =
+        captured?.outputTokens && captured.outputTokens > 0
+          ? captured.outputTokens
+          : Math.max(1, Math.ceil(text.length / 4));
+      await recordProductSpend(
+        { provider, model: modelId, actualInputTokens: actualIn, actualOutputTokens: actualOut, estInputTokens: estIn },
+        runId,
+        {
           callsite: "sprint.generate",
           role: detectRoleFromSystem(system),
           systemChars: system.length,
           promptChars: prompt.length,
           cachedInputTokens: captured?.cachedInputTokens,
           durationMs: Date.now() - startedAt,
-        });
-        return text;
-      } catch (err) {
-        await release(tok).catch(() => undefined);
-        throw err;
-      }
+        },
+      );
+      return text;
     },
     async research(modelId, topic, conversationContext, signal) {
       const provider = detectProviderForModel(modelId);
       const estIn = Math.ceil((topic.length + conversationContext.length) / 4);
-      const estOut = 4096;
-      const tok = await reserveForProduct(
-        { provider, model: modelId, estInputTokens: estIn, estOutputTokens: estOut },
-        runId,
-        capUsd,
-      );
-      if (tok instanceof CapBreachError) {
-        throw new Error(`Cost cap breached: ${tok.message}`);
-      }
       const startedAt = Date.now();
       let captured: { inputTokens: number; outputTokens: number; cachedInputTokens: number } | undefined;
-      try {
-        const text = await base.research(modelId, topic, conversationContext, signal, undefined, undefined, (u) => {
-          captured = u;
-        });
-        const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
-        const actualOut =
-          captured?.outputTokens && captured.outputTokens > 0
-            ? captured.outputTokens
-            : Math.max(1, Math.ceil(text.length / 4));
-        await commitToProduct(tok, runId, actualIn, actualOut, undefined, {
+      const text = await base.research(modelId, topic, conversationContext, signal, undefined, undefined, (u) => {
+        captured = u;
+      });
+      const actualIn = captured?.inputTokens && captured.inputTokens > 0 ? captured.inputTokens : estIn;
+      const actualOut =
+        captured?.outputTokens && captured.outputTokens > 0
+          ? captured.outputTokens
+          : Math.max(1, Math.ceil(text.length / 4));
+      await recordProductSpend(
+        { provider, model: modelId, actualInputTokens: actualIn, actualOutputTokens: actualOut, estInputTokens: estIn },
+        runId,
+        {
           callsite: "sprint.research",
           role: "researcher",
           systemChars: topic.length,
           promptChars: conversationContext.length,
           cachedInputTokens: captured?.cachedInputTokens,
           durationMs: Date.now() - startedAt,
-        });
-        return text;
-      } catch (err) {
-        await release(tok).catch(() => undefined);
-        throw err;
-      }
+        },
+      );
+      return text;
     },
     // debate() delegates to base — cost metering will be added in Phase 15 Plan 02 when fully implemented.
     async debate(modelId, system, prompt, signal) {

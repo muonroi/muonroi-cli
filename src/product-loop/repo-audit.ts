@@ -1,6 +1,8 @@
 import { execSync } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { BUILD_OUTPUT_DIRS, isCodeFile, isTestDirName, isTestFile } from "./language-registry.js";
+import { formatLayoutConvention, type LayoutConvention, scanLayoutConvention } from "./layout-convention.js";
 
 /**
  * Deeper repo audit beyond {@link discoverProject}. The latter only detects
@@ -24,6 +26,12 @@ export interface RepoAudit {
   testFramework?: string;
   hasCoverageConfig: boolean;
   hasDocs: boolean;
+  /**
+   * The repo's own observed layout convention — where projects and tests live.
+   * Undefined when the repo shows no dominant layout; absence of a convention
+   * is never reported as one (F4b).
+   */
+  layoutConvention?: LayoutConvention;
   readmeExcerpt?: string;
   readmeSections?: string[];
   packageMeta?: { name?: string; version?: string; description?: string };
@@ -31,7 +39,6 @@ export interface RepoAudit {
 }
 
 const SRC_GLOB_DIRS = ["src", "lib", "app", "packages"];
-const TEST_DIR_HINTS = ["tests", "test", "__tests__", "spec"];
 const DOC_DIR_HINTS = ["docs", "doc", "documentation"];
 const COVERAGE_HINTS = [
   "vitest.config.ts",
@@ -41,23 +48,6 @@ const COVERAGE_HINTS = [
   ".coveragerc",
   "pyproject.toml",
 ];
-
-const CODE_EXTENSIONS = new Set([
-  ".ts",
-  ".tsx",
-  ".js",
-  ".jsx",
-  ".mjs",
-  ".cjs",
-  ".py",
-  ".go",
-  ".rs",
-  ".java",
-  ".kt",
-  ".rb",
-  ".php",
-]);
-const TEST_FILE_RE = /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py)$/i;
 
 export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
   const audit: RepoAudit = {
@@ -89,12 +79,18 @@ export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
     audit.srcFileCount += counts.code;
     audit.testFileCount += counts.tests;
   }
-  for (const dir of TEST_DIR_HINTS) {
-    if (!lowerDirs.has(dir)) continue;
-    const counts = await countCodeFiles(path.join(cwd, dir), 0, 5000);
-    // Anything under tests/ counts as a test file regardless of naming.
+  // Top-level test roots. Matched by convention rather than an exact-name list
+  // so `Foo.Tests/` counts alongside `tests/`; `inTestTree` makes everything
+  // beneath them a test file regardless of naming.
+  for (const dir of audit.topLevelDirs) {
+    if (!isTestDirName(dir)) continue;
+    const counts = await countCodeFiles(path.join(cwd, dir), 0, 5000, true);
     audit.testFileCount += counts.code + counts.tests;
   }
+
+  // F4b — where does new code belong? Report-only; a scan failure or an
+  // inconclusive layout simply leaves the field undefined.
+  audit.layoutConvention = (await scanLayoutConvention(cwd)) ?? undefined;
 
   // Detect test framework and coverage config
   for (const hint of COVERAGE_HINTS) {
@@ -162,27 +158,45 @@ export async function auditRepo(cwd: string | undefined): Promise<RepoAudit> {
   return audit;
 }
 
-async function countCodeFiles(dir: string, depth: number, budget: number): Promise<{ code: number; tests: number }> {
+/**
+ * Walk a directory counting source vs test files.
+ *
+ * `inTestTree` propagates downward: once we cross into a test root every file
+ * below it is a test whatever it is named. That is the only way to see .NET
+ * layouts, which keep `src/tests/Foo.Tests/TestFixtureBuilder.cs` — a real test
+ * file that no filename convention would classify.
+ */
+async function countCodeFiles(
+  dir: string,
+  depth: number,
+  budget: number,
+  inTestTree = false,
+): Promise<{ code: number; tests: number }> {
   if (depth > 6 || budget <= 0) return { code: 0, tests: 0 };
   let code = 0;
   let tests = 0;
   let entries: import("node:fs").Dirent[];
   try {
     entries = await fs.readdir(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // Unreadable subtree (permissions, race with a delete) contributes nothing;
+    // the audit is best-effort and must not fail the whole loop over one dir.
+    console.error(
+      `[repo-audit] countCodeFiles: cannot read "${dir}": ${(err as Error)?.message}`,
+      (err as Error)?.stack?.split("\n").slice(0, 3),
+    );
     return { code: 0, tests: 0 };
   }
   for (const e of entries) {
-    if (e.name.startsWith(".") || e.name === "node_modules" || e.name === "dist" || e.name === "build") continue;
+    if (e.name.startsWith(".") || BUILD_OUTPUT_DIRS.has(e.name)) continue;
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
-      const sub = await countCodeFiles(full, depth + 1, budget - code - tests);
+      const sub = await countCodeFiles(full, depth + 1, budget - code - tests, inTestTree || isTestDirName(e.name));
       code += sub.code;
       tests += sub.tests;
     } else if (e.isFile()) {
-      const ext = path.extname(e.name).toLowerCase();
-      if (!CODE_EXTENSIONS.has(ext)) continue;
-      if (TEST_FILE_RE.test(e.name)) tests++;
+      if (!isCodeFile(e.name)) continue;
+      if (inTestTree || isTestFile(e.name)) tests++;
       else code++;
     }
     if (code + tests >= budget) break;
@@ -283,6 +297,10 @@ export function auditAsContextBlock(a: RepoAudit): string {
   }
   lines.push(`Top-level dirs: ${a.topLevelDirs.join(", ")}`);
   lines.push(`Source files: ${a.srcFileCount}, test files: ${a.testFileCount}`);
+  if (a.layoutConvention) {
+    lines.push("");
+    lines.push(formatLayoutConvention(a.layoutConvention));
+  }
   if (a.testFramework)
     lines.push(`Test runner: ${a.testFramework}${a.hasCoverageConfig ? " (coverage configured)" : ""}`);
   if (a.readmeExcerpt) {

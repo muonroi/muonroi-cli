@@ -83,78 +83,90 @@ export async function exportTranscripts(opts: ExportOptions = {}): Promise<Expor
   const minMessages = opts.minMessages ?? 4;
   const dryRun = opts.dryRun ?? false;
 
+  // We BORROW this handle; we never close it.
+  //
+  // `getDatabase()` hands back a MEMOIZED, process-wide connection (the
+  // module-level `db` slot at src/storage/db.ts:21). The `finally { db.close() }`
+  // that used to sit at the end of this function closed that connection but left
+  // the memo populated, so every later `getDatabase()` in the same process
+  // returned a dead handle: `RangeError: Cannot use a closed database` (thrown
+  // from db.ts:110 on the Bun adapter). A second `exportTranscripts()` call in
+  // one process could not work at all, and any module holding its own cached
+  // reference was bricked too. This was the ONLY production site in `src/` that
+  // closed the shared DB — every other module borrows it and lets the process own
+  // its lifetime. `closeDatabase()` (db.ts:84) is the sanctioned reset and
+  // belongs to whoever opened the connection (the process, or a test's
+  // beforeEach/afterEach). A caller-supplied `dbOverride` likewise belongs to
+  // that caller.
   const db = opts.dbOverride ?? getDatabase();
-  try {
-    const cutoff = Date.now() - maxAgeDays * 86400_000;
-    const cutoffIso = new Date(cutoff).toISOString();
 
-    // Pull sessions touched in window. cwd_last is the cwd at session-end —
-    // critical for EE scope detection so framework/lang resolve correctly.
-    const sessions = db
+  const cutoff = Date.now() - maxAgeDays * 86400_000;
+  const cutoffIso = new Date(cutoff).toISOString();
+
+  // Pull sessions touched in window. cwd_last is the cwd at session-end —
+  // critical for EE scope detection so framework/lang resolve correctly.
+  const sessions = db
+    .prepare(
+      `SELECT id, updated_at, cwd_last FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
+    )
+    .all() as unknown as Array<{ id: string; updated_at: string; cwd_last: string | null }>;
+
+  const out: ExportResult = {
+    totalSessions: sessions.length,
+    written: 0,
+    skippedEmpty: 0,
+    skippedTooSmall: 0,
+    outputRoot: getEmitRoot(),
+  };
+
+  for (const s of sessions) {
+    const rows = db
       .prepare(
-        `SELECT id, updated_at, cwd_last FROM sessions WHERE updated_at >= '${cutoffIso}' ORDER BY updated_at DESC`,
+        `SELECT session_id, seq, role, message_json FROM messages WHERE session_id = '${s.id.replace(/'/g, "''")}' ORDER BY seq ASC`,
       )
-      .all() as unknown as Array<{ id: string; updated_at: string; cwd_last: string | null }>;
+      .all() as unknown as Row[];
 
-    const out: ExportResult = {
-      totalSessions: sessions.length,
-      written: 0,
-      skippedEmpty: 0,
-      skippedTooSmall: 0,
-      outputRoot: getEmitRoot(),
-    };
-
-    for (const s of sessions) {
-      const rows = db
-        .prepare(
-          `SELECT session_id, seq, role, message_json FROM messages WHERE session_id = '${s.id.replace(/'/g, "''")}' ORDER BY seq ASC`,
-        )
-        .all() as unknown as Row[];
-
-      if (rows.length === 0) {
-        out.skippedEmpty++;
-        continue;
-      }
-      if (rows.length < minMessages) {
-        out.skippedTooSmall++;
-        continue;
-      }
-
-      const messages = rows
-        .map((r) => {
-          try {
-            return JSON.parse(r.message_json) as { role: string; content: unknown };
-          } catch {
-            return null;
-          }
-        })
-        .filter((m): m is { role: string; content: unknown } => m !== null);
-
-      if (messages.length === 0) {
-        out.skippedEmpty++;
-        continue;
-      }
-
-      if (dryRun) {
-        console.log(`[dry-run] would emit ${s.id} (${messages.length} msgs)`);
-        out.written++;
-        continue;
-      }
-
-      // Re-use runtime emitter so format matches stop-extractor parser exactly.
-      // Cast to ModelMessage[]: the on-disk shape and ModelMessage are wire-compatible
-      // — emitTranscriptToDisk only inspects role + content blocks.
-      const target = emitTranscriptToDisk(
-        messages as unknown as Parameters<typeof emitTranscriptToDisk>[0],
-        s.id,
-        "cli-exit",
-        s.cwd_last ?? null,
-      );
-      if (target) out.written++;
+    if (rows.length === 0) {
+      out.skippedEmpty++;
+      continue;
+    }
+    if (rows.length < minMessages) {
+      out.skippedTooSmall++;
+      continue;
     }
 
-    return out;
-  } finally {
-    db.close();
+    const messages = rows
+      .map((r) => {
+        try {
+          return JSON.parse(r.message_json) as { role: string; content: unknown };
+        } catch {
+          return null;
+        }
+      })
+      .filter((m): m is { role: string; content: unknown } => m !== null);
+
+    if (messages.length === 0) {
+      out.skippedEmpty++;
+      continue;
+    }
+
+    if (dryRun) {
+      console.log(`[dry-run] would emit ${s.id} (${messages.length} msgs)`);
+      out.written++;
+      continue;
+    }
+
+    // Re-use runtime emitter so format matches stop-extractor parser exactly.
+    // Cast to ModelMessage[]: the on-disk shape and ModelMessage are wire-compatible
+    // — emitTranscriptToDisk only inspects role + content blocks.
+    const target = emitTranscriptToDisk(
+      messages as unknown as Parameters<typeof emitTranscriptToDisk>[0],
+      s.id,
+      "cli-exit",
+      s.cwd_last ?? null,
+    );
+    if (target) out.written++;
   }
+
+  return out;
 }

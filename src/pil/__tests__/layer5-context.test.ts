@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PipelineContext } from "../types";
 
 vi.mock("../../ee/bridge.js", () => ({
@@ -23,6 +23,7 @@ vi.mock("node:fs", async (importOriginal) => {
   };
 });
 
+import { promises as fsPromises } from "node:fs";
 import { getWhoAmIProfile } from "../../ee/bridge.js";
 import { layer5Context, staleThresholdMsForSessionLength } from "../layer5-context";
 
@@ -196,6 +197,46 @@ describe("layer5Context", () => {
     const layer = result.layers.find((l) => l.name === "context-enrichment");
     expect(layer).toBeDefined();
     expect(layer!.delta).toContain("files=skipped-external");
+  });
+
+  describe("fetchRecentFiles — bounded fs.readdir (no unbounded hang)", () => {
+    const ORIGINAL_ENV = process.env.MUONROI_PIL_RECENT_FILES_TIMEOUT_MS;
+
+    afterEach(() => {
+      if (ORIGINAL_ENV === undefined) delete process.env.MUONROI_PIL_RECENT_FILES_TIMEOUT_MS;
+      else process.env.MUONROI_PIL_RECENT_FILES_TIMEOUT_MS = ORIGINAL_ENV;
+      vi.mocked(fsPromises.readdir).mockReset();
+      vi.mocked(fsPromises.readdir).mockRejectedValue(new Error("not found"));
+    });
+
+    it("bounds a readdir that never settles and fails open (no throw, no hang)", async () => {
+      process.env.MUONROI_PIL_RECENT_FILES_TIMEOUT_MS = "50";
+      // `{recursive:true}` fs.readdir has no AbortSignal of its own — simulate
+      // the unbounded-hang case this fix guards against (session 1e9db4d68da0
+      // class of gap: an await with no bound anywhere in its chain).
+      vi.mocked(fsPromises.readdir).mockImplementationOnce(() => new Promise(() => {}));
+      const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+      const start = Date.now();
+      const result = await layer5Context(makeCtx({ resumeDigest: "context so the layer applies" }));
+      const elapsedMs = Date.now() - start;
+
+      // Bounded: must resolve well within the vitest default timeout, close
+      // to the 50ms budget — NOT hang for the test's full timeout.
+      expect(elapsedMs).toBeLessThan(2000);
+      // Fail-open: the rest of layer5Context's output (digest) still applies;
+      // recent-files just contributes nothing for this turn.
+      expect(result.enriched).toContain("[flow-context:");
+      expect(result.enriched).not.toContain("[recent-files:");
+
+      // No Silent Catch: the timeout is logged with module + operation + message.
+      expect(errSpy).toHaveBeenCalled();
+      const loggedTimeout = errSpy.mock.calls.some(
+        (args) => typeof args[0] === "string" && args[0].includes("[pil/layer5]") && args[0].includes("exceeded"),
+      );
+      expect(loggedTimeout).toBe(true);
+      errSpy.mockRestore();
+    });
   });
 });
 

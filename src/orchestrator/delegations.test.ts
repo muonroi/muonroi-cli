@@ -27,6 +27,10 @@ async function importDelegationsModule(options: { home?: string; spawnMock?: Ret
   vi.doUnmock("child_process");
 
   if (options.home) {
+    // delegations.ts resolves its root as `MUONROI_CLI_HOME ?? homedir()/.muonroi-cli`
+    // and vitest-setup.ts pins that var suite-wide, so the homedir mock alone no
+    // longer redirects it. Restored in afterEach.
+    process.env.MUONROI_CLI_HOME = path.join(options.home, ".muonroi-cli");
     const osActual = await vi.importActual<typeof import("os")>("os");
     vi.doMock("os", () => ({
       ...osActual,
@@ -46,7 +50,11 @@ async function importDelegationsModule(options: { home?: string; spawnMock?: Ret
   return import("./delegations");
 }
 
+const originalCliHome = process.env.MUONROI_CLI_HOME;
+
 afterEach(() => {
+  if (originalCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+  else process.env.MUONROI_CLI_HOME = originalCliHome;
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
@@ -57,15 +65,50 @@ afterEach(() => {
 });
 
 describe("DelegationManager sandbox propagation", () => {
+  it("stores a helper's job under main's project even when helper execution cwd differs", async () => {
+    const home = makeTempDir("muonroi-delegation-home-");
+    const mainCwd = makeTempDir("muonroi-delegation-main-");
+    const childCwd = makeTempDir("muonroi-delegation-child-");
+    const spawnMock = vi.fn(() => ({ pid: 2468, unref: vi.fn(), once: vi.fn() }));
+    const mod = await importDelegationsModule({ home, spawnMock });
+    const helper = new mod.DelegationManager(
+      () => childCwd,
+      () => "main-owner",
+      () => mainCwd,
+    );
+    const main = new mod.DelegationManager(
+      () => mainCwd,
+      () => "main-owner",
+    );
+    await helper.start(
+      { agent: "explore", description: "Inspect", prompt: "Inspect" },
+      { model: "test-model", sandboxMode: "off", maxToolRounds: 2, maxTokens: 100 },
+    );
+    const record = readStoredDelegationRecord(home) as any;
+    const jobPath = record.outputPath.replace(/\.md$/, ".json");
+    await mod.completeDelegation(jobPath, "Helper output");
+    expect(await main.consumeNotifications()).toHaveLength(1);
+    expect(record.cwd).toBe(childCwd);
+    expect(spawnMock).toHaveBeenCalledWith(
+      process.execPath,
+      expect.anything(),
+      expect.objectContaining({ cwd: childCwd }),
+    );
+  });
+
   it("persists sandbox mode in background delegation records", async () => {
     const home = makeTempDir("muonroi-delegation-home-");
     const cwd = makeTempDir("muonroi-delegation-cwd-");
     const spawnMock = vi.fn(() => ({
       pid: 2468,
       unref: vi.fn(),
+      once: vi.fn(),
     }));
     const mod = await importDelegationsModule({ home, spawnMock });
-    const manager = new mod.DelegationManager(() => cwd);
+    const manager = new mod.DelegationManager(
+      () => cwd,
+      () => "main-owner",
+    );
 
     const result = await manager.start(
       {
@@ -95,6 +138,7 @@ describe("DelegationManager sandbox propagation", () => {
 
     expect(record.sandboxMode).toBe("shuru");
     expect(record.pid).toBe(2468);
+    expect((record as any).parentSessionId).toBe("main-owner");
   });
 
   it("persists sandbox settings in background delegation records", async () => {
@@ -103,6 +147,7 @@ describe("DelegationManager sandbox propagation", () => {
     const spawnMock = vi.fn(() => ({
       pid: 3579,
       unref: vi.fn(),
+      once: vi.fn(),
     }));
     const mod = await importDelegationsModule({ home, spawnMock });
     const manager = new mod.DelegationManager(() => cwd);

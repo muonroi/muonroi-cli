@@ -30,6 +30,9 @@ export const EVENTS_RESOURCE_URI = "tui://events";
 const TERMINAL_KINDS = new Set([
   "council-step", // state: done | error
   "sprint-halt",
+  // The /ideal run itself ended. Symmetric with sprint-halt: without it the
+  // bridge pushed on failure and stayed silent on success. One per run.
+  "run-finished",
   "askcard-open",
 ]);
 
@@ -38,12 +41,19 @@ const LOG_KINDS = new Set([
   "council-step",
   "council-speaker",
   "sprint-halt",
+  "run-finished",
   "sprint-stage",
   "askcard-open",
   "askcard-answered",
   "askcard-cancel",
+  "askcard-withdrawn",
   "toast",
   "disconnect",
+  // A silent provider switch is exactly the kind of thing a host log must show.
+  "model-fallback",
+  // Likewise a deliberate pacing hold: to a host watching only the log, a paced
+  // call and a hung one are the same silence unless the wait is stated.
+  "rate-limit-wait",
 ]);
 
 export type BridgeCapabilities = {

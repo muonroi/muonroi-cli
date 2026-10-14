@@ -42,7 +42,7 @@
 // Cost-leak code paths preserved here:
 //   - F1 (top-level cumulative cap)         — wrapToolSetWithCap (top-level)
 //   - F1 (openai.promptCacheKey)            — buildTurnProviderOptions
-//   - G1 (OAuth `maxOutputTokens` drop)     — shouldDropParam(runtime, ...)
+//   - G1 (OAuth `maxOutputTokens` drop)     — resolveMaxOutputTokensParam → shouldDropParam
 //   - B4 (top-level prepareStep compaction) — compactSubAgentMessages
 //   - C3 (cross-turn dedup wrap)            — wrapToolSetWithDedup
 //   - A4 (tool_call write-ahead)            — persistToolCallWriteAhead
@@ -51,6 +51,7 @@
 //   - reasoning-strip (provider quirk)       — turnCaps.sanitizeHistory
 
 import { type ModelMessage, type StopCondition, stepCountIs, streamText, type ToolSet } from "ai";
+import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { getEffectiveCouncilRoleCount } from "../council/leader.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
@@ -76,7 +77,7 @@ import type {
 import { acquireMcpTools } from "../mcp/client-pool";
 import { publishNeedsKey } from "../mcp/needs-key-bus";
 import { dropRedundantFsMcpTools, filterMcpServersByMessage } from "../mcp/smart-filter";
-import { getModelInfo, isReasoningModel } from "../models/registry.js";
+import { getModelInfo } from "../models/registry.js";
 import {
   cheapModelShellLine,
   injectCheapModelPlaybook,
@@ -107,14 +108,23 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { InputCeilingExceededError } from "../providers/model-gate";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
+import { noteProviderRateLimited } from "../providers/rate-ledger.js";
+import {
+  beginProviderBackoff,
+  endProviderBackoff,
+  isRateLimitError,
+  isRateLimitRetryExhausted,
+  rateLimitBackoffMs,
+  retryAfterMsFromError,
+} from "../providers/rate-limit-backoff.js";
 import {
   buildTurnProviderOptions,
   detectProviderForModel,
   type ResolvedModelRuntime,
   requireRuntimeProvider,
+  resolveMaxOutputTokensParam,
   type resolveModelRuntime,
   resolveTemperatureParam,
-  shouldDropParam,
 } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import type { ProviderId } from "../providers/types.js";
@@ -136,18 +146,20 @@ import {
   type SessionStore,
 } from "../storage/index.js";
 import { persistSessionExperience } from "../storage/session-experience-store.js";
-import { createBuiltinTools } from "../tools/registry.js";
+import { createBuiltinTools, setLiveToolSet } from "../tools/registry.js";
 import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import { visionToolsNeeded } from "../tools/vision-gate.js";
 import type { SessionInfo, StreamChunk, SubagentStatus, ToolCall } from "../types/index";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { setLoopBreadcrumb } from "../utils/event-loop-monitor.js";
+import { abortableStream } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
 import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
 import {
-  getAutoCouncilConfidence,
+  effectiveCompactionWindowTokens,
   getAutoCouncilMinRoles,
+  getFirstTokenTimeoutMs,
   getProviderProgressTimeoutMs,
   getProviderStallRetries,
   getProviderStallTimeoutMs,
@@ -157,32 +169,42 @@ import {
   getTopLevelCompactTailBudgetChars,
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
-  isAutoCouncilClarifyEnabled,
   isAutoCouncilEnabled,
   isProviderDisabled,
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
-import { isAutoCouncilSkipReasoning } from "../utils/settings.js";
+import { isFirstTurnToolsEnabledByProject } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import type { AskUserAskInfo } from "./ask-user.js";
 import { foldDynamicTailIntoUserMessage, splitFrontAndDynamicTail } from "./cache-prefix.js";
-import { consumeProactiveCompact } from "./compact-request.js";
+import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.js";
 import { relaxCompactionSettings } from "./compaction";
+import { evaluateCompactionConsult } from "./compaction-consult.js";
+import { takeProposerStallNotice } from "./compaction-stall-notice.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
-import { resolveCouncilTopic } from "./council-topic.js";
 import type { CrossTurnDedup } from "./cross-turn-dedup.js";
 import { wrapToolSetWithDedup } from "./cross-turn-dedup.js";
 import { humanizeApiError, isAuthenticationError, isContextLimitError, summarizeApiErrorForLog } from "./error-utils";
 import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.js";
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
+import { createNoProgressGuard } from "./no-progress-guard.js";
+import {
+  appendNoticeToFinalMessages,
+  buildOutputLimitContinuationPrompt,
+  buildOutputLimitNotice,
+  decideOutputLimitAction,
+  getOutputLimitContinuationCap,
+  type OutputLimitAction,
+} from "./output-limit-continuation.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
+import { createPromptMeasurer } from "./prompt-breakdown.js";
 import {
   applyModelConstraints,
   buildMcpCapabilityBlock,
@@ -237,19 +259,21 @@ import {
   stallRepromptBackoffMs,
 } from "./stall-watchdog.js";
 import { planSteerInjection } from "./steer-inbox.js";
-import { wrapToolSetWithCap } from "./sub-agent-cap.js";
+import type { SubAgentCapOptions, SubAgentCapState } from "./sub-agent-cap.js";
+import { noteElidedForCap, wrapToolSetWithCap } from "./sub-agent-cap.js";
 import {
   applyAnthropicPromptCaching,
   applyCompactionHysteresis,
   compactSubAgentMessages,
   cumulativeMessageChars,
+  estimateCompactionPressure,
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
-import { beginToolActivity, endToolActivity } from "./tool-activity.js";
+import { beginToolActivity, endToolActivity, isToolActivityLive, withToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
-import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
+import { createToolLoopCapPredicate, resolveTurnStepLimits, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
   buildToolRepetitionAbortMessage,
   recordToolError as recordToolRepetitionError,
@@ -322,7 +346,7 @@ import {
   toToolCall,
   toToolResult,
 } from "./tool-utils";
-import { pingTurnProgress } from "./turn-progress.js";
+import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 import type { TurnRunnerDepsBase } from "./turn-runner-deps.js";
 
 /**
@@ -451,6 +475,9 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
       suppressPostDebate?: boolean;
       /** Gate A — thread the main turn's already-classified scopeKind so runCouncil skips a redundant self-classify round-trip. */
       externalTopic?: boolean;
+      skipPil?: boolean;
+      synthesisOutputContract?: string;
+      abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown>;
   processMessage(
@@ -550,16 +577,52 @@ export function spliceConveneToolResult<T extends { role: string; content?: any 
       if (part?.type === "tool-result" && part?.toolCallId === toolCallId) {
         changed = true;
         replaced = true;
-        // AI SDK v6 tool-result parts carry the value under `output` (typed) or
-        // `result` (legacy). Set both so whichever the provider serializer reads
-        // sees the synthesis, and clear any error flag.
-        return { ...part, isError: false, output: value, result: value };
+        // SDK v6 validates output as a typed value before the next model call.
+        // Keep the legacy result field for older consumers and preserve pairing.
+        return { ...part, isError: false, output: { type: "text", value }, result: value };
       }
       return part;
     });
     return changed ? ({ ...m, content: newContent } as T) : m;
   });
   return { messages: replaced ? out : messages, replaced };
+}
+
+export interface TurnToolPipelineOptions {
+  /** Cumulative-cap configuration. State is per-turn: a fresh budget each call. */
+  capOptions: SubAgentCapOptions;
+  /** Session-lifetime cross-turn output dedup, or null when disabled. */
+  dedup: CrossTurnDedup | null;
+  /** Per-path read budget, or null when disabled (the default). */
+  readBudget: ReadPathBudget | null;
+}
+
+/**
+ * The turn's tool-set pipeline, assembled in ONE place so the layering is a
+ * thing a test can execute rather than a shape re-typed at each call site.
+ *
+ * Order, innermost first:
+ *   registry tools (arg guard installed here, by `createBuiltinTools`)
+ *     → cumulative cap        (trims / dedups / exhausts tool OUTPUT)
+ *     → cross-turn dedup      (stubs repeated tool OUTPUT)
+ *     → read-path budget      (pre-empts a re-read BEFORE it runs)
+ *
+ * The guard being innermost is what F3 turned on: every outer layer answers a
+ * repeat with "you already have this result", which is a lie about a call that
+ * never ran. Each wrapper therefore consults `isGuardRejectableCall` and passes
+ * a guard-rejectable call straight through — see src/tools/arg-guard.ts. This
+ * function exists so that property is pinned against the composition the engine
+ * actually builds, not against a hand-rolled stack in a test.
+ */
+export function buildTurnToolPipeline(
+  raw: ToolSet,
+  opts: TurnToolPipelineOptions,
+): { tools: ToolSet; capState: SubAgentCapState } {
+  // Apply the cumulative cap once over the fully-assembled raw tool set.
+  const cap = wrapToolSetWithCap(raw, opts.capOptions);
+  // Phase C3: layer cross-turn dedup on top of the cap, then the C4 read budget.
+  const tools = wrapToolSetWithReadBudget(wrapToolSetWithDedup(cap.tools, opts.dedup), opts.readBudget);
+  return { tools, capState: cap.state };
 }
 
 export class SimpleMutex {
@@ -597,6 +660,8 @@ function stripWriteTools(tools: ToolSet): ToolSet {
     "usage_forensics",
     "lsp_query",
     "setup_guide",
+    "convene_council",
+    "read_pil_context",
     "selfverify_status",
     "selfverify_result",
     "selfverify_list",
@@ -613,6 +678,58 @@ function stripWriteTools(tools: ToolSet): ToolSet {
   return result as ToolSet;
 }
 
+/**
+ * Pure tool-set selection for a turn — extracted from `executeToolEngine`'s
+ * assembly so it is unit-testable without the whole tool-engine's I/O
+ * plumbing. Exported for the test.
+ *
+ * Precedence (first match wins):
+ *   1. The provider itself does not support client tools at all → none,
+ *      full stop (a hard capability ceiling — nothing below can override it).
+ *   2. `firstTurnToolsEnabled` (round-12 parity fix G2, made opt-in in
+ *      round 2): the FIRST turn of a session, when the project has
+ *      EXPLICITLY set `firstTurnTools: true` in `.muonroi-cli/settings.json`
+ *      (see `isFirstTurnToolsEnabledByProject`) → the full tool set. A
+ *      project instruction may require a tool call unconditionally at
+ *      session start (e.g. "run briefing.sh first") regardless of how
+ *      trivial the user's own first message looks; giving zero (or
+ *      read-only-only) tools on that turn left the model with an
+ *      instruction it could not follow, and it emitted raw native
+ *      tool-call markup as its entire answer trying anyway (measured live,
+ *      session 08a9c9a84990 — see FINDINGS.md G1/G2). Bounded to the FIRST
+ *      turn only, so an ordinary LATER chitchat turn still saves tokens.
+ *      Round 2: this used to trigger on merely HAVING an
+ *      AGENTS.md/CLAUDE.md (`loadCustomInstructions() !== null`) — a real
+ *      cost/latency change (more tool schemas in the first prompt) for
+ *      every project with an instructions file, most of which have no
+ *      session-start-script requirement at all. Now explicit opt-in;
+ *      default (unset) behaviour for every other project is unchanged.
+ *   3. `isChitchat` with no prior tool-turn in history → none (the
+ *      pre-existing BUG-A-guarded token-saving path).
+ *   4. `isDirectAnswer` with no prior tool-turn → read-only tools only.
+ *   5. Otherwise → the full base tool set.
+ */
+export function selectRawToolSet(opts: {
+  baseTools: ToolSet;
+  supportsClientTools: boolean;
+  firstTurnToolsEnabled: boolean;
+  isChitchat: boolean;
+  isDirectAnswer: boolean;
+  priorTurnHadTools: boolean;
+}): ToolSet {
+  if (!opts.supportsClientTools) return {};
+  if (opts.firstTurnToolsEnabled) return opts.baseTools;
+  if (opts.isChitchat && !opts.priorTurnHadTools) {
+    const controls: ToolSet = {};
+    for (const name of ["convene_council", "read_pil_context"]) {
+      if (opts.baseTools[name]) controls[name] = opts.baseTools[name];
+    }
+    return controls;
+  }
+  if (opts.isDirectAnswer && !opts.priorTurnHadTools) return stripWriteTools(opts.baseTools);
+  return opts.baseTools;
+}
+
 // Additional types
 export interface ToolEngineArgs {
   [key: string]: any;
@@ -621,6 +738,11 @@ export interface ToolEngineArgs {
 export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<StreamChunk, void, unknown> {
   let {
     deps,
+    // A1: threaded from message-processor.ts's `run()` — true only when THIS
+    // call created/owns `deps`'s AbortController. A nested call (e.g. sprint-
+    // runner Step 4b's completeness re-check) reuses the owner's controller
+    // and must never null it out here — see the batchApi branch below.
+    ownsController,
     stepRouterPhase,
     phase2Runtime,
     runtime,
@@ -666,6 +788,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
     isChitchat,
   } = args;
 
+  // Coarse pre-stream breadcrumb: everything from here to the matching
+  // `.end` right before `pingTurnProgress()` below (MCP tool acquisition,
+  // tool-set wrapping, system-prompt/providerOptions assembly, capability
+  // sanitization) runs with no per-phase timing of its own — see the
+  // `msSinceTurnStart` comment at the streamText call site. If the top-level
+  // turn watchdog fires and the last breadcrumb is this `.start` with no
+  // matching `.end`, the hang is somewhere in tool-engine's own setup rather
+  // than in message-processor.ts's earlier pre-stream phases.
+  breadcrumb("pre-stream.toolEngine.start", { sessionId: deps.session?.id });
+
   // Put all extracted code here:
   // Auto-recover budget for "cap" (tool-round ceiling) halts: compact
   // the history and keep going instead of stopping and asking the user
@@ -709,6 +841,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Bounded by the same maxStallRetries cap so a persistently-dead provider
   // still falls through to the partial-answer rescue.
   let midLoopStallRetryCount = 0;
+  // Output-limit continuation counter (turn-scoped, so a `continue
+  // streamAttempt` cannot reset it). A stream attempt that ends with
+  // finishReason "length" re-runs with a "continue from where you stopped"
+  // message at most this many times; past the cap the reply gets a visible
+  // cut-off notice instead. See output-limit-continuation.ts.
+  let outputLimitContinuations = 0;
+  const outputLimitContinuationCap = getOutputLimitContinuationCap();
 
   // F3c — per-turn LLM call cap: counts every streamText() invocation
   // (tool round-trip, stall re-prompt, stream retry) and hard-aborts
@@ -719,7 +858,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // Reactive delegation signal: reference to the top-level cap's live state so
   // this turn's cumulative tool-output load can be reported to the Agent at
   // turn end (drives next-turn sub-session escalation). See reactive-delegation.ts.
-  let _topLevelCapState: { cumulative: number } | null = null;
+  // Typed as the full cap state (not just `{cumulative}`) because the B4
+  // compactor also has to invalidate the cap's dedup ledger for results it
+  // elides — a pointer at an elided payload is the dead-pointer loop.
+  let _topLevelCapState: SubAgentCapState | null = null;
 
   // Live-queue steering: messages the user typed mid-turn are drained at a
   // prepareStep boundary and accumulated here, then re-appended (deduped) to
@@ -730,194 +872,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   const pendingSteers: ModelMessage[] = [];
   const steerEnabled = getSteerInjectionEnabled();
 
-  // Auto-council: route to multi-model debate when EITHER
-  //   (a) PIL classified taskType=plan|analyze with high confidence AND the
-  //       prompt is complex enough to justify the debate cost, OR
-  //   (b) GSD-native tier === "heavy" (wholesale / multi-step / cross-repo work).
-  // After the debate finishes, runCouncilV2 records synthesis on
-  // councilManager.lastSynthesis; we then re-enter processMessage with the synthesis
-  // as the next user turn so the main loop continues with full debate context.
-  // Skip if this is already a council continuation turn (prevent infinite recursion).
-  //
-  // Phase 5 BUG-I (session f1a2a2a547db) — the gate previously fired on
-  // taskType=analyze + conf≥0.85 alone, with no complexity check. Result:
-  // "improve test coverage cho src/X.ts" (single-file, scoreComplexity=low,
-  // score=2) sank 13 minutes into council debate, then halted on pattern-loop
-  // after sprint 1 read 6 files. The complexity gate below bypasses council
-  // for low-complexity analyze prompts — they get the hot-path direct exec
-  // and stay productive. `plan` keeps the old behaviour (architectural
-  // decisions deserve debate regardless of length).
-  const autoCouncilTypes = new Set(["plan", "analyze"]);
+  // Council entry belongs to the leader's tool call, never PIL labels.
   const configuredRoleCount = getEffectiveCouncilRoleCount();
-  // Task 8 Step 7: prefer the complexity assessor's own auto-council verdict
-  // (pilCtx.gsdAutoCouncil, set at message-processor.ts:685 when the assessor ran)
-  // over the raw heavy-tier heuristic below — the assessor already reasoned about
-  // depth + task shape, so its verdict is the more intelligent router. Fall back to
-  // the heuristic when the assessor didn't run (gsdAutoCouncil undefined).
-  const assessorAutoCouncil = (pilCtx as { gsdAutoCouncil?: boolean }).gsdAutoCouncil;
-  const heavyTier =
-    typeof assessorAutoCouncil === "boolean"
-      ? assessorAutoCouncil
-      : (pilCtx as { complexityTier?: string | null }).complexityTier === "heavy";
-  const autoCouncilConfidence = getAutoCouncilConfidence();
   const autoCouncilMinRoles = getAutoCouncilMinRoles();
-  const sessionModelIsReasoning = isReasoningModel(deps.modelId);
-  const skipReasoningSetting = isAutoCouncilSkipReasoning();
-  const _complexityFromTrace = (pilCtx as { _intentTrace?: { complexity?: "low" | "medium" | "high" } })._intentTrace
-    ?.complexity;
-  const _complexityGatePassed =
-    pilCtx.taskType === "plan" || _complexityFromTrace === undefined || _complexityFromTrace !== "low";
-  const taskTypeMatch =
-    pilCtx.taskType &&
-    autoCouncilTypes.has(pilCtx.taskType) &&
-    pilCtx.confidence >= autoCouncilConfidence &&
-    _complexityGatePassed;
-  // Skip reasoning-model skip for heavy/complex tasks — they benefit from
-  // multi-role diversity even when the session model already does extended thinking.
-  const shouldSkipForReasoning = sessionModelIsReasoning && skipReasoningSetting && !heavyTier;
-  const shouldAutoCouncil =
-    !deps.councilManager.isContinuation &&
-    isAutoCouncilEnabled() &&
-    configuredRoleCount >= autoCouncilMinRoles &&
-    !shouldSkipForReasoning &&
-    (taskTypeMatch || heavyTier);
-
-  // Always log the auto-council decision (taken or skipped) with the gate
-  // values that decided it. Lets reports answer "why did this turn cost
-  // $0.30?" and "is the confidence floor tuned wrong for my prompts?".
-  const autoCouncilSkipReason = (() => {
-    if (deps.councilManager.isContinuation) return "continuation-turn";
-    if (!isAutoCouncilEnabled()) return "feature-disabled";
-    if (configuredRoleCount < autoCouncilMinRoles)
-      return `role-count<${autoCouncilMinRoles} (have ${configuredRoleCount})`;
-    if (shouldSkipForReasoning)
-      return `reasoning-model=${deps.modelId} (internal self-debate active; skip with MUONROI_AUTOCOUNCIL_SKIP_REASONING=0)`;
-    if (!taskTypeMatch && !heavyTier) {
-      if (!pilCtx.taskType || !autoCouncilTypes.has(pilCtx.taskType))
-        return `taskType=${pilCtx.taskType ?? "null"} not in plan|analyze`;
-      if (pilCtx.confidence < autoCouncilConfidence)
-        return `confidence<${autoCouncilConfidence} (got ${pilCtx.confidence.toFixed(2)})`;
-      if (!_complexityGatePassed)
-        return `complexity=low + taskType=${pilCtx.taskType} (analyze needs medium+; plan bypasses gate)`;
-      return "no-trigger";
-    }
-    return "taken";
-  })();
+  const councilConfigured = isAutoCouncilEnabled() && configuredRoleCount >= autoCouncilMinRoles;
   appendDecisionLog({
     ts: Date.now(),
     sessionId: deps.session?.id ?? null,
     kind: "auto-council",
-    taken: shouldAutoCouncil,
-    reason: autoCouncilSkipReason,
-    meta: {
-      taskType: pilCtx.taskType ?? null,
-      confidence: pilCtx.confidence,
-      complexityTier: (pilCtx as { complexityTier?: string | null }).complexityTier ?? null,
-      complexityScore: _complexityFromTrace ?? null,
-      complexityGatePassed: _complexityGatePassed,
-      configuredRoleCount,
-      autoCouncilConfidence,
-      autoCouncilMinRoles,
-      heavyTier,
-      sessionModelIsReasoning,
-      skipReasoningSetting,
-      isContinuation: deps.councilManager.isContinuation,
-    },
-  }).catch(() => undefined);
-
-  if (shouldAutoCouncil) {
-    const reason = heavyTier
-      ? `complexity=heavy${pilCtx.taskType ? ` task=${pilCtx.taskType}` : ""}`
-      : `${pilCtx.taskType} task detected with ${(pilCtx.confidence * 100).toFixed(0)}% confidence`;
-    yield { type: "content", content: `\n[Auto-council triggered: ${reason}]\n` };
-    // Reset the three relay fields BEFORE draining, mirroring the runDebate
-    // builtin (~:1077). A generator that throws before the post-debate block
-    // runs — or an analysis run that never reaches it at all — would otherwise
-    // leave the PREVIOUS council's synthesis / action / intent kind in place,
-    // and the continuation below would act on them as if they belonged to this
-    // debate. The reads at :851-858 clear them again after use; this closes the
-    // window before the run, which only runDebate was doing.
-    deps.councilManager.setLastSynthesis(null);
-    deps.councilManager.setLastPostDebateAction(null);
-    deps.councilManager.setLastIntentKind(null);
-    // Pre-debate interview: unless disabled, run the model-designed clarification
-    // askcards BEFORE the debate so a broadly-scoped "debate mode" request is
-    // chốt-ed first (each card's options carry a recommended default + per-option
-    // why — see runClarification/buildClarifyOptions). The clarifier is ROI-gated
-    // and yields 0 cards on already-detailed topics, so this stays quiet when the
-    // prompt is already specific. Skip only when the user turned it off. The
-    // clarifier reuses PIL gray-areas as seed questions (no hardcoded questions),
-    // and its models come from pickCouncilTaskModel (no hardcoded model/provider).
-    // A continuation utterance names no subject — pinning it verbatim gives every
-    // debate round a contentless topic ("Topic for discussion: tiếp tục nhé",
-    // session 3f998bfef7db). Resolve to the work actually in flight.
-    yield* deps.runCouncilV2(resolveCouncilTopic(userMessage, deps.messages as Array<{ role?: string }>), {
-      skipClarification: !isAutoCouncilClarifyEnabled(),
-      observer,
-      userModelMessage,
-      // Deliberately NOT convenePath. This council was convened by the CLI —
-      // the user never asked for it and no model called it — so there is no
-      // agent to hand the post-debate decision to. Suppressing the card here
-      // (a72731e6) did not delegate the choice, it hardcoded a different one:
-      // the synthesis was fed straight into an implementing turn and work began
-      // without the user ever being asked (user report 2026-07-27, session
-      // 3f998bfef7db seq 21-22). The model-callable paths (convene_council and
-      // the runDebate tool) keep convenePath — there the synthesis really IS a
-      // tool result the model reasons about.
-      // Gate A — thread the main turn's already-classified scope so runCouncil
-      // skips a redundant self-classify round-trip inside its own runPipeline.
-      externalTopic: pilCtx.scopeKind === "external",
-    });
-    const synthesis = deps.councilManager.lastSynthesis;
-    const chosenAction = deps.councilManager.lastPostDebateAction;
-    // This auto-council dispatch is deliberately NOT convenePath (see the
-    // comment above), so the launch card DOES fire and lock spec.intentKind —
-    // relay it the same way chosenAction is relayed, so postDebateContinuation
-    // resolves the run's authoritative kind instead of falling back to the
-    // post-hoc synthesis regex.
-    const lockedIntentKind = deps.councilManager.lastIntentKind;
-    deps.councilManager.setLastSynthesis(null);
-    deps.councilManager.setLastPostDebateAction(null);
-    deps.councilManager.setLastIntentKind(null);
-    // Honour the user's post-debate choice. `postDebateContinuation` returns
-    // null when no action was picked (card dismissed) and for an
-    // analysis/evaluation/decision debate whose deliverable IS the conclusion —
-    // so nothing runs unless the user asked for it.
-    //
-    // C1: an IMPLEMENT pick never reaches here as "implement". runCouncil owns
-    // that path (plan → review → post-plan card → gated per-phase loop) and
-    // relays the TERMINAL outcome instead — `execute_plan` (the phases already
-    // ran, gated) or `save_exit` (nothing ran). Both return null below, so this
-    // block can no longer start a second, ungated implementation turn on the raw
-    // synthesis after the phase loop already finished. Only `continue_session`
-    // still re-enters, and only for an implementation-shaped debate (/ideal).
-    // Shared with the /council slash path (orchestrator.runCouncilV2).
-    const { postDebateContinuation } = await import("../council/index.js");
-    const continuationPrompt = synthesis
-      ? postDebateContinuation(chosenAction ?? undefined, synthesis, lockedIntentKind ?? undefined)
-      : null;
-    if (continuationPrompt) {
-      // Collapse the live debate block BEFORE the continuation streams. It is
-      // rendered below the transcript and is otherwise only torn down at a turn
-      // boundary — which this continuation does not cross, so everything it
-      // produces would render above a still-mounted council block and look
-      // swallowed until the turn ended.
-      yield { type: "council_collapse" };
-      yield { type: "content", content: "\n[Auto-continuing with council recommendations...]\n" };
-      deps.councilManager.setContinuation(true);
-      try {
-        yield* deps.processMessage(continuationPrompt, observer);
-      } finally {
-        deps.councilManager.setContinuation(false);
-      }
-    }
-    return;
-  }
-
-  // Skipping auto-council is the normal, expected path for a reasoning model —
-  // not an event the user needs narrated on every turn. The decision (and the
-  // gate values behind it) is still recorded via autoCouncilSkipReason above,
-  // so forensics keep the full story without the transcript noise.
+    taken: false,
+    reason: "leader-model-decides",
+    meta: { councilConfigured, configuredRoleCount, autoCouncilMinRoles },
+  }).catch((err) => {
+    logger.error("orchestrator", "Council entry policy logging failed", { error: String(err) });
+  });
 
   if (deps.batchApi) {
     try {
@@ -933,7 +901,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         signal,
       });
     } finally {
-      if (deps.getAbortController()?.signal === signal) {
+      // A1: only the call that OWNS the controller may clear it — mirrors the
+      // guard in message-processor.ts's `run()` finally. Without this, a
+      // nested processMessage call on the batchApi path (e.g. sprint-runner
+      // Step 4b) nulled the owner's controller here, before control ever
+      // returned to run()'s own (already ownsController-guarded) finally.
+      if (ownsController && deps.getAbortController()?.signal === signal) {
         deps.setAbortController(null);
       }
     }
@@ -958,6 +931,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // request got zero bytes while every prior step completed) from a stall
       // that interrupted text mid-generation. See shouldContinueAfterMidLoopStall.
       let chunksThisStep = 0;
+      let completedStepMessages: ModelMessage[] = [];
       // Decide whether a fired stall watchdog should re-prompt (re-issue the
       // same request) instead of falling through to rescue/error. Returns the
       // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
@@ -1024,8 +998,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let encryptedReasoningHidden = false;
       let streamOk = false;
       let closeMcp: (() => Promise<void>) | undefined;
+      let disposeProviderWatchdog: (() => void) | undefined;
       let stepNumber = -1;
       const activeToolCalls: ToolCall[] = [];
+      const ownedToolActivities = new Set<number>();
+      let stallErrorMessage = STALL_ERROR_MESSAGE;
+      let toolActivityExpired = false;
       // Capped digest of tool outputs gathered this attempt — fuels the
       // best-effort answer rescue if the stream stalls mid-turn (see
       // stall-rescue.ts). Reset per attempt; only the most recent results win.
@@ -1043,16 +1021,27 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           | undefined;
         const isSubSession = !!row?.parent_session_id;
 
-        let contextWindow = modelInfo?.contextWindow || 0;
-        if (isSubSession && contextWindow > 0) {
-          contextWindow = Math.min(45000, contextWindow);
-        }
+        // A sub-session compacts against a 45K-token window regardless of the real
+        // one — a budget, not a window guard. Inside `/ideal` the real window is
+        // used (see effectiveCompactionWindowTokens); normal chat is unchanged.
+        const contextWindow = effectiveCompactionWindowTokens(modelInfo?.contextWindow || 0, isSubSession);
 
         const settings = attemptedOverflowRecovery
           ? relaxCompactionSettings(deps.getCompactionSettings(contextWindow))
           : deps.getCompactionSettings(contextWindow);
         if (contextWindow) {
           await deps.compactForContext(provider, system, contextWindow, signal, settings, attemptedOverflowRecovery);
+          // Round 4 (G8 HIGH): `compactForContext`'s proposer call is bounded
+          // and pings the turn watchdog now (compaction.ts), but a genuine
+          // stall/timeout still falls back "gracefully" (no compaction this
+          // turn) with no user-visible signal on its own — it's a plain
+          // `async function`, not a generator, so it cannot yield a toast
+          // itself. Surface it here instead of leaving the user to wonder
+          // why the turn paused for a while with nothing on screen.
+          const stallNotice = takeProposerStallNotice();
+          if (stallNotice) {
+            yield { type: "toast", toastLevel: "warn", content: stallNotice };
+          }
         }
 
         // Vision-tool gate: for vision-proxy (text-only) models the registry
@@ -1087,16 +1076,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Register convene_council only when the council is actually usable
           // for this session (enough configured roles) — else the model could
           // call a council that can't convene.
-          councilConfigured: configuredRoleCount >= autoCouncilMinRoles,
+          councilConfigured,
+          readPilContext: args.pilSupplement ? () => args.pilSupplement.read() : undefined,
           askUser: deps.askUser,
           enterIdeal: deps.enterIdeal,
-          runDebate: async (topic: string) => {
+          runDebate: async (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => {
+            abortSignal?.throwIfAborted();
             // Reset before draining so a generator that throws BEFORE setting
             // synthesis (orchestrator.setLastSynthesis) cannot return a STALE
             // synthesis from a prior council run.
             deps.councilManager.setLastSynthesis(null);
             const gen = deps.runCouncilV2(topic, {
+              abortSignal: combineAbortSignals(signal, abortSignal),
               skipClarification: true,
+              skipPil: true,
+              synthesisOutputContract,
               userModelMessage: { role: "user", content: `/council ${topic}` },
               // Model-callable debate: no human is at the composer mid-tool-call
               // (suppressPreDebateCards) and the synthesis is returned to the
@@ -1112,11 +1106,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // the log instead of a silent "".
             let lastContentHint = "";
             for await (const chunk of gen) {
+              abortSignal?.throwIfAborted();
               const text = (chunk as { type?: string; content?: string })?.content;
               if ((chunk as { type?: string })?.type === "content" && typeof text === "string" && text.trim()) {
                 lastContentHint = text.trim().slice(-200);
               }
             }
+            abortSignal?.throwIfAborted();
             const synthesis = deps.councilManager.lastSynthesis ?? "";
             if (!synthesis.trim()) {
               // No-Silent-Catch: the debate produced no synthesis. plan-council
@@ -1156,13 +1152,44 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Strip write tools (bash, edit_file, write_file) AND skip MCP;
         // only readonly tools remain (read_file, grep, ee_query, etc.).
         const isDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer === true;
-        let rawToolSet: ToolSet = !turnCaps.supportsClientTools(runtime.modelInfo)
-          ? {}
-          : isChitchat && !_priorTurnHadTools
-            ? {}
-            : isDirectAnswer && !_priorTurnHadTools
-              ? stripWriteTools(baseToolsRaw)
-              : baseToolsRaw;
+        // Parity fix (G2): a project's own AGENTS.md/CLAUDE.md may require a
+        // tool call unconditionally at session start (e.g. FRAMEWORK.md's
+        // "ON SESSION START: run bash shipd-verify/briefing.sh") regardless
+        // of how trivial the user's own first message looks ("xin chào"
+        // classifies as chitchat/DIRECT_ANSWER every time). Measured live
+        // (session 08a9c9a84990): the chitchat branch below gave the turn
+        // ZERO tools, the model tried to honor the project instruction
+        // anyway, and — having no tool schema to call — emitted raw native
+        // tool-call markup as its entire answer (caught, but not usefully
+        // recovered, by tool-markup-guard.ts's leak detector). The existing
+        // BUG-A guard above already carves an exception into this same
+        // ternary for "prior turns had tools"; this is the analogous
+        // exception for "first turn, and the project might need one; give
+        // it the full tool set rather than guessing which subset". Bounded
+        // to the FIRST turn only (`_userTurnCount <= 1`, mirroring the
+        // `turnIndex` computed the same way in message-processor.ts) so
+        // this never re-widens tools on an ordinary later chitchat turn —
+        // the existing token-saving intent is unaffected past turn 1.
+        //
+        // Round 2 (G2 MEDIUM scope): giving the full tool set to ANY project
+        // that merely HAS an instructions file was itself a cost/latency
+        // change for every user of this CLI, most of whom have no
+        // session-start-script requirement. Made explicit opt-in —
+        // `isFirstTurnToolsEnabledByProject()` reads the project's own
+        // `.muonroi-cli/settings.json` `firstTurnTools: true`, mirroring
+        // `isModelPinnedByProject()`'s pattern — instead of firing on the
+        // mere presence of AGENTS.md/CLAUDE.md.
+        const _userTurnCount = (deps.messages as Array<{ role?: string }>).filter((m) => m?.role === "user").length;
+        const _isFirstTurn = _userTurnCount <= 1;
+        const _firstTurnToolsEnabled = _isFirstTurn && isFirstTurnToolsEnabledByProject();
+        let rawToolSet: ToolSet = selectRawToolSet({
+          baseTools: baseToolsRaw,
+          supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
+          firstTurnToolsEnabled: _firstTurnToolsEnabled,
+          isChitchat,
+          isDirectAnswer,
+          priorTurnHadTools: _priorTurnHadTools,
+        });
         // MCP skip: chitchat / direct-answer / greeting inputs don't need 7 MCP servers'
         // worth of tool schemas (~20K input tokens). PIL Layer 1 already
         // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
@@ -1282,22 +1309,26 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           captureToolSchemas(_pilResponseTools);
         }
 
-        // Apply the top-level cumulative cap once over the fully-assembled
-        // raw tool set. State is per-turn; each turn gets a fresh budget.
-        const topLevelCap = wrapToolSetWithCap(rawToolSet, {
-          maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds, contextWindow),
-          midTierRatio: 0.5,
-          highTierRatio: 0.8,
-          label: "top-level",
+        // Publish the assembled set so `list_tools` / `describe_tool` can see the
+        // MCP tools too. They close over createBuiltinTools' local object, which
+        // is built before any MCP server connects and is REPLACED (not mutated)
+        // by the spread merges above - so without this both answered as if no
+        // mcp_* tool existed. See setLiveToolSet in src/tools/registry.ts.
+        setLiveToolSet(rawToolSet);
+        const pipeline = buildTurnToolPipeline(rawToolSet, {
+          capOptions: {
+            maxCumulativeChars: getTopLevelToolBudgetChars(deps.maxToolRounds, contextWindow),
+            midTierRatio: 0.5,
+            highTierRatio: 0.8,
+            label: "top-level",
+          },
+          dedup: deps.crossTurnDedup,
+          readBudget: deps.readBudget,
         });
         // Expose the cap state so the reactive-delegation signal can read this
         // turn's cumulative tool load at turn end (see report at success exit).
-        _topLevelCapState = topLevelCap.state;
-        // Phase C3: layer cross-turn dedup on top of the top-level cap.
-        const tools: ToolSet = wrapToolSetWithReadBudget(
-          wrapToolSetWithDedup(topLevelCap.tools, deps.crossTurnDedup),
-          deps.readBudget,
-        );
+        _topLevelCapState = pipeline.capState;
+        const tools: ToolSet = pipeline.tools;
 
         // Wrap non-read-only tools in a turn-scoped mutex to prevent race conditions during parallel execution.
         const writeMutex = new SimpleMutex();
@@ -1308,11 +1339,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           "process_list",
           "delegation_read",
           "delegation_list",
+          "delegate",
+          "ask_user",
+          "delegation_kill",
           "ee_query",
           "ee_health",
           "usage_forensics",
           "lsp_query",
           "setup_guide",
+          "convene_council",
+          "read_pil_context",
           "selfverify_status",
           "selfverify_result",
           "selfverify_list",
@@ -1358,32 +1394,36 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // `bun test` with timeout=120000 against a 120s turn-idle window)
             // trips the idle timer and a healthy turn is killed as hung.
             const activityId = beginToolActivity((input as { timeout?: number } | undefined)?.timeout);
-            try {
-              if (!guarded) return await originalExecute(input, context);
-              const gate = evaluateMutationGate(deps.bash.getCwd(), {
-                toolName: name,
-                hardGateEnabled: gsdHardGateEnabled,
-                directAnswer: gsdDirectAnswer,
-              });
-              if (gate.blocked) {
-                // Return the SAME shape the wrapped tool returns — a string. The
-                // guarded tools (write_file/edit_file/bash/…) all resolve to a
-                // string via formatResult, and the AI SDK feeds `execute`'s return
-                // value straight back as the tool-result the model reads. Returning
-                // a `{success,output,error}` object here made that value serialize
-                // to EMPTY: the gate still prevented the write (verified: target
-                // file absent), but the model was told nothing, so it could not act
-                // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
-                // and just saw a blank result. Measured in gsd-hard-gate: round 2's
-                // tool-result value was "\n\n[step 1 mirror] …" — only the
-                // convergence-mirror note appended to an empty string.
-                return gate.reason;
+            ownedToolActivities.add(activityId);
+            return await withToolActivity(activityId, async () => {
+              try {
+                if (!guarded) return await originalExecute(input, context);
+                const gate = evaluateMutationGate(deps.bash.getCwd(), {
+                  toolName: name,
+                  hardGateEnabled: gsdHardGateEnabled,
+                  directAnswer: gsdDirectAnswer,
+                });
+                if (gate.blocked) {
+                  // Return the SAME shape the wrapped tool returns — a string. The
+                  // guarded tools (write_file/edit_file/bash/…) all resolve to a
+                  // string via formatResult, and the AI SDK feeds `execute`'s return
+                  // value straight back as the tool-result the model reads. Returning
+                  // a `{success,output,error}` object here made that value serialize
+                  // to EMPTY: the gate still prevented the write (verified: target
+                  // file absent), but the model was told nothing, so it could not act
+                  // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
+                  // and just saw a blank result. Measured in gsd-hard-gate: round 2's
+                  // tool-result value was "\n\n[step 1 mirror] …" — only the
+                  // convergence-mirror note appended to an empty string.
+                  return gate.reason;
+                }
+                return await writeMutex.run(() => originalExecute(input, context));
+              } finally {
+                endToolActivity(activityId);
+                ownedToolActivities.delete(activityId);
+                setLoopBreadcrumb(`after-tool:${name}`);
               }
-              return await writeMutex.run(() => originalExecute(input, context));
-            } finally {
-              endToolActivity(activityId);
-              setLoopBreadcrumb(`after-tool:${name}`);
-            }
+            });
           };
         }
 
@@ -1448,9 +1488,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // the auth registry. Both flow through resolveModelRuntime →
         // runtime.providerOptions → buildTurnProviderOptions and arrive
         // here merged into providerOpts.openai.
-        // Top-level dropParam — shared with sub-agent path via shouldDropParam.
-        // See src/providers/runtime.ts for the central rule.
-        const dropParam = (p: "maxOutputTokens" | "temperature" | "topP"): boolean => shouldDropParam(runtime, p);
+        // The G1 maxOutputTokens drop is applied by resolveMaxOutputTokensParam
+        // (which delegates to shouldDropParam) at the streamText call below.
 
         // Tier-aware behavioural suffix. Cheap models (DeepSeek V4 Flash etc.)
         // ignore well-worded tool descriptions but DO adopt instructions when
@@ -1548,49 +1587,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             ? _nonClaudeFront
             : systemWithCaps;
 
-        // Capture prompt-size breakdown so recordUsage can attach it to the
-        // cost-log entry. Without this, "system prompt is huge" is unfalsifiable.
-        // chars/4 ≈ tokens for English; reported as chars to keep math obvious.
-        const messagesChars = (deps.messages as any[]).reduce((s: number, m: any) => {
-          const c = m.content;
-          if (typeof c === "string") return s + c.length;
-          if (Array.isArray(c)) {
-            for (const part of c) {
-              if (typeof (part as { text?: unknown }).text === "string") {
-                s += (part as { text: string }).text.length;
-              }
-            }
-          }
-          return s;
-        }, 0);
-        let toolsChars = 0;
-        let toolsCount = 0;
-        for (const [name, t] of Object.entries(tools)) {
-          toolsCount += 1;
-          toolsChars += name.length;
-          const desc = (t as { description?: string }).description;
-          if (typeof desc === "string") toolsChars += desc.length;
-          try {
-            // Schemas often dominate tool size on non-Anthropic providers
-            // (Zod-derived JSON schemas can be 2-5K chars per tool).
-            const params =
-              (t as { parameters?: unknown; inputSchema?: unknown }).parameters ??
-              (t as { inputSchema?: unknown }).inputSchema;
-            if (params) toolsChars += JSON.stringify(params).length;
-          } catch {
-            /* best-effort */
-          }
-        }
-        deps.setLastPromptBreakdown({
-          systemChars: system.length,
-          staticPrefixChars: systemParts.staticPrefix.length,
-          dynamicSuffixChars: systemParts.dynamicSuffix.length,
-          playwrightGuidanceChars: playwrightGuidance.length,
-          messagesChars,
-          messagesCount: deps.messages.length,
-          toolsChars,
-          toolsCount,
-        });
+        const measurePrompt = await createPromptMeasurer(systemForModel, tools);
+        const capturePromptBreakdown = (messages: readonly ModelMessage[]) => {
+          deps.setLastPromptBreakdown({
+            ...measurePrompt(messages),
+            staticPrefixChars: systemParts.staticPrefix.length,
+            dynamicSuffixChars: systemParts.dynamicSuffix.length,
+            playwrightGuidanceChars: playwrightGuidance.length,
+          });
+        };
 
         // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
         const _topCallId = crypto.randomUUID();
@@ -1600,6 +1605,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // stepCountIs(maxToolRounds) fires and the user sees the TUI freeze
         // (session 7dcf8fd7d6a4 hit exactly 100 rounds → looked like a crash).
         let _lastFinishReason: string | null = null;
+        // Output-limit handling decided once the stream drained (see the
+        // `_finalMessages` assembly below); acted on after the turn is persisted.
+        let _outputLimitAction: OutputLimitAction = "none";
         // F3b — track hard cap hit for visible toast after stream ends.
         let _hardCapHit = false;
         // Phase B4: compact older tool_result parts before each top-level
@@ -1621,6 +1629,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // instead of breaking every step as the keepLast boundary slides.
         const compactHysteresis = getTopLevelCompactHysteresis();
         let hysteresisState = initCompactionHysteresisState();
+        // C3 — "ask before an automatic compaction" is a ONE-SHOT per turn.
+        // Same scope as hysteresisState above (this block runs once per
+        // streamText turn). Prior art for why this must be gated rather than
+        // fired per step: the identity contract in subagent-compactor.ts, where
+        // a no-op returning a fresh array made a note fire on every step.
+        let compactConsultAskedThisTurn = false;
         // Phase O1 — capture providerOptions SHAPE (types only) for forensics.
         deps.setLastProviderOptionsShape(
           Object.keys(providerOpts).length > 0 ? extractProviderOptionsShape(providerOpts) : null,
@@ -1658,11 +1672,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ) as typeof deps.messages,
           runtime.modelId,
         );
+        capturePromptBreakdown(_topMessagesForCall);
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
+        // Normal chat: soft cap `maxToolRounds` + hard cap `hardMaxToolRounds`.
+        // Inside an `/ideal` run both are Infinity (user decision: no limits) and
+        // the turn instead stops when N consecutive steps only repeat calls this
+        // loop already made with the same result (no-progress-guard.ts).
+        const _stepLimits = resolveTurnStepLimits({
+          maxToolRounds: deps.maxToolRounds,
+          hardMaxToolRounds: deps.hardMaxToolRounds,
+        });
+        const _noProgress = _stepLimits.stopOnNoProgress ? createNoProgressGuard() : null;
+        let _noProgressHit = false;
         const _baseDynamicStopWhen = createToolLoopCapPredicate({
-          initialCap: deps.maxToolRounds,
+          initialCap: _stepLimits.softCap,
           ask: async (info) => {
             // Auto-recover a "cap" (tool-round ceiling) halt: compact the history and keep
             // going, instead of stopping and telling the user to /compact
@@ -1829,8 +1854,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Fires AFTER the soft cap (maxToolRounds) has been bumped by the
           // user. Prevents runaway sessions (session 526a83cf22df: 16 LLM
           // calls for a single user message, 2.44M total input tokens).
-          if (state.steps.length > deps.hardMaxToolRounds) {
+          if (state.steps.length > _stepLimits.hardCap) {
             _hardCapHit = true;
+            return true;
+          }
+          // `/ideal` only (hardCap is Infinity there): end a loop that is going
+          // nowhere — consecutive steps that only repeat earlier calls with the
+          // same results.
+          if (_noProgress?.(state.steps)) {
+            _noProgressHit = true;
             return true;
           }
           // convene_council fast-path: if the model queued a council convening
@@ -1943,6 +1975,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // started (session 1096fc59144c). One ping buys one more idle window; a
         // setup phase that issues no request at all still fires. See
         // turn-progress.ts.
+        // Matching `.end` for the coarse "pre-stream.toolEngine" breadcrumb
+        // opened at executeToolEngine's entry — everything above this line on
+        // attempt 1 is tool-engine's own pre-stream setup.
+        breadcrumb("pre-stream.toolEngine.end", {
+          sessionId: deps.session?.id,
+          msSinceTurnStart: Date.now() - turnStartMs,
+        });
         pingTurnProgress();
         // Silent-hang guard: abort the stream (and surface a toast in the
         // catch below) if the provider sends no chunk for too long. Re-armed
@@ -1958,15 +1997,47 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // The progress timer is reset ONLY by stall.petProgress() on real output
         // (text-delta / tool-call), aborting a runaway-reasoning loop while a
         // legitimately long reasoning burst that DOES emit output survives.
+        const recordProviderStall = (kind: "idle" | "progress") => {
+          stallTriggered = true;
+          toolActivityExpired = ownedToolActivities.size > 0;
+          if (toolActivityExpired) {
+            stallErrorMessage =
+              "Tool execution exceeded its activity budget. The request was cancelled; review partial changes before retrying.";
+          }
+          const data = {
+            kind,
+            callId: _topCallId,
+            model: runtime.modelId,
+            phase: toolActivityExpired ? "tool-execution" : "provider-stream",
+            chunksThisAttempt,
+            chunksThisStep,
+          };
+          breadcrumb("mainStream.provider.stall", { sessionId: deps.session?.id, ...data });
+          logger.warn(
+            "orchestrator",
+            toolActivityExpired ? "Tool activity deadline fired" : "Provider stream deadline fired",
+            data,
+          );
+          try {
+            if (deps.session)
+              logInteraction(deps.session.id, "error", {
+                eventSubtype: toolActivityExpired ? "tool-stall" : "provider-stall",
+                data,
+              });
+          } catch (err) {
+            logger.error("orchestrator", "Failed to record provider stall", {
+              error: err instanceof Error ? err.message : String(err),
+              ...data,
+            });
+          }
+        };
         const stall = createStallWatchdog(
           getProviderStallTimeoutMs(),
-          () => {
-            stallTriggered = true;
-          },
+          () => recordProviderStall("idle"),
           {
             progressTimeoutMs: getProviderProgressTimeoutMs(),
             onProgressFire: () => {
-              stallTriggered = true;
+              recordProviderStall("progress");
               console.error(
                 `[tool-engine] stream aborted: no text/tool output for ${getProviderProgressTimeoutMs()}ms ` +
                   `(runaway reasoning / no forward progress) model=${runtime.modelId}`,
@@ -1974,8 +2045,50 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             },
           },
           // Hold the stream open while a blocking `ask_user` card awaits a human.
-          isInteractivePaused,
+          () => isInteractivePaused() || isToolActivityLive(Date.now(), ownedToolActivities),
         );
+        // Round 5 (G8 HIGH #2): a request is now genuinely in flight, awaiting
+        // its first byte. The single `pingTurnProgress()` above buys the
+        // top-level turn watchdog exactly ONE more 120s idle window — a
+        // provider slower than that to first token (measured: z.ai/glm-4.7,
+        // `stream_start` landing 2m19s after a watchdog kill) is still raced
+        // against and can lose even though `stall` above is the mechanism
+        // actually responsible for judging this call dead. Keep re-pinging on
+        // an interval for up to `getFirstTokenTimeoutMs()` (default 600s,
+        // comfortably above `stall`'s own ceiling) so THAT dedicated,
+        // re-promptable watchdog — not a race with the generic top-level one —
+        // is what decides "alive but slow" vs. "actually hung". Stopped the
+        // moment `stall` sees a chunk (pet()) or is torn down (dispose()): no
+        // call site of either needs to change, so every existing exit path
+        // (success, abort, error, the mid-loop continuation reusing this same
+        // `stall`) is covered automatically. Round 6: the ceiling is now the
+        // built-in `maxMs`/`onCeiling` on `startPeriodicTurnProgressPing`
+        // itself (was hand-rolled here in round 5) — same behaviour, one less
+        // bespoke timer to keep correct.
+        const stopFirstTokenPing = startPeriodicTurnProgressPing({
+          maxMs: getFirstTokenTimeoutMs(),
+          onCeiling: () => {
+            breadcrumb("pre-stream.mainStream.firstTokenCeiling", {
+              sessionId: deps.session?.id,
+              maxMs: getFirstTokenTimeoutMs(),
+            });
+          },
+        });
+        const _origStallPet = stall.pet.bind(stall);
+        const _origStallDispose = stall.dispose.bind(stall);
+        (stall as { pet: () => void }).pet = () => {
+          stopFirstTokenPing();
+          _origStallPet();
+        };
+        (stall as { dispose: () => void }).dispose = () => {
+          stopFirstTokenPing();
+          _origStallDispose();
+        };
+        disposeProviderWatchdog = () => {
+          stall.dispose();
+          breadcrumb("mainStream.provider.end", { sessionId: deps.session?.id, callId: _topCallId });
+        };
+        const providerSignal = combineAbortSignals(signal, stall.signal) ?? signal;
         // F3c — hard-cap LLM calls per turn before this streamText()
         if (++llmCallsThisTurn > MAX_LLM_CALLS_PER_TURN) {
           stall.dispose();
@@ -1987,6 +2100,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           yield { type: "done" };
           return;
         }
+        breadcrumb("mainStream.provider.start", {
+          sessionId: deps.session?.id,
+          callId: _topCallId,
+          model: runtime.modelId,
+        });
+        // The per-turn budget is a VISIBLE-output number. On a reasoning model
+        // the thinking block shares `max_tokens` and is emitted first, so the
+        // bare taskType budget (4_096 for analyze/conversational) let thinking
+        // eat most of it and cut long answers mid-sentence with
+        // finishReason "length" (live: a StepFun reasoning model's long report
+        // ended at "…vẫn 429 sau 2.6–"). resolveMaxOutputTokensParam widens a
+        // reasoning model to its catalog-declared ceiling and also owns the
+        // OAuth/capability drop rule — same helper every council call uses.
+        const turnMaxOutputTokensParam = resolveMaxOutputTokensParam(runtime, resolveTurnMaxOutputTokens(pilCtx));
         const result = streamText({
           model: runtime.model,
           system: systemForModel,
@@ -1995,7 +2122,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           toolChoice: _finalToolChoice,
           stopWhen: stepRouterPhase === "phase1" ? stepCountIs(1) : dynamicStopWhen,
           maxRetries: 0,
-          abortSignal: combineAbortSignals(signal, stall.signal),
+          abortSignal: providerSignal,
           // Repair malformed tool-call JSON args before they bubble up as
           // InvalidToolInputError → tool-error → repetition-detector abort.
           // Conservative: only fixes the two observed Qwen-style defects.
@@ -2087,6 +2214,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               if (_mirrorNote && baseRes.messages) {
                 baseRes.messages = attachReminderToMessages(baseRes.messages, _mirrorNote) as typeof stepMessages;
               }
+              capturePromptBreakdown(baseRes.messages ?? stepMessages);
               return baseRes;
             };
             // Compute the mirror once per prepareStep call. Empty on early steps
@@ -2179,23 +2307,62 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 ? 0.2
                 : 0.3
               : undefined;
-            const runCompaction = (): ModelMessage[] =>
+            // C1 — resolve the preservation focus the MAIN-CONTEXT agent stated
+            // via the `compact` tool. Before this, `consumeProactiveCompact()`
+            // below read `instructions` and threw it away: the agent could say
+            // HOW to compact and the answer never reached the compactor.
+            const resolveFocusNote = (override?: string | null): string | undefined => {
+              try {
+                const f = (typeof override === "string" && override.trim() ? override : null) ?? getCompactionFocus();
+                return f && f.trim().length > 0 ? f : undefined;
+              } catch (err) {
+                logger.warn("orchestrator", "[tool-engine] compaction focus lookup failed", {
+                  error: (err as Error)?.message,
+                });
+                return undefined; // fail open — compact exactly as before
+              }
+            };
+            const compactOptsBase = () => ({
+              thresholdChars: topLevelCompactThreshold,
+              // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
+              // trailing tool turns verbatim — those carry the reasoning the
+              // agent is being asked to reflect on, and over-eliding them is
+              // exactly what starves a self-evaluation. One boolean, no new
+              // detection logic (isMetaAnalysisPrompt already gates layer3/5).
+              keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
+              label: "top-level",
+              envelopeChars,
+              contextWindowTokens,
+              contextFillRatio: reasoningFillRatio,
+              keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+              stripOldReasoning: isReasoningModel,
+              tailBudgetChars: topLevelCompactTailBudget,
+            });
+            // Options are spelled ONCE in compactOptsBase so the C3 predictor
+            // (estimateCompactionPressure) and the compaction it predicts cannot
+            // drift apart. persistArtifact is deliberately NOT in the base: the
+            // predictor must not persist anything, only this real run may.
+            const runCompaction = (focusOverride?: string | null): ModelMessage[] =>
               compactSubAgentMessages(stripped, {
-                thresholdChars: topLevelCompactThreshold,
-                // Rec #1 (cheap part): on meta/self-eval turns keep a couple more
-                // trailing tool turns verbatim — those carry the reasoning the
-                // agent is being asked to reflect on, and over-eliding them is
-                // exactly what starves a self-evaluation. One boolean, no new
-                // detection logic (isMetaAnalysisPrompt already gates layer3/5).
-                keepLastTurns: topLevelCompactKeepLast + (isMetaAnalysisPrompt(userMessage) ? 2 : 0),
-                label: "top-level",
-                envelopeChars,
-                contextWindowTokens,
-                contextFillRatio: reasoningFillRatio,
-                keepToolIds: keepToolIds.length ? keepToolIds : undefined,
+                ...compactOptsBase(),
+                focusNote: resolveFocusNote(focusOverride),
                 persistArtifact,
-                stripOldReasoning: isReasoningModel,
-                tailBudgetChars: topLevelCompactTailBudget,
+                // Deliberately NOT in compactOptsBase, for the same reason
+                // persistArtifact is not: the base is shared with the C3
+                // predictor (estimateCompactionPressure), which only re-derives
+                // the cut point — it elides nothing. A side-effecting callback
+                // in shared options would invalidate dedup ledgers for results
+                // still in the model's view, forcing re-serves that fix nothing.
+                // Only the run that actually rewrites history may report.
+                //
+                // Anything elided HERE did leave the model's view, so no pointer
+                // from either layer may name it any more. This is the path the
+                // `compact` tool forces, and the one that preceded the measured
+                // nine-call dead-pointer loop.
+                onElide: (ids) => {
+                  if (_topLevelCapState) noteElidedForCap(_topLevelCapState, ids);
+                  deps.crossTurnDedup?.noteElided(ids);
+                },
               });
 
             // O3 — compaction hysteresis (holds the frozen compacted prefix
@@ -2212,7 +2379,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const _proactiveCompact = consumeProactiveCompact();
             let compacted: ModelMessage[];
             if (_proactiveCompact) {
-              const _forced = runCompaction();
+              const _forced = runCompaction(_proactiveCompact.instructions);
               const _didForce = _forced !== stripped;
               compacted = _forced;
               hysteresisState = _didForce
@@ -2235,6 +2402,42 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 /* toast best-effort */
               }
             } else {
+              // C3 — an AUTOMATIC compaction must ask the main-context agent
+              // first. Compute (read-only, no side effects) whether one would
+              // elide anything on this step, then let the pure policy decide
+              // whether we can afford to defer it by exactly one step.
+              // Fail-open in every direction: any fault here degrades to the
+              // pre-existing behaviour (compact silently, as before).
+              let _consult: ReturnType<typeof evaluateCompactionConsult> = null;
+              try {
+                if (!compactConsultAskedThisTurn && !getCompactionFocus()) {
+                  const _pressure = estimateCompactionPressure(stripped, compactOptsBase());
+                  _consult = evaluateCompactionConsult({
+                    wouldCompact: _pressure.wouldCompact,
+                    alreadyAsked: compactConsultAskedThisTurn,
+                    agentFocus: getCompactionFocus(),
+                    ctxFill: _pressure.ctxFill,
+                    contextWindowTokens,
+                    estPromptTokens: _pressure.estPromptTokens,
+                    stepNumber: sn,
+                  });
+                }
+              } catch (err) {
+                logger.warn("orchestrator", "[tool-engine] compaction consult evaluation failed", {
+                  error: (err as Error)?.message,
+                  step: sn,
+                });
+                _consult = null;
+              }
+
+              if (_consult?.action === "defer") {
+                // Hand this step back UN-compacted with the question attached.
+                // The compaction happens on the next step, honouring whatever
+                // focus the agent states (see resolveFocusNote above).
+                compactConsultAskedThisTurn = true;
+                return withSteers({ messages: attachReminderToMessages(stripped, _consult.note) });
+              }
+
               const _hyst = applyCompactionHysteresis({
                 stripped,
                 currChars,
@@ -2247,6 +2450,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // Count only ACTUAL (re)compactions, not held-boundary steps — the
               // compaction counter drives the cache-churn telemetry this fixes.
               if (_hyst.didRecompact) recordCompaction(sn);
+
+              if (_consult?.action === "ask-and-compact") {
+                // No headroom to spend a step waiting: the compaction already
+                // ran above, and the note says so rather than promising a
+                // deferral that did not happen.
+                compactConsultAskedThisTurn = true;
+                return withSteers({
+                  messages: attachReminderToMessages(coalesceReadOnlyMessages(compacted), _consult.note),
+                });
+              }
             }
 
             const coalesced = coalesceReadOnlyMessages(compacted);
@@ -2347,17 +2560,40 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 size: _scopeSize,
                 originalPrompt: userMessage,
               });
-              // Strong "past natural budget" prefix only applies when we
-              // ACTUALLY want the model to consider wrapping up — i.e. on
-              // the crossing event or at a cadence step past ceiling, not
-              // on every silent step in between.
+              // Strong re-anchor only on the crossing event or a cadence step
+              // past ceiling, not on every silent step in between.
+              //
+              // The wording is load-bearing and was measured wrong. It used to
+              // open "[past natural budget — step N/M]" and tell the model to
+              // "emit final answer NOW". Nothing here halts anything — the
+              // matrix ceiling stopped being a halt source in Phase 5 Fix 5
+              // (see the comment above dynamicStopWhen), and the only real cap
+              // is `deps.maxToolRounds`. But the model has no way to know that,
+              // and this text repeats at cadence.
+              //
+              // Measured (2026-09-09, session e28336959a62, ceiling 10, 74 tool
+              // calls): the agent stopped mid-task with a real work list still
+              // open and wrote "CÒN LẠI (chưa làm do hết budget)" — "remaining,
+              // not done, out of budget". No budget was ever configured, and no
+              // event cut the run: `loop_cap_auto` had already auto-answered
+              // `continue`. The model was repeating this string back. A
+              // reminder said often enough stops being a hint and becomes an
+              // instruction, and the code comment above already states the
+              // intended philosophy: "done must be the agent's call, not the
+              // counter's."
+              //
+              // So: name it a scope check, say plainly that it does not stop
+              // anything, and do not ask the agent to tell the user to run
+              // /compact — post-turn compaction already runs on its own, so
+              // that line put the agent in the position of announcing someone
+              // else's job as a blocker.
               const _useStrong = _justCrossedCeiling || _pastCeilingAtCadence;
               const _scopePart =
                 _shouldRemind || _shouldWarn || _justCrossedCeiling
                   ? _useStrong
-                    ? `[past natural budget — step ${_scopeStep}/${_naturalCeiling}] If task is COMPLETE, emit final answer NOW. If you need to keep working in this long session, suggest that the user run the "/compact" slash command to compress the conversation history before continuing. Otherwise, simplify the next step. ${_baseReminder}`
+                    ? `[scope check — step ${_scopeStep}, past the typical ${_naturalCeiling} for this task shape] This is NOT a limit and nothing will stop you: keep going until the task is actually done. It is a prompt to re-check scope. If the task IS complete, emit the final answer now. If it is not, carry on — prefer the simplest next step, and do not stop or report the task as blocked on account of this message. ${_baseReminder}`
                     : _shouldWarn
-                      ? `[approaching ceiling] ${_baseReminder}`
+                      ? `[scope check — not a limit] ${_baseReminder}`
                       : _baseReminder
                   : null;
               const _reminder = _shouldRepeatReminder
@@ -2392,30 +2628,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             return withSteers({ messages: coalesced });
           },
           ...resolveTemperatureParam(runtime, 0.7),
-          ...(dropParam("maxOutputTokens") ? {} : { maxOutputTokens: resolveTurnMaxOutputTokens(pilCtx) }),
+          ...turnMaxOutputTokensParam,
           ...(Object.keys(providerOpts).length > 0 ? { providerOptions: providerOpts } : {}),
           experimental_onStepStart: (event: unknown) => {
             stepNumber = getStepNumber(event, stepNumber + 1);
-            notifyObserver(observer?.onStepStart, {
-              stepNumber,
-              timestamp: Date.now(),
-            });
           },
-          onStepFinish: (event: unknown) => {
+          onStepFinish: (event) => {
+            if (providerSignal.aborted) return;
+            completedStepMessages = event.response.messages as ModelMessage[];
             const currentStep = getStepNumber(event, Math.max(stepNumber, 0));
             stepNumber = Math.max(stepNumber, currentStep);
             const stepUsage = getUsage(event);
-            notifyObserver(observer?.onStepFinish, {
-              stepNumber: currentStep,
-              timestamp: Date.now(),
-              finishReason: getFinishReason(event),
-              usage: stepUsage,
-            });
 
-            // Pull any completed background delegations so their results can be
-            // injected (as system messages) for the *next* LLM step in this same turn.
-            // This improves "self wake" for background jobs without waiting for a new user turn.
-            void deps.consumeBackgroundNotifications?.().catch(() => {});
+            // Background-job completions are NOT consumed here. prepareStep feeds
+            // the model the stream's own step messages, never deps.messages, so a
+            // notice claimed mid-turn was invisible to this turn AND marked
+            // delivered — the UI then had nothing to wake the agent with after
+            // the turn ended. The notice stays queued until the turn ends, and
+            // the UI's idle wake (or the next turn's pre-stream consume) delivers it.
             // Realtime status bar update per step
             if (stepUsage.inputTokens || stepUsage.outputTokens) {
               // O1 — thread THIS turn's providerOptions shape per step so every
@@ -2439,6 +2669,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             recordAssistantBurst(_ceilingSessionId, _stepText);
           },
           onFinish: ({ finishReason }) => {
+            if (providerSignal.aborted) return;
             _lastFinishReason = finishReason ?? null;
             // Task 2.6b — emit llm-done (agent-mode only).
             try {
@@ -2469,19 +2700,34 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         });
 
         let _topTokenIndex = 0;
+        let observedStepNumber = -1;
         const _wireProviderIdTop = runtime.modelInfo?.provider ?? "unknown";
-        for await (const part of result.fullStream) {
-          stall.pet(); // chunk arrived — reset the stall watchdog
+        for await (const part of abortableStream(result.fullStream, providerSignal, `provider stream ${_topCallId}`, {
+          type: "abort",
+        })) {
+          // AI SDK emits start before doStream resolves; this is not a provider byte.
+          const providerPart = part.type !== "start" && part.type !== "start-step" && part.type !== "abort";
+          if (providerPart) {
+            if (chunksThisAttempt === 0)
+              breadcrumb("mainStream.firstProviderPart", {
+                sessionId: deps.session?.id,
+                callId: _topCallId,
+                partType: part.type,
+              });
+            stall.pet();
+          }
           // Breadcrumb the chunk type: if the loop blocks while draining the
           // stream, this says which part kind we were handling when it froze.
           setLoopBreadcrumb(`stream:${String(part.type ?? "unknown")}`);
           // Count only real content parts. The watchdog abort itself surfaces
           // as an "abort" part — counting it would defeat the TTFB-stall gate
           // (a frozen-before-first-byte stall yields ONLY the abort part).
-          if (part.type !== "abort") {
+          if (providerPart) {
             chunksThisAttempt++;
             chunksThisStep++;
           }
+          // SDK can prepare the next request before its previous step tail is drained.
+          if (part.type === "finish-step") chunksThisStep = 0;
           if (signal.aborted) {
             yield { type: "content", content: "\n\n[Cancelled]" };
             break;
@@ -2519,6 +2765,20 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           }
 
           switch (part.type) {
+            // SDK callbacks can run ahead of this consumer. Ordered lifecycle
+            // parts ensure JSON observers flush text after receiving it.
+            case "start-step":
+              observedStepNumber++;
+              notifyObserver(observer?.onStepStart, { stepNumber: observedStepNumber, timestamp: Date.now() });
+              break;
+            case "finish-step":
+              notifyObserver(observer?.onStepFinish, {
+                stepNumber: Math.max(observedStepNumber, 0),
+                timestamp: Date.now(),
+                finishReason: getFinishReason(part),
+                usage: getUsage(part),
+              });
+              break;
             case "text-delta":
               stall.petProgress(); // real forward progress — reset the no-progress guard
               assistantText += part.text;
@@ -3234,7 +3494,24 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   const baseMs = 500;
                   const expMs = Math.min(baseMs * 4 ** (streamRetryCount - 1), 8_000);
                   const spread = expMs * 0.25;
-                  const nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+                  let nextDelayMs = Math.round(expMs + (Math.random() * 2 - 1) * spread);
+                  // A rate limit delivered as an error PART (the request was
+                  // accepted, then refused in-stream) never reaches the gate's
+                  // 429 retry, which only sees rejected requests. An 8 s ceiling
+                  // cannot outlast a per-minute window, so wait on the rate-limit
+                  // schedule and publish the shared cooldown — the background
+                  // agents on the same account then hold too.
+                  const _rateLimited = isRateLimitError(part.error) && !isRateLimitRetryExhausted(part.error);
+                  if (_rateLimited) {
+                    const _proposal = {
+                      proposedMs: rateLimitBackoffMs(streamRetryCount),
+                      hintMs: retryAfterMsFromError(part.error),
+                    };
+                    const _provider = runtime.modelInfo?.provider;
+                    nextDelayMs = _provider
+                      ? await noteProviderRateLimited(_provider, _proposal)
+                      : (_proposal.hintMs ?? _proposal.proposedMs);
+                  }
                   const errName = part.error instanceof Error ? part.error.name : "Error";
                   const errMsg = part.error instanceof Error ? part.error.message : String(part.error);
                   try {
@@ -3269,7 +3546,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   } catch (logErr) {
                     console.error(`[message-processor] error-part retry log failed: ${(logErr as Error)?.message}`);
                   }
-                  await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+                  // An announced rate-limit wait is not a stall: keep the
+                  // watchdogs from firing on it (same counter the gate uses).
+                  if (_rateLimited) beginProviderBackoff();
+                  try {
+                    await new Promise<void>((resolve) => setTimeout(resolve, nextDelayMs));
+                  } finally {
+                    if (_rateLimited) endProviderBackoff();
+                  }
                   if (!signal.aborted) {
                     continue streamAttempt;
                   }
@@ -3290,10 +3574,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 if (_contTransient && midLoopStallRetryCount < maxStallRetries && !signal.aborted && !stallTriggered) {
                   let _appended = 0;
                   try {
-                    const _resp = (await Promise.race([
-                      result.response,
-                      new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
-                    ])) as { messages: ModelMessage[] };
+                    const _resp = (
+                      completedStepMessages.length
+                        ? { messages: completedStepMessages }
+                        : await Promise.race([
+                            result.response,
+                            new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                          ])
+                    ) as { messages: ModelMessage[] };
                     const _gen = sanitizeModelMessages(scrubImagePayloadsInMessages(_resp.messages)) as ModelMessage[];
                     for (const _m of _gen) {
                       deps.messages.push(_m);
@@ -3456,10 +3744,14 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     // result.response settles fast here (the stream was already
                     // aborted via stall.signal). Race a short timeout so a
                     // doubly-wedged provider can't re-hang the recovery itself.
-                    const _resp = (await Promise.race([
-                      result.response,
-                      new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
-                    ])) as { messages: ModelMessage[] };
+                    const _resp = (
+                      completedStepMessages.length
+                        ? { messages: completedStepMessages }
+                        : await Promise.race([
+                            result.response,
+                            new Promise((_r, rej) => setTimeout(() => rej(new Error("response-timeout")), 3_000)),
+                          ])
+                    ) as { messages: ModelMessage[] };
                     const _gen = sanitizeModelMessages(scrubImagePayloadsInMessages(_resp.messages)) as ModelMessage[];
                     for (const _m of _gen) {
                       deps.messages.push(_m);
@@ -3567,7 +3859,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 // over the gathered tool outputs. forcedFinalize has its own
                 // stall timeout, so a still-dead provider just falls through.
                 let _rescued: string | null = null;
-                if (turnToolResults.length > 0) {
+                if (turnToolResults.length > 0 && !toolActivityExpired) {
                   try {
                     const _userText =
                       typeof userModelMessage?.content === "string"
@@ -3634,8 +3926,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   yield { type: "done" };
                   return;
                 }
-                notifyObserver(observer?.onError, { message: STALL_ERROR_MESSAGE, timestamp: Date.now() });
-                yield { type: "error", content: STALL_ERROR_MESSAGE, isAuthError: false };
+                notifyObserver(observer?.onError, { message: stallErrorMessage, timestamp: Date.now() });
+                yield { type: "error", content: stallErrorMessage, isAuthError: false };
                 yield { type: "done" };
                 return;
               }
@@ -3732,6 +4024,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 suppressPreDebateCards: true,
                 suppressPostDebate: true,
                 skipClarification: true,
+                skipPil: true,
                 observer,
                 userModelMessage,
                 // Gate A — thread the main turn's already-classified scope so
@@ -3976,6 +4269,18 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               /* telemetry is best-effort */
             }
 
+            // Output limit: the final step stopped on finishReason "length"
+            // (the provider ran out of maxOutputTokens, usually mid-sentence).
+            // Decide now — before the grounding footnote, which must not land
+            // between the cut text and its continuation. An answer that came
+            // from a response tool or the F6 synthesis is already complete.
+            _outputLimitAction = decideOutputLimitAction({
+              finishReason: _lastFinishReason,
+              answeredElsewhere: responseToolCalled || _f6SynthesisText !== null,
+              continuations: outputLimitContinuations,
+              cap: outputLimitContinuationCap,
+            });
+
             // Summary-phase grounding check (Agent Operating Contract, runtime
             // half). Soft-flag counts / file:line refs in the final synthesis
             // that don't appear in this turn's tool outputs — possible
@@ -3983,7 +4288,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // warn toast + an inline advisory footnote. Only runs when the
             // turn actually produced tool output (a corpus to ground against)
             // and is not chitchat. See grounding-check.ts.
-            if (process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" && !isChitchat && assistantText.trim().length > 0) {
+            if (
+              process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" &&
+              !isChitchat &&
+              _outputLimitAction !== "continue" &&
+              assistantText.trim().length > 0
+            ) {
               try {
                 const _gParts: string[] = [];
                 let _gHadTool = false;
@@ -4038,6 +4348,32 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 role: "assistant",
                 content: _f6SynthesisText,
               } as ModelMessage);
+            }
+            // Out of continuations (or disabled): never let a cut reply pass
+            // as finished. The notice goes into the persisted messages too —
+            // the TUI re-renders the transcript from them when the turn ends.
+            if (_outputLimitAction === "notice") {
+              const _notice = buildOutputLimitNotice({
+                maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens,
+                continuations: outputLimitContinuations,
+              });
+              assistantText += _notice;
+              yield { type: "content", content: _notice };
+              appendNoticeToFinalMessages(_finalMessages, _notice);
+              try {
+                if (deps.session) {
+                  logInteraction(deps.session.id, "output_limit", {
+                    model: turnModelId,
+                    data: {
+                      action: "notice",
+                      continuations: outputLimitContinuations,
+                      maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens ?? null,
+                    },
+                  });
+                }
+              } catch {
+                /* telemetry is best-effort */
+              }
             }
             deps.appendCompletedTurn(userModelMessage, _finalMessages);
             streamOk = true;
@@ -4135,7 +4471,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         {
           const turnDuration = Date.now() - turnStartMs;
           if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
+            // The tier actually served. Every decision now carries a taskHash, so this
+            // path fires too, and the PIL task tier it used to send overwrote the served
+            // tier EE had just recorded (live: balanced → fast on the same hash).
+            const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
             void routeFeedback(
               taskHash,
               tier,
@@ -4196,6 +4535,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           /* fail-open */
         }
 
+        // `/ideal` only: the turn has no step limit and was ended because it
+        // stopped making progress. Say so — a silent stop reads like a crash.
+        if (_noProgressHit) {
+          yield {
+            type: "content",
+            content:
+              `\n\n[Stopped: the last steps only repeated tool calls that had already run with identical results — ` +
+              `no progress. This turn has no step limit; it ends when it stops moving.]\n`,
+          };
+        }
+
         // F3b — surface hard-cap stop (absolute ceiling, cannot be bumped).
         if (_hardCapHit) {
           yield {
@@ -4213,8 +4563,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // fires with tool calls still pending — distinct from 'stop' (model
         // chose to end). We only warn when stepNumber ≥ cap so a model that
         // legitimately terminates mid-tool-call (rare) doesn't get a false
-        // warning.
-        if (_lastFinishReason === "tool-calls" && stepNumber >= deps.maxToolRounds - 1) {
+        // warning. No cap exists inside `/ideal`, so no such warning there.
+        if (
+          _lastFinishReason === "tool-calls" &&
+          Number.isFinite(_stepLimits.softCap) &&
+          stepNumber >= deps.maxToolRounds - 1
+        ) {
           yield {
             type: "content",
             content:
@@ -4222,6 +4576,49 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               `If you want to continue the current task, simply reply with "continue" or "tiếp tục". ` +
               `For long tasks, we strongly recommend running the \`/compact\` command first to free up context memory before continuing.]\n`,
           };
+        }
+
+        // Output-limit continuation: the reply was cut by maxOutputTokens
+        // (finishReason "length") and is already persisted above. Ask the model
+        // to resume from the exact cut point and re-run the attempt, so the
+        // remaining text streams straight after the cut one. Same re-entry shape
+        // as the text-tool re-steer below (in-memory user message + `continue`);
+        // bounded per turn by outputLimitContinuationCap, after which the
+        // finalize path appends a visible cut-off notice instead.
+        if (_outputLimitAction === "continue" && streamOk && !signal.aborted) {
+          outputLimitContinuations++;
+          deps.messages.push({ role: "user", content: buildOutputLimitContinuationPrompt(assistantText) });
+          deps.messageSeqs.push(null);
+          if (deps.session) {
+            try {
+              logInteraction(deps.session.id, "output_limit", {
+                model: turnModelId,
+                data: {
+                  action: "continue",
+                  attempt: outputLimitContinuations,
+                  cap: outputLimitContinuationCap,
+                  maxOutputTokens: turnMaxOutputTokensParam.maxOutputTokens ?? null,
+                },
+              });
+            } catch {
+              /* telemetry best-effort */
+            }
+          }
+          try {
+            const _oar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+              | { emitEvent: (e: unknown) => void }
+              | undefined;
+            _oar?.emitEvent({
+              t: "event",
+              kind: "toast",
+              level: "info",
+              text: `reply hit the output-token limit — continuing (${outputLimitContinuations}/${outputLimitContinuationCap})`,
+            });
+          } catch {
+            /* best-effort */
+          }
+          await closeMcp?.().catch(() => {});
+          continue;
         }
 
         // Tool-call-as-text leak: the model wrote a tool invocation as plain
@@ -4416,7 +4813,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           {
             const turnDuration = Date.now() - turnStartMs;
             if (taskHash) {
-              const tier = taskTypeToTier(pilCtx.taskType);
+              const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
               void routeFeedback(taskHash, tier, runtime.modelId, "cancelled", 0, turnDuration);
             }
             const storeHash = routerStore.getState().taskHash;
@@ -4508,7 +4905,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Stall aborts carry an opaque DOMException; show the clear stall
         // message instead of the raw abort reason.
         const friendly = stallTriggered
-          ? STALL_ERROR_MESSAGE
+          ? stallErrorMessage
           : humanizeApiError(err, { modelId: runtime.modelId, providerId: runtime.modelInfo?.provider });
         notifyObserver(observer?.onError, {
           message: friendly,
@@ -4534,7 +4931,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         {
           const turnDuration = Date.now() - turnStartMs;
           if (taskHash) {
-            const tier = taskTypeToTier(pilCtx.taskType);
+            const tier = routerStore.getState().eeTier ?? taskTypeToTier(pilCtx.taskType);
             void routeFeedback(taskHash, tier, runtime.modelId, "fail", 0, turnDuration);
           }
           const storeHash = routerStore.getState().taskHash;
@@ -4563,6 +4960,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         yield { type: "done" };
         return;
       } finally {
+        disposeProviderWatchdog?.();
         await closeMcp?.().catch(() => {});
       }
     }
@@ -4590,6 +4988,8 @@ export function coalesceReadOnlyMessages(messages: any[]): any[] {
     "usage_forensics",
     "lsp_query",
     "setup_guide",
+    "convene_council",
+    "read_pil_context",
     "selfverify_status",
     "selfverify_result",
     "selfverify_list",

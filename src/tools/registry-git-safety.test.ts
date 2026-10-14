@@ -121,7 +121,7 @@ describe("git-safety wiring in bash tool", () => {
       expect(out).toMatch(/^BLOCKED \(git-safety\):/);
       expect(out).toMatch(/\.env/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   }, 20_000);
 });

@@ -1,4 +1,5 @@
 import { Semantic } from "@muonroi/agent-harness-opentui";
+import { getProviderCapabilities } from "../../providers/capabilities.js";
 import type { ProviderId } from "../../providers/types.js";
 import type { ModelInfo, ReasoningEffort } from "../../types/index.js";
 import type { Theme } from "../theme.js";
@@ -30,6 +31,11 @@ export function groupModelsByTier(models: ModelInfo[]): TierGroup[] {
 }
 
 export interface ApiKeyPromptState {
+  step?: "key" | "scope" | "workspace";
+  apiKey?: string;
+  workspaceScoped?: boolean;
+  saving?: boolean;
+  activateAfterSave?: boolean;
   provider: ProviderId;
   value: string;
   error: string | null;
@@ -55,6 +61,7 @@ export function ModelPickerModal({
   apiKeyPrompt,
   oauthProviders,
   oauthLogin,
+  focused,
 }: {
   t: Theme;
   currentModel?: string;
@@ -75,6 +82,15 @@ export function ModelPickerModal({
   /** Providers that support OAuth subscription login (openai, xai). */
   oauthProviders?: ReadonlySet<ProviderId>;
   oauthLogin?: OAuthLoginState | null;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   *
+   * Routed to whichever sub-modal actually takes keys: use-app-logic.tsx:7583
+   * checks `oauthLogin` first, then `apiKeyPrompt`, then the picker body.
+   */
+  focused?: boolean;
 }) {
   const disabledSet = new Set(disabledProviders);
   const keyedSet = providersWithKey ?? new Set<ProviderId>();
@@ -88,9 +104,21 @@ export function ModelPickerModal({
   const top = bottomAlignedModalTop(height, panelHeight);
   const overlayBg = "#000000cc" as string;
 
-  // Sub-modal: API key prompt overlay (rendered on top of the picker).
+  const setupStep = apiKeyPrompt?.step ?? "key";
+  const scopeStep = setupStep === "scope";
+  const workspaceStep = setupStep === "workspace";
+  const setupHelp = apiKeyPrompt ? getProviderCapabilities(apiKeyPrompt.provider).workspaceSetup()?.help : undefined;
+
+  // Sub-modal: provider credential setup overlay (rendered on top of the picker).
   const subModal = apiKeyPrompt ? (
-    <Semantic id="provider-key-prompt" role="dialog" isModal name={`Set ${apiKeyPrompt.provider} key`}>
+    <Semantic
+      id="provider-key-prompt"
+      role="dialog"
+      isModal
+      name={`Set ${apiKeyPrompt.provider} ${workspaceStep ? "workspace" : scopeStep ? "key scope" : "key"}`}
+      // The `provider-key-input` field below carries the flag for this
+      // sub-modal — see the comment there.
+    >
       <box
         position="absolute"
         left={0}
@@ -111,19 +139,29 @@ export function ModelPickerModal({
           flexDirection="column"
         >
           <text fg={t.primary}>
-            <b>{`Set API key — ${apiKeyPrompt.provider}`}</b>
+            <b>{`${workspaceStep ? "Workspace ID" : scopeStep ? "API key scope" : "Set API key"} - ${apiKeyPrompt.provider}`}</b>
           </text>
           <box paddingTop={1}>
             <text fg={t.textMuted}>
-              {"Key is stored as an environment variable (~/.muonroi-cli/.env, mirrored to your OS env)."}
+              {workspaceStep
+                ? setupHelp
+                : scopeStep
+                  ? "Was this key created for a specific workspace? If unsure, choose option 2 and enter the workspace ID."
+                  : "Key is stored as an environment variable (~/.muonroi-cli/.env, mirrored to your OS env)."}
             </text>
           </box>
           <Semantic
-            id="provider-key-input"
+            id={workspaceStep ? "provider-workspace-input" : scopeStep ? "provider-key-scope" : "provider-key-input"}
             role="textbox"
-            name={`${apiKeyPrompt.provider} API key`}
-            focus
-            value={apiKeyPrompt.value}
+            name={`${apiKeyPrompt.provider} ${workspaceStep ? "workspace ID" : scopeStep ? "API key scope" : "API key"}`}
+            // Was a hard-coded `focus` (always true). That was accidentally
+            // correct while no other node in the tree published the flag, and
+            // became a two-focus-node bug the moment the dialogs started
+            // mirroring ownership — `driver.query("focus")` THROWS on >1 match
+            // (driver.ts:449). The field is where typing goes, so it keeps the
+            // flag and the `provider-key-prompt` root does not publish one.
+            focus={(focused && !oauthLogin) || undefined}
+            value={scopeStep ? (apiKeyPrompt.workspaceScoped ? "scoped" : "unscoped") : apiKeyPrompt.value}
           >
             <box
               paddingTop={1}
@@ -133,27 +171,46 @@ export function ModelPickerModal({
               flexDirection="row"
               justifyContent="space-between"
             >
-              {apiKeyPrompt.value.length > 0 ? (
+              {scopeStep ? (
+                <box flexDirection="column">
+                  <text
+                    fg={apiKeyPrompt.workspaceScoped ? t.primary : t.textMuted}
+                  >{`${apiKeyPrompt.workspaceScoped ? ">" : " "} 1. Yes, scoped to a specific workspace`}</text>
+                  <text
+                    fg={!apiKeyPrompt.workspaceScoped ? t.primary : t.textMuted}
+                  >{`${!apiKeyPrompt.workspaceScoped ? ">" : " "} 2. No / unsure - enter workspace ID`}</text>
+                </box>
+              ) : apiKeyPrompt.value.length > 0 ? (
                 <text fg={t.text}>
-                  {`${apiKeyPrompt.reveal ? apiKeyPrompt.value.slice(0, 40) : "•".repeat(Math.min(apiKeyPrompt.value.length, 40))}▏`}
+                  {`${apiKeyPrompt.reveal || workspaceStep ? apiKeyPrompt.value.slice(0, 40) : "•".repeat(Math.min(apiKeyPrompt.value.length, 40))}▏`}
                 </text>
               ) : (
-                <text fg={t.textDim}>{"▏(type or paste key)"}</text>
+                <text fg={t.textDim}>{workspaceStep ? "(type or paste wrkspc_...)" : "(type or paste key)"}</text>
               )}
-              {apiKeyPrompt.value.length > 0 ? (
+              {!scopeStep && apiKeyPrompt.value.length > 0 ? (
                 <text
                   fg={t.textMuted}
-                >{`${apiKeyPrompt.reveal ? "shown" : "hidden"} · ${apiKeyPrompt.value.length} chars`}</text>
+                >{`${apiKeyPrompt.reveal || workspaceStep ? "shown" : "hidden"} · ${apiKeyPrompt.value.length} chars`}</text>
               ) : null}
             </box>
           </Semantic>
           {apiKeyPrompt.error ? (
             <box paddingTop={1}>
-              <text fg={t.initFormError}>{apiKeyPrompt.error}</text>
+              <Semantic id="provider-setup-error" role="status" name={apiKeyPrompt.error}>
+                <text fg={t.initFormError}>{apiKeyPrompt.error}</text>
+              </Semantic>
             </box>
           ) : null}
           <box paddingTop={1}>
-            <text fg={t.textMuted}>{"Enter save · Esc cancel · Ctrl+R reveal · paste works"}</text>
+            <text fg={t.textMuted}>
+              {apiKeyPrompt.saving
+                ? "Saving credentials..."
+                : scopeStep
+                  ? "Up/Down or 1/2 choose | Enter continue | Esc cancel"
+                  : workspaceStep
+                    ? "Enter save | Esc cancel | paste works"
+                    : "Enter continue | Esc cancel | Ctrl+R reveal | paste works"}
+            </text>
           </box>
         </box>
       </box>
@@ -162,7 +219,13 @@ export function ModelPickerModal({
 
   // Sub-modal: OAuth subscription login (browser-based) for openai / xai.
   const oauthModal = oauthLogin ? (
-    <Semantic id="provider-oauth-login" role="dialog" isModal name={`Sign in to ${oauthLogin.provider}`}>
+    <Semantic
+      id="provider-oauth-login"
+      role="dialog"
+      isModal
+      name={`Sign in to ${oauthLogin.provider}`}
+      focus={focused || undefined}
+    >
       <box
         position="absolute"
         left={0}
@@ -206,7 +269,13 @@ export function ModelPickerModal({
 
   return (
     <>
-      <Semantic id="model-picker" role="dialog" isModal name="Providers">
+      <Semantic
+        id="model-picker"
+        role="dialog"
+        isModal
+        name="Providers"
+        focus={(focused && !oauthLogin && !apiKeyPrompt) || undefined}
+      >
         <box
           position="absolute"
           left={0}
@@ -245,7 +314,13 @@ export function ModelPickerModal({
                   const fg = focused ? t.accent : enabled ? t.text : t.textMuted;
                   const starFg = isDefault ? t.primary : t.textDim;
                   const canOAuth = oauthSet.has(p);
-                  const suffix = !hasKey ? (canOAuth ? "  (Enter sign in · K key)" : "  (no key — press K)") : "";
+                  const suffix = !hasKey
+                    ? canOAuth
+                      ? "  (Enter sign in · K key)"
+                      : "  (Enter setup | K key)"
+                    : !enabled
+                      ? "  (disabled · Enter to use)"
+                      : "";
                   return (
                     <Semantic
                       key={p}
@@ -274,7 +349,7 @@ export function ModelPickerModal({
             </box>
             <box flexGrow={1} minHeight={0} />
             <box flexShrink={0} paddingLeft={2} paddingRight={2} paddingTop={1}>
-              <text fg={t.textMuted}>{"↑↓ nav  Space toggle  D default  O sign in  K set key  Esc close"}</text>
+              <text fg={t.textMuted}>{"↑↓ nav  Space toggle  Enter/D use  O sign in  K set key  Esc close"}</text>
             </box>
           </box>
         </box>

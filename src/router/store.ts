@@ -15,6 +15,12 @@ export interface RouterState {
   taskHash: string | null;
   /** source of the last routing decision (e.g. "keyword", "history", "brain"). */
   source: string | null;
+  /** Task text of the last decision, sent with its outcome so EE can learn from it. */
+  taskText: string | null;
+  /** Catalog tier of the model the last decision served (fast/balanced/premium). */
+  eeTier: "fast" | "balanced" | "premium" | null;
+  /** Consecutive failed or cancelled turns; the next decision escalates while > 0. */
+  recentFailures: number;
 }
 
 type Listener = (s: RouterState) => void;
@@ -27,6 +33,9 @@ function makeStore() {
     lastHealthCheckAtMs: 0,
     taskHash: null,
     source: null,
+    taskText: null,
+    eeTier: null,
+    recentFailures: 0,
   };
   const listeners = new Set<Listener>();
   return {

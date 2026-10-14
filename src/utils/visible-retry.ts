@@ -62,15 +62,30 @@ export function setRetryReporter(fn: RetryReporter | null): void {
   retryReporter = fn;
 }
 
+/**
+ * Surface one `[retry] …` line through the registered reporter (TUI toast, or a
+ * background delegation's job record), falling back to stderr. Shared by every
+ * retry site so a wait is announced the same way wherever it happens — the
+ * metered gate's provider rate-limit backoff included.
+ */
+export function reportRetryNotice(message: string, level: "warn" | "info" = "warn"): void {
+  if (retryReporter) {
+    try {
+      retryReporter(message, level);
+      return;
+    } catch (err) {
+      // A broken sink must not hide the notice — fall through to stderr.
+      process.stderr.write(`[retry] reporter failed: ${(err as Error)?.message}\n`);
+    }
+  }
+  process.stderr.write(`${message}\n`);
+}
+
 function defaultOnRetry(attempt: number, total: number, delayMs: number, error: Error): void {
   const reason =
     (error as { statusCode?: number }).statusCode === 429 ? "rate-limited (429)" : error.message.slice(0, 80);
   const message = `[retry] ${reason} — waiting ${Math.round(delayMs / 1000)}s before attempt ${attempt + 1}/${total}`;
-  if (retryReporter) {
-    retryReporter(message, "warn");
-    return;
-  }
-  process.stderr.write(`${message}\n`);
+  reportRetryNotice(message, "warn");
 }
 
 export async function withVisibleRetry<T>(fn: () => Promise<T>, opts: VisibleRetryOpts = {}): Promise<T> {

@@ -1,0 +1,18 @@
+{
+  "runtime": "bun",
+  "parentId": "c7e9936fc66e",
+  "restoredParentId": "c7e9936fc66e",
+  "output": "MAIN_FINAL: verified answer is four.",
+  "child": [
+    {
+      "id": "df15ce30596b",
+      "kind": "subagent",
+      "parent_session_id": "c7e9936fc66e"
+    }
+  ],
+  "parentHasReceipt": true,
+  "parentHasMainAnswer": true,
+  "contentIsMainOnly": true,
+  "modelCalls": 11,
+  "requestedBackgroundRounds": 60
+}

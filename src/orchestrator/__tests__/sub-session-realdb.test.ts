@@ -18,8 +18,10 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite
 import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model.js";
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
+import { SessionStore } from "../../storage/sessions.js";
 import { appendMessages, buildChatEntries } from "../../storage/transcript.js";
 import { Agent } from "../orchestrator.js";
+import type { ModelTaskKind } from "../sub-agent-model-tier.js";
 
 // A single 50 KB intermediate tool result — the "clutter" a read-heavy turn (13
 // read_file calls) accumulates. The whole point of delegation is that THIS never
@@ -29,25 +31,111 @@ const FINAL_OUTCOME = "FINAL structured outcome for the parent";
 
 // Force the router to choose SPAWN_SUB_SESSION (the path under test).
 const mockClassify = vi.fn();
+// Round 4 (G9): relatedness classifier for the resume-vs-fork decision.
+// Defaults to "related" so every PRE-EXISTING test in this file (none of
+// which exercise a resume — each SPAWN test makes exactly one
+// processMessage() call, so `activeSubSession` is never found) is
+// unaffected; G9's own tests override this per-case.
+const mockRelatedness = vi.fn().mockResolvedValue({ related: true, confidence: 0.9, reason: "same task" });
 vi.mock("../../pil/llm-classify.js", () => ({
   classifySubSessionAction: (...a: unknown[]) => (mockClassify as (...x: unknown[]) => unknown)(...a),
+  classifySubSessionRelatedness: (...a: unknown[]) => (mockRelatedness as (...x: unknown[]) => unknown)(...a),
 }));
+
+// Round 3 (MEDIUM correction to G3 HIGH): spies on every `resolveModelForTask`
+// call, recording exactly which `opts.pinned` value orchestrator.ts's
+// `_resolveModelForTask` passed for each task kind — deterministic and
+// independent of what the loaded model catalog actually offers per
+// provider/tier (a real-catalog behavioural-difference assertion would be
+// vacuous whenever no cheaper same-provider tier happens to exist). Delegates
+// to the REAL implementation so every other behaviour (parentTier ceiling,
+// tier-walk, fallback) stays exactly as-is; only the call is observed.
+const capturedResolveModelForTaskCalls: Array<{ task: string; pinned: boolean | undefined; fallbackModelId: string }> =
+  [];
+vi.mock("../sub-agent-model-tier.js", async () => {
+  const actual = await vi.importActual<typeof import("../sub-agent-model-tier.js")>("../sub-agent-model-tier.js");
+  return {
+    ...actual,
+    resolveModelForTask: (
+      task: string,
+      providerId: string,
+      fallbackModelId: string,
+      lookup?: unknown,
+      opts?: { parentTier?: string; pinned?: boolean },
+    ) => {
+      capturedResolveModelForTaskCalls.push({ task, pinned: opts?.pinned, fallbackModelId });
+      return (
+        actual.resolveModelForTask as (
+          task: string,
+          providerId: string,
+          fallbackModelId: string,
+          lookup?: unknown,
+          opts?: unknown,
+        ) => string
+      )(task, providerId, fallbackModelId, lookup, opts);
+    },
+  };
+});
 
 // Per-test knob: the cumulative tool-output chars the (mocked) turn reports to
 // the Agent, driving reactive next-turn escalation. 0 = light turn.
 let reportedLoad = 0;
+
+// Round 2 (G3 HIGH): captures the `modelId` MessageProcessor was actually
+// constructed with, per invocation (one per turn — parent OR child), so a
+// test can assert a project model pin propagates into the CHILD session's
+// own turn, not just its `sessions` table row. Reset per test in beforeEach.
+const capturedTurnModelIds: Array<{ sessionId: string | undefined; modelId: string | undefined }> = [];
+
+// Round 9 (G13): when set, the mocked turn simulates the child's own
+// `cd` into a subdirectory — the REAL `this.bash` is shared across the
+// whole Agent instance, so this is exactly what a real sub-session tool
+// call does to it.
+let simulatedCdTo: string | null = null;
+let cancelHelper = false;
+let failHelper = false;
 
 // Simulate a read-heavy turn: write intermediate clutter to the CHILD session
 // (real DB), and leave [.., final assistant, final tool] in the in-memory working
 // set so the orchestrator's salvage step can absorb the outcome to the parent.
 vi.mock("../message-processor.js", () => ({
   MessageProcessor: class {
-    private deps: { messages: unknown[]; session?: { id: string }; reportTurnToolLoad?: (n: number) => void };
-    constructor(deps: { messages: unknown[]; session?: { id: string }; reportTurnToolLoad?: (n: number) => void }) {
+    private deps: {
+      messages: unknown[];
+      session?: { id: string };
+      reportTurnToolLoad?: (n: number) => void;
+      modelId?: string;
+      bash?: { setCwd: (p: string) => void; getCwd: () => string };
+      getAbortController?: () => AbortController | null;
+    };
+    constructor(deps: {
+      messages: unknown[];
+      session?: { id: string };
+      reportTurnToolLoad?: (n: number) => void;
+      modelId?: string;
+      bash?: { setCwd: (p: string) => void; getCwd: () => string };
+      getAbortController?: () => AbortController | null;
+    }) {
       this.deps = deps;
+      capturedTurnModelIds.push({ sessionId: deps.session?.id, modelId: deps.modelId });
     }
     async *run() {
+      if (this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))) {
+        const answer = { role: "assistant", content: "MAIN accepted the evidence and produced the final answer" };
+        appendMessages(this.deps.session!.id, [answer] as never);
+        this.deps.messages.push(answer);
+        yield { type: "content", content: answer.content };
+        yield { type: "done" };
+        return;
+      }
+      if (cancelHelper) {
+        this.deps.getAbortController?.()?.abort();
+        yield { type: "done" };
+        return;
+      }
+      if (failHelper) throw new Error("Controlled helper failure");
       this.deps.reportTurnToolLoad?.(reportedLoad);
+      if (simulatedCdTo) this.deps.bash?.setCwd(simulatedCdTo);
       const childId = this.deps.session?.id;
       if (childId) {
         // The real MessageProcessor persists to whatever session is running —
@@ -88,6 +176,11 @@ beforeEach(() => {
   process.env.USERPROFILE = tmpHome;
   process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
   reportedLoad = 0;
+  simulatedCdTo = null;
+  cancelHelper = false;
+  failHelper = false;
+  capturedTurnModelIds.length = 0;
+  capturedResolveModelForTaskCalls.length = 0;
   closeDatabase();
   getDatabase(); // run migrations against the temp DB
   vi.clearAllMocks();
@@ -102,10 +195,119 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = prevUserProfile;
-  fs.rmSync(tmpHome, { recursive: true, force: true });
+  fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("sub-session SPAWN on real SQLite — labeling + absorption + parent leanness", () => {
+  it("retains the original main owner through a nested helper handoff", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    (agent as any)._helperParentSessionId = "original-main";
+    for await (const _ of agent.processMessage("Inspect nested task")) {
+      /* drain */
+    }
+    expect((agent as any)._helperParentSessionId).toBe("original-main");
+    expect((agent as any).delegations.getOwnerId()).toBe("original-main");
+  });
+
+  it("consults the parent's configured model and propagates cancellation when a helper asks for guidance", async () => {
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+    const state = agent as any;
+    const parentId = agent.getSessionId();
+    const child = state.sessionStore.createSession("deepseek-v4-flash", "agent", process.cwd());
+    state.sessionStore.linkChild(child.id, parentId, "subagent");
+    state.session = child;
+    state.modelId = child.model;
+    state.abortController = new AbortController();
+    const providerRuntime = await import("../../providers/runtime.js");
+    const generate = await import("../../providers/streamed-generate.js");
+    const resolve = vi.spyOn(providerRuntime, "resolveModelRuntime");
+    const stream = vi
+      .spyOn(generate, "generateTextStreamed")
+      .mockResolvedValue({ text: "Parent guidance", toolCalls: [] });
+    try {
+      const advice = await state._buildMessageProcessorDeps().consultParentSession("Need guidance");
+      expect(advice).toBe("Parent guidance");
+      expect(resolve).toHaveBeenCalledWith("deepseek-v4-pro");
+      const options = stream.mock.calls[0]?.[0];
+      state.abortController.abort();
+      expect(options?.abortSignal?.aborted).toBe(true);
+    } finally {
+      resolve.mockRestore();
+      stream.mockRestore();
+    }
+  });
+
+  it("defers main-owned notifications while the Agent is executing its helper context", async () => {
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    (agent as any)._helperParentSessionId = parentId;
+    (agent as any).session = { ...(agent as any).session, id: "child-context" };
+    const consume = vi.spyOn((agent as any).delegations, "consumeNotifications").mockResolvedValue([]);
+    expect((agent as any).delegations.getOwnerId()).toBe(parentId);
+    await agent.consumeBackgroundNotifications();
+    expect(consume).not.toHaveBeenCalled();
+    consume.mockRestore();
+  });
+
+  it("restores main after cancellation without starting a new decision step", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    cancelHelper = true;
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    for await (const _ of agent.processMessage("Inspect")) {
+      /* drain */
+    }
+    expect(agent.getSessionId()).toBe(parentId);
+    expect(capturedTurnModelIds).toHaveLength(1);
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("restores parent when the consumer closes the generator during helper work", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId();
+    const stream = agent.processMessage("Inspect");
+    while (capturedTurnModelIds.length === 0) await stream.next();
+    await stream.return();
+    expect(agent.getSessionId()).toBe(parentId);
+    expect(capturedTurnModelIds).toHaveLength(1);
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("returns helper failures to main for a decision rather than finalizing them as an answer", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    failHelper = true;
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    for await (const _ of agent.processMessage("Inspect")) {
+      /* drain */
+    }
+    expect(capturedTurnModelIds).toHaveLength(2);
+    expect(JSON.stringify((agent as any).messages)).toContain("Status: failed");
+    expect((agent as any).abortController).toBeNull();
+  });
+
+  it("returns a bounded helper receipt to main and only main produces the final answer", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+    const chunks = [];
+    for await (const chunk of agent.processMessage("Inspect implementation and report evidence")) chunks.push(chunk);
+    expect(capturedTurnModelIds).toHaveLength(2);
+    expect(capturedTurnModelIds[1]?.sessionId).toBe(parentId);
+    expect(chunks.filter((c) => c.type === "content").map((c) => c.content)).toEqual([
+      "MAIN accepted the evidence and produced the final answer",
+    ]);
+    expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
+    const parentRows = getDatabase()
+      .prepare("SELECT message_json FROM messages WHERE session_id = ? ORDER BY seq")
+      .all(parentId);
+    const text = JSON.stringify(parentRows);
+    expect(text).toContain("Helper receipt");
+    expect(text).not.toContain("CLUTTER_");
+    expect(text).toContain("MAIN accepted");
+  });
+
   it("creates a kind='subagent' child, isolates 50KB clutter in it, and absorbs ONLY the outcome to a lean parent", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
@@ -186,11 +388,13 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const entries = buildChatEntries(parentId);
     const answers = entries.filter((e) => e.type === "assistant" && e.content.includes(FINAL_OUTCOME));
-    expect(answers).toHaveLength(1);
+    expect(answers).toHaveLength(0); // Helper evidence is internal; main owns the displayed answer.
+    expect(entries.filter((e) => e.type === "assistant" && e.content.includes("MAIN accepted"))).toHaveLength(1);
+    expect(entries.some((e) => e.content.startsWith("[Helper receipt:"))).toBe(false);
 
     // The child's OTHER assistant work is untouched — only the absorbed message
     // is dropped, not the whole child transcript.
-    expect(entries.some((e) => e.type === "assistant" && e.content === "intermediate analysis step")).toBe(true);
+    expect(entries.some((e) => e.type === "assistant" && e.content === "intermediate analysis step")).toBe(false);
   });
 
   it("DIRECT_ANSWER runs in the parent — no child session created (baseline)", async () => {
@@ -285,5 +489,764 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     expect(db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId)).toHaveLength(0);
 
     delete process.env.MUONROI_REACTIVE_DELEGATE_CHARS;
+  });
+
+  // Round 2 (G3 HIGH): a project model pin (`.muonroi-cli/settings.json`
+  // `{"model": ...}`) must hold for a SPAWN_SUB_SESSION child too — both the
+  // child's OWN `sessions` row and the modelId its own turn actually runs
+  // with (its "tool loop") — not just the parent turn that spawned it.
+  it("a project model pin propagates to a SPAWN_SUB_SESSION child: the sessions row AND the modelId its own turn runs with", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const PIN_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-pin-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: PIN_MODEL }));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const child = db.prepare("SELECT id, model FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string; model: string }
+        | undefined;
+      expect(child).toBeDefined();
+      // The child session's OWN sessions row carries the pinned model.
+      expect(child?.model).toBe(PIN_MODEL);
+
+      // The turn that actually ran (MessageProcessor is constructed once
+      // per processMessage() call, AFTER the SPAWN_SUB_SESSION handler has
+      // already swapped session context to the child — this architecture
+      // never gives the "parent turn" its own separate MessageProcessor
+      // run) was constructed against the CHILD session, with the pinned
+      // modelId — not just the session row, the actual deps its tool loop
+      // runs with.
+      expect(capturedTurnModelIds).toHaveLength(2);
+      expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
+      expect(capturedTurnModelIds[0]?.modelId).toBe(PIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 3 (MEDIUM correction to round 2's G3 HIGH fix): round 2 applied the
+// project model pin unconditionally inside `_resolveModelForTask` — the
+// SINGLE shared resolver behind both stream-runner.ts's delegated
+// sub-agent dispatch (explore/general/verify) AND compaction's own model
+// choice (`_resolveCompactModel` -> `_resolveModelForTask("compact")`).
+// That pinned compaction too, an unintended cost change: compaction is
+// deliberately on its own cheap tier table
+// (`TASK_TIER_PREFS.compact = ["fast","balanced"]`) so a session
+// summarization pass never rides the expensive pinned model. Decision:
+// compaction stays on its cheap tier table; the pin applies only to
+// delegated sub-agent/sub-session dispatch (every OTHER task kind).
+//
+// `_resolveModelForTask` is a private method — accessed here via a type
+// cast, the same way any other JS runtime call would reach it; there is no
+// other way to observe this ONE orchestrator-level wiring decision without
+// either triggering a full real LLM compaction pass or the full
+// stream-runner sub-agent dispatch pipeline, both far heavier than the
+// thing actually under test (which task kinds get `pinned: true`).
+describe("_resolveModelForTask — round 3: the pin applies to delegated dispatch, NOT to compaction", () => {
+  it("passes pinned:false for task='compact' and pinned:true for every other task, when the project pins a model", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-pin-compact-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    const PIN_MODEL = "deepseek-v4-pro";
+    fs.writeFileSync(path.join(projectDir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: PIN_MODEL }));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      resolveModelForTask("compact");
+      resolveModelForTask("general");
+      resolveModelForTask("explore");
+      resolveModelForTask("verify");
+
+      const byTask = Object.fromEntries(capturedResolveModelForTaskCalls.map((c) => [c.task, c.pinned]));
+      expect(byTask.compact).toBe(false); // NOT pinned — compaction keeps its own cheap tier table
+      expect(byTask.general).toBe(true);
+      expect(byTask.explore).toBe(true);
+      expect(byTask.verify).toBe(true);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("passes pinned:false for EVERY task when the project has no pin at all (no regression)", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-nopin-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      resolveModelForTask("compact");
+      resolveModelForTask("general");
+
+      const byTask = Object.fromEntries(capturedResolveModelForTaskCalls.map((c) => [c.task, c.pinned]));
+      expect(byTask.compact).toBe(false);
+      expect(byTask.general).toBe(false);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 11 — origin/develop merged in router/decide.ts's local tier-evidence
+// feature (route history + recent-failure escalation, routerStore's new
+// `recentFailures`/`eeTier` fields). `_resolveModelForTask` (subAgentModel,
+// compaction's own tier table) has never imported router/decide.ts at all —
+// it resolves tiers via sub-agent-model-tier.ts's OWN `resolveModelForTask` +
+// peak-hour.ts's `getRoutedModelByTier`, a completely separate mechanism.
+// This pins that isolation: evidence state that would escalate a `decide()`
+// call several tiers must have ZERO effect here, for both a subAgentModel
+// pin (c) and compaction's cheap tier table (d).
+describe("_resolveModelForTask — round 11: immune to router/decide.ts's local tier-evidence feature", () => {
+  it("a subAgentModel pin (delegated dispatch) is unaffected by routerStore evidence that would otherwise escalate a decide() call", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-tierevidence-subagent-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    const { routerStore } = await import("../../router/store.js");
+    const prevRouterState = routerStore.getState();
+    try {
+      // Evidence that would escalate a decide() call several tiers up (see
+      // decide.test.ts's "a failed previous turn escalates" /
+      // "evidence moves the tier" tests) — irrelevant here.
+      routerStore.setState({ recentFailures: 5, eeTier: "premium" });
+
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      expect(resolveModelForTask("general")).toBe(SUB_AGENT_MODEL);
+      expect(resolveModelForTask("explore")).toBe(SUB_AGENT_MODEL);
+    } finally {
+      routerStore.setState(prevRouterState);
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("compaction's own tier table is unaffected by routerStore evidence that would otherwise escalate a decide() call", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-tierevidence-compact-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    const { routerStore } = await import("../../router/store.js");
+    const prevRouterState = routerStore.getState();
+    try {
+      routerStore.setState({ recentFailures: 5, eeTier: "premium" });
+
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      // Compaction stays on TASK_TIER_PREFS.compact = ["fast","balanced"] —
+      // never premium, no matter what the router's evidence state says.
+      const compactModel = resolveModelForTask("compact");
+      expect(compactModel).not.toBe("deepseek-v4-pro");
+      const info = await import("../../models/registry.js").then((m) => m.getModelInfo(compactModel));
+      expect(info?.tier).not.toBe("premium");
+    } finally {
+      routerStore.setState(prevRouterState);
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 9 (HR8, owner correction to round 2's G3): round 2 made every
+// SPAWN_SUB_SESSION child and delegated sub-agent task inherit the main
+// session's `model` pin unconditionally — the owner's own framework wants
+// the orchestrator tier (main session) and worker tier (sub-agents/
+// sub-sessions) able to run DIFFERENT models. `subAgentModel` (project
+// settings) is the dedicated override: when set, it is what delegated
+// (non-"compact") dispatch AND a new SPAWN_SUB_SESSION child use INSTEAD of
+// the main session's `model`; the main session itself is untouched. Unset
+// means exactly today's (round 2/3) behaviour, unchanged.
+describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can run a DIFFERENT model than the main session", () => {
+  it("_resolveModelForTask pins delegated (non-compact) tasks to subAgentModel, and leaves compact + the main session's own modelId untouched", async () => {
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subagentmodel-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const resolveModelForTask = (
+        agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
+      )._resolveModelForTask.bind(agent);
+
+      const general = resolveModelForTask("general");
+      const explore = resolveModelForTask("explore");
+      const compact = resolveModelForTask("compact");
+
+      // The RETURN VALUE (what a caller actually dispatches with) is the
+      // sub-agent override for delegated tasks...
+      expect(general).toBe(SUB_AGENT_MODEL);
+      expect(explore).toBe(SUB_AGENT_MODEL);
+      void compact; // asserted via byTask.compact below (pinned + fallback), not the raw
+      // return value — compaction resolves through its own real cheap tier
+      // table, so its RETURN VALUE is catalog-dependent and could coincide
+      // with SUB_AGENT_MODEL for an unrelated reason (not a regression).
+
+      const byTask = Object.fromEntries(
+        capturedResolveModelForTaskCalls.map((c) => [c.task, { pinned: c.pinned, fallbackModelId: c.fallbackModelId }]),
+      );
+      expect(byTask.general).toEqual({ pinned: true, fallbackModelId: SUB_AGENT_MODEL });
+      expect(byTask.explore).toEqual({ pinned: true, fallbackModelId: SUB_AGENT_MODEL });
+      // compact's fallback is still the MAIN session's own modelId, never subAgentModel.
+      expect(byTask.compact).toEqual({ pinned: false, fallbackModelId: MAIN_MODEL });
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a SPAWN_SUB_SESSION child is created with subAgentModel, not the main session's model pin", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subagentmodel-spawn-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const parent = db.prepare("SELECT model FROM sessions WHERE id = ?").get(parentId) as
+        | { model: string }
+        | undefined;
+      const child = db.prepare("SELECT id, model FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string; model: string }
+        | undefined;
+
+      // The main session keeps `model` — subAgentModel never touches it.
+      expect(parent?.model).toBe(MAIN_MODEL);
+      // The child gets subAgentModel, not the main session's pin.
+      expect(child).toBeDefined();
+      expect(child?.model).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds).toHaveLength(2);
+      expect(capturedTurnModelIds[0]?.sessionId).toBe(child?.id);
+      expect(capturedTurnModelIds[0]?.modelId).toBe(SUB_AGENT_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("no regression: when subAgentModel is unset, a SPAWN_SUB_SESSION child still inherits the main session's model pin exactly as before (round 2/3 behaviour)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    const PIN_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subagentmodel-unset-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, ".muonroi-cli", "settings.json"), JSON.stringify({ model: PIN_MODEL }));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const child = db.prepare("SELECT id, model FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string; model: string }
+        | undefined;
+      expect(child?.model).toBe(PIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("the sub-agent override does NOT leak past the sub-session's lifetime: the NEXT main-session turn runs on `model` again", async () => {
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subagentmodel-restore-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+
+      // Turn 1: forks a sub-session — this.modelId is switched to
+      // subAgentModel for the duration of the child's own turn.
+      mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-2)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+
+      // Turn 2: a plain DIRECT_ANSWER turn on the (now restored) main
+      // session — must run on MAIN_MODEL, not the sub-agent override left
+      // over from turn 1.
+      mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.95, reason: "informational" });
+      for await (const _ of agent.processMessage("tóm tắt lại giúp tôi")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  // Defect B: the test above ("does NOT leak past the sub-session's
+  // lifetime") only covers the HAPPY path — `isSubSessionForked` reaches
+  // `true` and the finally block's restore runs. This block covers the
+  // THROWING path: `this.session`/`this.modelId`/`this.messages` are
+  // switched to the child's values BEFORE `isSubSessionForked` is set
+  // (orchestrator.ts ~3961-3973), so a throw from `touchSession` (SQLITE_BUSY
+  // under concurrent write, say) between those writes and the flag leaves
+  // the flag false — and the finally block's restore-on-absorb path is
+  // gated on that same flag, so it never runs. The NEXT thing that executes
+  // (the turn body itself, since the catch only logs and falls through) then
+  // runs on the leaked child state.
+  it("touchSession throwing mid-RESUME-fork must not leak this.modelId/session/messages past the failed fork onto the very turn that failed to fork", async () => {
+    const MAIN_MODEL = "deepseek-v4-pro";
+    const SUB_AGENT_MODEL = "deepseek-v4-flash";
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-throw-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ model: MAIN_MODEL, subAgentModel: SUB_AGENT_MODEL }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    let touchSpy: ReturnType<typeof vi.spyOn> | null = null;
+    try {
+      mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      // Turn 1: establishes an active child sub-session normally (fork, no
+      // throw) — this.modelId correctly switches to SUB_AGENT_MODEL for the
+      // child's own turn.
+      for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-2)?.modelId).toBe(SUB_AGENT_MODEL);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+      const childBefore = getDatabase().prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(parentId) as
+        | { id: string }
+        | undefined;
+      expect(childBefore?.id).toBeTruthy();
+
+      // Turn 2: relatedness says RELATED — the RESUME branch runs
+      // (orchestrator.ts ~3961-3973): this.session, then this.modelId, are
+      // switched to the child's BEFORE touchSession is reached. Make
+      // touchSession throw for the CHILD id specifically (the parent's own
+      // touchSession calls elsewhere in the turn must keep working normally,
+      // or the test would be exercising a different failure entirely).
+      mockRelatedness.mockResolvedValueOnce({ related: true, confidence: 0.9, reason: "same task" });
+      const realTouchSession = SessionStore.prototype.touchSession;
+      touchSpy = vi.spyOn(SessionStore.prototype, "touchSession").mockImplementation(function (
+        this: SessionStore,
+        id: string,
+        cwd: string,
+      ) {
+        if (id !== parentId) {
+          throw new Error("SQLITE_BUSY: database is locked");
+        }
+        return realTouchSession.call(this, id, cwd);
+      });
+
+      for await (const _ of agent.processMessage("tiếp tục phân tích")) {
+        // drain
+      }
+
+      // The fork attempt threw and was caught (logged, "falling back to main
+      // session") — no SECOND child was created...
+      const children = getDatabase()
+        .prepare("SELECT id FROM sessions WHERE parent_session_id = ?")
+        .all(parentId) as Array<{ id: string }>;
+      expect(children).toHaveLength(1); // still just the turn-1 child — resume, not a new fork
+
+      // ...and this SAME turn (the one whose fork attempt failed) must have
+      // fallen all the way through to running on the PARENT session/model —
+      // not stranded on the child's, which is what `isSubSessionForked`
+      // staying false while `this.modelId`/`this.session` were already
+      // switched would otherwise leak.
+      expect(capturedTurnModelIds.at(-1)?.sessionId).toBe(parentId);
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+      expect(agent.getSessionId()).toBe(parentId);
+
+      // And the leak must not persist to a THIRD, ordinary turn either.
+      touchSpy.mockRestore();
+      touchSpy = null;
+      mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.95, reason: "informational" });
+      for await (const _ of agent.processMessage("tóm tắt lại giúp tôi")) {
+        // drain
+      }
+      expect(capturedTurnModelIds.at(-1)?.modelId).toBe(MAIN_MODEL);
+    } finally {
+      touchSpy?.mockRestore();
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 9 (G13) — `this.bash` is ONE shared BashTool for the whole Agent
+// lifetime; forking a sub-session swaps `this.session`/`this.messages` but
+// never creates a new BashTool. Measured live: debug.log's "[flow/run-root]
+// flow-state dir re-anchored to the run root (tool cwd had drifted)" firing
+// repeatedly, and the TUI status bar ending inside a challenge subdirectory
+// after a sub-session turn — a child's own `cd` was leaking into the
+// parent's cwd once the child's turn ended.
+describe("sub-session cwd isolation — round 9 (G13)", () => {
+  it("a child sub-session's cd does not leak into the parent's cwd after absorb", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const cwdBeforeFork = agent.getCwd();
+    const subDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-cwd-child-"));
+
+    try {
+      // The mocked turn (see the vi.mock("../message-processor.js") above)
+      // simulates the child's own tool call cd'ing into a subdirectory —
+      // exactly what a real sub-session working inside a challenge/repo dir
+      // does.
+      simulatedCdTo = subDir;
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      // The parent's cwd is back to what it was before the fork — the
+      // child's cd did not leak past the sub-session's lifetime.
+      expect(agent.getCwd()).toBe(cwdBeforeFork);
+    } finally {
+      simulatedCdTo = null;
+      fs.rmSync(subDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("a SECOND (non-sub-session) turn after the child's cd runs on the restored parent cwd, not the child's", async () => {
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const cwdBeforeFork = agent.getCwd();
+    const subDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-cwd-child2-"));
+
+    try {
+      mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+      simulatedCdTo = subDir;
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+      simulatedCdTo = null;
+
+      mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.95, reason: "informational" });
+      for await (const _ of agent.processMessage("tóm tắt lại giúp tôi")) {
+        // drain
+      }
+
+      expect(agent.getCwd()).toBe(cwdBeforeFork);
+    } finally {
+      simulatedCdTo = null;
+      fs.rmSync(subDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+});
+
+// Round 4 (G9): an unrelated request must fork a FRESH sub-session instead of
+// resuming an active one purely because it is recent. Measured live: session
+// 69e68c766fcf's "hunt/stage0" request resumed the unrelated SEAL-challenge
+// sub-session's 29-message context.
+describe("sub-session resume vs. fork — round 4 (G9)", () => {
+  it("an UNRELATED second request does NOT resume the active sub-session: it is marked abandoned and a fresh one is forked", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    mockRelatedness.mockResolvedValueOnce({ related: false, confidence: 0.9, reason: "different repo/task entirely" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
+      // drain
+    }
+    const db = getDatabase();
+    const firstChild = db
+      .prepare("SELECT id, title, status FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(parentId) as { id: string; title: string | null; status: string };
+    expect(firstChild.title).toBe("seal challenge precommit-working-set-drift");
+
+    for await (const _ of agent.processMessage("tìm repo Python mới và dựng bài tới hết stage0")) {
+      // drain
+    }
+
+    const children = db
+      .prepare("SELECT id, title, status FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC")
+      .all(parentId) as Array<{ id: string; title: string | null; status: string }>;
+    expect(children).toHaveLength(2); // the old one was NOT reused — a second, distinct child was created
+    const oldChild = children.find((c) => c.id === firstChild.id)!;
+    const newChild = children.find((c) => c.id !== firstChild.id)!;
+    expect(oldChild.status).toBe("abandoned"); // marked abandoned, not silently left "active" with stale content
+    expect(newChild.title).toBe("tìm repo Python mới và dựng bài tới hết stage0");
+    // The relatedness classifier was actually consulted with the OLD sub-session's
+    // recorded goal and the NEW request — proving the decision is real, not a stub.
+    expect(mockRelatedness).toHaveBeenCalledWith(
+      expect.anything(),
+      "tìm repo Python mới và dựng bài tới hết stage0",
+      "seal challenge precommit-working-set-drift",
+    );
+  });
+
+  it("a RELATED second request DOES resume the active sub-session (no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+    mockRelatedness.mockResolvedValueOnce({ related: true, confidence: 0.95, reason: "same challenge, follow-up" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
+      // drain
+    }
+    const db = getDatabase();
+    const firstChild = db
+      .prepare("SELECT id FROM sessions WHERE parent_session_id = ? ORDER BY created_at ASC LIMIT 1")
+      .get(parentId) as { id: string };
+
+    for await (const _ of agent.processMessage("done_check báo lỗi gì vậy, xem lại giúp tôi")) {
+      // drain
+    }
+
+    const children = db.prepare("SELECT id, status FROM sessions WHERE parent_session_id = ?").all(parentId) as Array<{
+      id: string;
+      status: string;
+    }>;
+    expect(children).toHaveLength(1); // the SAME sub-session was reused, not forked again
+    expect(children[0]!.id).toBe(firstChild.id);
+    expect(children[0]!.status).toBe("active");
+  });
+
+  it("no active sub-session at all still forks fresh without ever consulting the relatedness classifier (nothing to compare against)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const parentId = agent.getSessionId()!;
+
+    for await (const _ of agent.processMessage("first task ever for this session")) {
+      // drain
+    }
+
+    expect(mockRelatedness).not.toHaveBeenCalled();
+    const db = getDatabase();
+    const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+    expect(children).toHaveLength(1);
+  });
+});
+
+// Round 12 (F1/G15) — router SPAWN_SUB_SESSION hands the user's raw request
+// to a WORKER-tier child with a generic overlay ("full access to tools,
+// satisfy the user's request"); the main (ORCHESTRATOR-tier) model never
+// sees the turn again. Measured live: session 94bf4fe19937's sub-session
+// never mapped the request to the project's own framework, skipped writing
+// a plan, and started editing a solution file directly — in violation of an
+// explicit "tell me the plan first" instruction from the SAME turn.
+// `routerSubSessions: false` keeps the CURRENT turn on the main session.
+describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main session", () => {
+  it("false: a router SPAWN_SUB_SESSION decision does NOT fork — no child session row, the turn runs on this.modelId", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-off-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: false }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const MAIN_MODEL = "deepseek-v4-flash";
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(0);
+
+      // The turn that actually ran was constructed against the MAIN session,
+      // on the MAIN model — not a forked child's.
+      expect(capturedTurnModelIds).toHaveLength(1);
+      expect(capturedTurnModelIds[0]?.sessionId).toBe(parentId);
+      expect(capturedTurnModelIds[0]?.modelId).toBe(MAIN_MODEL);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("false: reactive escalation (tool-heavy prior turn) also does NOT fork", async () => {
+    // Router itself answers DIRECT_ANSWER; reactive escalation is what would
+    // normally override it to SPAWN_SUB_SESSION (see the "REACTIVE" describe
+    // block above) — with the setting off, it must not fork either.
+    mockClassify.mockResolvedValue({ action: "DIRECT_ANSWER", confidence: 0.9, reason: "looks simple" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-reactive-off-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: false }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      // Turn 1: heavy tool load reported (router says DIRECT — runs in the
+      // parent either way). This becomes `_lastTurnToolChars` for turn 2.
+      reportedLoad = 150_000;
+      for await (const _ of agent.processMessage("đánh giá phân tích council feature (turn 1, heavy)")) {
+        // drain
+      }
+      // Turn 2: router STILL says DIRECT, but turn 1's heavy load would
+      // normally trip reactive escalation to SPAWN_SUB_SESSION — with the
+      // setting off, it must stay on the main session instead.
+      reportedLoad = 0;
+      for await (const _ of agent.processMessage("tiếp tục phân tích (turn 2)")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(0);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("true (explicit): behaves exactly like unset — forks as before (no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-true-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: true }),
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("unset: behaves exactly like today — forks as before (byte-for-byte default, no regression)", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-unset-"));
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("malformed value (a string, not a boolean) falls back to the default (true) — still forks", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
+
+    const projectDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-routersubsessions-malformed-"));
+    fs.mkdirSync(path.join(projectDir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(projectDir, ".muonroi-cli", "settings.json"),
+      JSON.stringify({ routerSubSessions: "false" }), // string, not boolean — malformed
+    );
+    const prevCwd = process.cwd();
+    process.chdir(projectDir);
+    try {
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const parentId = agent.getSessionId()!;
+
+      for await (const _ of agent.processMessage("review toàn bộ src/council")) {
+        // drain
+      }
+
+      const db = getDatabase();
+      const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
+      expect(children).toHaveLength(1);
+    } finally {
+      process.chdir(prevCwd);
+      fs.rmSync(projectDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   });
 });

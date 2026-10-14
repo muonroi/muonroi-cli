@@ -64,7 +64,18 @@ pytest services/catalog-api/ -q
 
 ## Deploy
 
-Built and run as the `catalog` service in `deploy/docker-compose.yml` (bound to
-`127.0.0.1:8083`), reverse-proxied by Apache at `catalog.muonroi.com`. Pulled +
-rebuilt by `/opt/muonroi/update.sh`. **Prereqs**: DNS `catalog.muonroi.com` →
-VPS and the Cloudflare origin cert must cover `*.muonroi.com`.
+The image reads the canonical catalog; its schema preserves modalities and
+per-request `long_context_pricing` metadata. OpenAI/Anthropic pricing comes
+from the verified catalog rows, without a duplicate provider price table.
+
+The live deployment inspected on 2026-10-08 uses `/opt/muonroi/docker-compose.yml`
+plus `docker-compose.override.yml`, service `catalog`, image port8083 published
+at `127.0.0.1:8086`, reverse-proxied at `catalog.muonroi.com`. Verify container
+labels and Compose configuration before deploying; older deployment docs and
+local compose files use a different port.
+
+Build from the repository root with `services/catalog-api/Dockerfile`, then
+recreate only `catalog` with `docker compose up -d --no-deps --no-build catalog`.
+Keep the previous image for rollback. Verify `/health` and the authenticated
+public `/api/v1/models` response after deployment. Avoid running a whole-stack
+update script for a catalog-only change.

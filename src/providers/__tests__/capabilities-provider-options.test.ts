@@ -35,11 +35,11 @@ describe("ProviderCapabilities — G3 buildProviderOptions", () => {
       expect(opts).toEqual({ anthropic: { thinking: { type: "enabled", budgetTokens: 8_000 } } });
     });
 
-    it("returns enabled thinking with 10000 budget when thinkingType=adaptive", () => {
+    it("returns adaptive thinking without a manual budget when thinkingType=adaptive", () => {
       const caps = getProviderCapabilities("anthropic");
       const model = baseModel({ provider: "anthropic", thinkingType: "adaptive" });
       const opts = caps.buildProviderOptions({ model });
-      expect(opts).toEqual({ anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } } });
+      expect(opts).toEqual({ anthropic: { thinking: { type: "adaptive" } } });
     });
 
     it("returns undefined when thinkingType is absent", () => {
@@ -253,7 +253,7 @@ describe("buildProviderOptions — minimizeReasoning", () => {
     const caps = getProviderCapabilities("anthropic");
     // Normal turn: thinking enabled as before.
     expect(caps.buildProviderOptions({ model })).toEqual({
-      anthropic: { thinking: { type: "enabled", budgetTokens: 10_000 } },
+      anthropic: { thinking: { type: "adaptive" } },
     });
     // Format-only call: no budget granted.
     expect(caps.buildProviderOptions({ model, minimizeReasoning: true })).toBeUndefined();

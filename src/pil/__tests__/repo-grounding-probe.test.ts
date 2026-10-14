@@ -78,7 +78,7 @@ describe("on-disk fallback (opts.cwd with unindexed slash-path)", () => {
 
   afterAll(() => {
     for (const dir of tmpDirs) {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

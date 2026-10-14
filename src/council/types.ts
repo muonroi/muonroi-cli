@@ -211,13 +211,27 @@ export interface DebateState {
    */
   finalCriteriaDeferred?: boolean[];
   /**
-   * B4 interactive escalation outcome. Set only when the user was prompted at a
-   * stop-with-unmet boundary and chose an action: `extend` granted extra rounds
-   * past the ceiling, `accept` proceeded with criteria open, `rescope` asked to
-   * narrow the scope. Undefined when no escalation fired (auto-resolved, headless,
-   * or all criteria met). Lets synthesis/caller react to a user-driven partial stop.
+   * B4 interactive escalation outcome. Set when the debate hit a stop-with-unmet
+   * boundary and the outcome was resolved, either by the user (`respondToQuestion`
+   * prompted, and they chose an action: `extend` granted extra rounds past the
+   * ceiling, `accept` proceeded with criteria open, `rescope` asked to narrow the
+   * scope) or automatically (`RunCouncilOptions.autoAcceptEscalation` — no human
+   * is present, see `auto` below). Undefined when the boundary was never reached
+   * (all criteria met, or no criteria pinned). Lets synthesis/caller react to a
+   * partial stop.
    */
-  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number };
+  escalation?: {
+    action: "extend" | "accept" | "rescope";
+    grantedRounds?: number;
+    /**
+     * D6 — true when this resolution was the automatic
+     * `autoAcceptEscalation` path (no `respondToQuestion` card was shown),
+     * false/undefined when a human actually answered the card. Lets a
+     * persisted record (`sprints/<n>-item-debate.json`) say honestly that
+     * the stop was auto-accepted rather than leaving the reader to guess.
+     */
+    auto?: boolean;
+  };
   /**
    * S8 — the run receipt inputs the post-debate card reports back ("2 rounds ·
    * 14 turns · 3/4 criteria met · $0.19 · 4m12s"). Measured by the debate loop;
@@ -550,6 +564,25 @@ export type PostDebateActionId =
 
 // ── Config ───────────────────────────────────────────────────────────────────
 
+/**
+ * C2 — one round's item-scoped focus (`CouncilConfig.perRoundFocus`). A
+ * caller normally builds `text` with `buildItemDebateTopic`
+ * (item-debate-topic.ts) from a C1-selected `DebatableItem`
+ * (product-loop/debatable-items.ts), but `runDebate` only needs this shape —
+ * it never imports the topic builder or the selector itself.
+ */
+export interface ItemDebateFocus {
+  /** Attributes the round record (`CouncilRoundRecord.itemId`) back to the
+   * selecting item — typically a `DebatableItem.id`. */
+  id: string;
+  /**
+   * The round's focus text, already bounded by the caller. Empty/whitespace-
+   * only → `runDebate` skips this entry (with a status note) rather than
+   * send an empty-focus round.
+   */
+  text: string;
+}
+
 export interface CouncilConfig {
   topic: string;
   conversationContext: string;
@@ -570,8 +603,18 @@ export interface CouncilConfig {
    * user-facing skip card. Undefined for direct runDebate callers/tests (they re-evaluate).
    */
   leaderNeedsResearch?: boolean;
-  /** When true, the working directory has no source code yet — research prompt prefers internet sources. */
-  internetFirst?: boolean;
+  /**
+   * When true, the working directory has no source code yet.
+   *
+   * This is a HINT into the research-mode decision, not the decision itself:
+   * `runDebate` combines it with the web tier that `pickResearchWebModel`
+   * reports at each research call (`decideInternetFirst`, research-mode.ts).
+   * It was previously named `internetFirst` and WAS the whole decision, which
+   * let an empty workspace with no Tavily key and no web-native model render
+   * "lead with documentation and search" next to research()'s own
+   * "no working web-search capability" gap warning.
+   */
+  repoIsEmpty?: boolean;
   /**
    * When true, the turn is an out-of-repo ("external") question: runDebate skips
    * the research phase AND grounding-verify so no council sub-path reads the repo.
@@ -616,6 +659,14 @@ export interface CouncilConfig {
    * the condition, and the same flag was being reused for four unrelated
    * suppressions. The condition is "no human is present to answer a blocking
    * card before the debate concludes".
+   *
+   * D6: also fed from `RunCouncilOptions.sprintPlanningMode` — that flag is
+   * the SAME "no human is present" condition for `/ideal`'s sprint-internal
+   * councils (sprint-planning in sprint-runner.ts, the per-item debate in
+   * item-debate-runner.ts), and every other askcard-gating site in
+   * council/index.ts already ORs it with `suppressPreDebateCards`. This one
+   * didn't, which let a sprintPlanningMode debate with pinned success
+   * criteria open the mid-debate escalation card and block an unattended run.
    */
   autoAcceptEscalation?: boolean;
   /**
@@ -651,6 +702,28 @@ export interface CouncilConfig {
    * Optional: headless/direct callers/tests omit it and openings run unchanged.
    */
   stanceRecall?: (roles: string[], query: string) => Promise<Map<string, string>>;
+  /**
+   * C2 — per-round item scoping: let one debate argue ONE item per round
+   * instead of the whole plan every round, so per-item argument costs roughly
+   * one debate, not N debates. When set and non-empty (after `runDebate`
+   * drops any entry whose `text` is empty/whitespace-only — skipped with a
+   * status note, never sent as an empty prompt), round N argues
+   * `perRoundFocus[N-1]`'s text INSTEAD OF `debatePlan.plannedRounds`: the
+   * round count becomes this list's length, capped at the same round
+   * ceiling `resolveDebateRoundBudget` would otherwise apply (documented +
+   * tested at the cap). The debate's SHARED topic (`spec.problemStatement`)
+   * still appears in every prompt exactly as it does today — a per-round
+   * focus narrows what that round additionally argues, it never replaces or
+   * hides the plan. A round beyond this list's length (e.g. a leader-granted
+   * extension past every item) falls back to arguing the whole plan, same as
+   * an unscoped debate. Absent, or present but empty/entirely-empty-text →
+   * every prompt, round count and yield is byte-identical to the no-override
+   * path.
+   *
+   * C5 — production caller: `product-loop/item-debate-runner.ts`, forwarded
+   * through `RunCouncilOptions.perRoundFocus` (`council/index.ts`).
+   */
+  perRoundFocus?: readonly ItemDebateFocus[];
 }
 
 // ── Persisted Council Memory ─────────────────────────────────────────────────
@@ -685,6 +758,44 @@ export interface CouncilStats {
   calls: number;
   startMs: number;
   phases: Array<{ name: string; durationMs: number }>;
+  /**
+   * Set by `runCouncil` immediately before it resolves to a bailed or empty
+   * result, naming WHY. Threaded back to the caller through this stats object
+   * (passed by reference via `RunCouncilOptions.councilStats`) because the
+   * generator's return value collapses every early-bail path AND a genuinely
+   * empty synthesis to the same bare `null` — a caller that needs to tell "no
+   * reachable provider" apart from "synthesis ran four times and came back
+   * empty" (measured live, session 1f9f57415170 / run mu3ks8zwe8d5) reads this
+   * instead of guessing from one blanket message. See sprint-runner.ts's
+   * sprint-planning failure message, which is the reason this exists.
+   */
+  bailReason?: {
+    kind: "no-reachable-participants" | "no-openings" | "aborted" | "empty-synthesis";
+    detail: string;
+  };
+  /**
+   * S3a — the raw action-item objects (`{step, owner_lens, time_estimate,
+   * depends_on, acceptance_criteria}` or plain strings) produced under
+   * `RunCouncilOptions.sprintPlanningMode`, threaded back through this stats
+   * object (same by-reference pattern as `bailReason`) BEFORE the fast path's
+   * `synthesizePlanFromActionItems` flattens them into `planSynthesis` prose.
+   * `sprint-runner.ts` passes these into `buildSprintPlanArtifact`
+   * (`sprint-plan-artifact.ts`) so `sprints/<n>-plan.json` keeps real structure
+   * (ids, dependsOn) the flattened text loses. Set only when sprintPlanningMode
+   * is set; unset in every other call shape.
+   */
+  structuredActionItems?: unknown[];
+  /**
+   * D6 — the debate's own `DebateState.escalation` (see that field's doc),
+   * threaded back through this by-reference stats object the same way
+   * `bailReason` / `structuredActionItems` already are, so a caller that never
+   * sees the internal `DebateState` (item-debate-runner.ts calls `runCouncil`,
+   * which returns only a `string | null`) can still tell whether the debate
+   * stopped with unmet pinned criteria and how that stop was resolved. Set
+   * only when the debate actually reached an escalation boundary; absent when
+   * every pinned criterion was met or the debate had none pinned.
+   */
+  escalation?: { action: "extend" | "accept" | "rescope"; grantedRounds?: number; auto?: boolean };
 }
 
 // ── LLM abstraction ──────────────────────────────────────────────────────────
@@ -704,6 +815,48 @@ export interface CouncilCallUsage {
 
 export type UsageCallback = (usage: CouncilCallUsage) => void;
 
+/**
+ * Post-mortem shape of ONE `CouncilLLM.generate` call.
+ *
+ * Exists to answer a question the logs could not (measured 2026-09-09): three
+ * candidates were recorded as `reason: "empty-completion"` within 5ms of each
+ * other. `tracedGenerate` throws when the call errors, so an empty completion
+ * means `generate` RETURNED "" successfully — but nothing in the record said
+ * whether a request had actually gone out. "The provider returned nothing" and
+ * "we never called the provider" produced the identical log line.
+ *
+ * Every field here is sourced from something the call actually observed; none
+ * is inferred. `requestIssued` is set at the moment the SDK call is entered, so
+ * `requestIssued:false` is positive proof the empty string came from a
+ * short-circuit BEFORE the network, not from the provider.
+ */
+export interface CouncilGenerateDiagnostics {
+  /** Wall-clock ms from entry of `generate` to its return/throw. */
+  durationMs: number;
+  /** True when the mock-LLM harness answered instead of a provider. */
+  viaMock: boolean;
+  /** True once the SDK stream call was actually entered (post key/runtime resolution). */
+  requestIssued: boolean;
+  /** How many times the SDK call was entered (>1 means `withVisibleRetry` retried). */
+  sdkAttempts: number;
+  /** Characters received through the stream `onDelta` callback. 0 with `requestIssued:true` = the provider answered with nothing. */
+  streamedChars: number;
+  /** Length of the provider text BEFORE `stripThinkBlocks`. */
+  rawTextChars: number;
+  /** Length of the text actually returned to the caller (post `stripThinkBlocks`). */
+  textChars: number;
+  /** Provider-reported finish reason, when the SDK surfaced one. */
+  finishReason?: string;
+  /** Provider-reported output tokens, when the SDK surfaced usage. */
+  outputTokens?: number;
+  /** `signal.aborted` sampled at entry — true means the attempt began already cancelled. */
+  signalAbortedAtStart: boolean;
+  /** `signal.aborted` sampled at exit. */
+  signalAbortedAtEnd: boolean;
+}
+
+export type GenerateDiagnosticsCallback = (diagnostics: CouncilGenerateDiagnostics) => void;
+
 export interface CouncilLLM {
   generate(
     modelId: string,
@@ -717,6 +870,12 @@ export interface CouncilLLM {
      * positional callers/mocks are unaffected. See withCouncilSignal in index.ts.
      */
     signal?: AbortSignal,
+    /**
+     * Per-call forensics sink (see {@link CouncilGenerateDiagnostics}). Trailing
+     * + optional so every existing literal test mock keeps satisfying the
+     * interface. Diagnostics only — nothing in the product path reads it.
+     */
+    onDiagnostics?: GenerateDiagnosticsCallback,
   ): Promise<string>;
   research(
     modelId: string,
@@ -757,5 +916,43 @@ export interface CouncilLLM {
   takeModelBlockWarning?(modelId: string): string | undefined;
 }
 
-export type QuestionResponder = (questionId: string) => Promise<string>;
+/**
+ * U1 — transcript Q&A pairing. `wasAnsweredByCard`, when present, is an
+ * optional side-channel a caller can attach onto the SAME function value
+ * passed as `respondToQuestion`: it reports (consume-on-read) whether a given
+ * `questionId`'s answer already arrived WITH its question text — which today
+ * only happens when the interactive UI card answered it (see
+ * `CouncilManager.respondToQuestion`'s `questionText` param; headless's
+ * `handleCouncilChunk` never passes it). Every echo site
+ * (`clarifier.ts`, `council/index.ts`) checks this right after `await
+ * respondToQuestion(id)` and skips its own `\n  ↳ <answer>\n` chunk when true
+ * — the UI already rendered a paired question+answer record, so echoing again
+ * would duplicate the answer with no question (the U1 defect). Undefined
+ * (every test mock, every non-UI-wired responder, and headless) means "keep
+ * echoing" — the pre-U1, backward-compatible default.
+ */
+export type QuestionResponder = ((questionId: string) => Promise<string>) & {
+  wasAnsweredByCard?: (questionId: string) => boolean;
+  /**
+   * Withdrawal — the counterpart to a waiter GIVING UP on `questionId` before
+   * an answer arrived (deadline elapsed, the run aborted, or an error tore the
+   * turn down). Optional so every existing test mock and every non-UI-wired
+   * responder keeps compiling: undefined means "no withdrawal channel", the
+   * pre-existing behaviour.
+   *
+   * When present (see `CouncilManager.createQuestionResponder`), calling this
+   * does two things atomically: it removes any resolver still registered for
+   * `questionId` (so a LATE answer can no longer silently resolve a promise
+   * nobody is listening to any more — see `respondToQuestion`'s stale-answer
+   * branch), and it records `questionId` as withdrawn so that late answer is
+   * reported instead of swallowed.
+   *
+   * A caller that withdraws a question is responsible for ALSO telling the UI,
+   * by yielding a `council_question_withdrawn` StreamChunk (see
+   * `src/product-loop/undebated-criteria-gate.ts`'s timeout branch for the
+   * canonical example) — this method alone only fixes the backend leak, it
+   * does not touch anything already rendered on screen.
+   */
+  withdraw?: (questionId: string, reason: string) => void;
+};
 export type PreflightResponder = (preflightId: string) => Promise<boolean>;

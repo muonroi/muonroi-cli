@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { logger } from "../utils/logger.js";
 
 const ENCRYPTED_REASONING_MARKERS = [
   "-----BEGIN PGP MESSAGE-----",
@@ -25,6 +26,46 @@ type AssistantContent = AssistantMessage["content"];
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+/** Repair older histories whose opaque thinking was mistaken for image bytes.
+ * Later thinking depends on the removed prefix, so clear it too. Keep all
+ * text and tool blocks; intact (including empty-text) thinking is unchanged.
+ */
+export function sanitizeCorruptedThinkingBlocks(messages: readonly ModelMessage[]): readonly ModelMessage[] {
+  let invalidPrefix = false;
+  let removedBlocks = 0;
+  const cleaned: ModelMessage[] = [];
+  for (const message of messages) {
+    if (message.role !== "assistant" || !Array.isArray(message.content)) {
+      cleaned.push(message);
+      continue;
+    }
+    const content = message.content.filter((part) => {
+      if (part.type !== "reasoning") return true;
+      const metadata = part.providerOptions;
+      if (
+        metadata &&
+        Object.values(metadata).some(
+          (options) =>
+            isRecord(options) &&
+            [options.signature, options.redactedData].some(
+              (value) => typeof value === "string" && value.startsWith("[image data removed"),
+            ),
+        )
+      ) {
+        invalidPrefix = true;
+      }
+      if (!invalidPrefix) return true;
+      removedBlocks++;
+      return false;
+    });
+    if (content.length === message.content.length) cleaned.push(message);
+    else if (content.length > 0) cleaned.push({ ...message, content });
+  }
+  if (!removedBlocks) return messages;
+  logger.warn("orchestrator", "Removed corrupted thinking and dependent blocks before replay", { removedBlocks });
+  return cleaned;
 }
 
 function getReasoningText(part: unknown): string | null {

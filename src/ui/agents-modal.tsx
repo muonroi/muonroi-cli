@@ -44,6 +44,7 @@ export function SubagentsBrowserModal({
   selectedIndex,
   searchQuery,
   rows,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -51,6 +52,12 @@ export function SubagentsBrowserModal({
   selectedIndex: number;
   searchQuery: string;
   rows: SubagentBrowseRow[];
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const listRef = useRef<ScrollBoxRenderable>(null);
 
@@ -68,7 +75,7 @@ export function SubagentsBrowserModal({
   const overlayBg = "#000000cc" as string;
 
   return (
-    <Semantic id="subagents-modal" role="dialog" name="Subagents" isModal>
+    <Semantic id="subagents-modal" role="dialog" name="Subagents" focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}
@@ -162,6 +169,7 @@ export function SubagentEditorModal({
   instructionRef,
   onSubmit,
   showRemoveHint,
+  focused,
 }: {
   t: Theme;
   width: number;
@@ -175,6 +183,12 @@ export function SubagentEditorModal({
   instructionRef: RefObject<TextareaRenderable | null>;
   onSubmit: () => void;
   showRemoveHint?: boolean;
+  /**
+   * True when this surface owns the keyboard (see src/ui/modal-focus.ts).
+   * Mirrored to the Semantic node's `focus` flag so exactly one node in the
+   * tree carries it while this modal is open — never zero, never two.
+   */
+  focused?: boolean;
 }) {
   const model = MODELS[modelIndex] ?? MODELS[0];
   if (!model) throw new Error("No models in catalog — cannot render agent editor.");
@@ -188,7 +202,7 @@ export function SubagentEditorModal({
   }, [draft, nameRef, instructionRef]);
 
   return (
-    <Semantic id="subagent-editor" role="dialog" name={title} isModal>
+    <Semantic id="subagent-editor" role="dialog" name={title} focus={focused || undefined} isModal>
       <box
         position="absolute"
         left={0}

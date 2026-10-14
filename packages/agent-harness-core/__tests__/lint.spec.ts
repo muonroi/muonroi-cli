@@ -16,7 +16,7 @@ describe("findUnwrappedComponents", () => {
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("returns only the unwrapped file when 1 wrapped + 1 unwrapped are present", async () => {
@@ -69,7 +69,7 @@ describe("findInteractiveWithoutSemantic", () => {
   });
 
   afterEach(() => {
-    rmSync(tmpDir, { recursive: true, force: true });
+    rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("flags a component that wires onSubmit but references no semantic wrapper", async () => {

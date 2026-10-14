@@ -1,5 +1,5 @@
 import type { Agent } from "../orchestrator/orchestrator.js";
-import type { PaymentSettings, SandboxMode, SandboxSettings } from "../utils/settings.js";
+import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 
 export type ContextStats = {
   contextWindow: number;
@@ -42,9 +42,9 @@ export interface WalletRow {
   key: string;
   label: string;
   type: "toggle" | "readonly";
-  getDisplay: (settings: Required<PaymentSettings>, info: WalletDisplayInfo) => string;
+  getDisplay: (settings: Record<string, unknown>, info: WalletDisplayInfo) => string;
   getOptions?: () => string[];
-  apply?: (settings: Required<PaymentSettings>, value: string) => Partial<PaymentSettings>;
+  apply?: (settings: Record<string, unknown>, value: string) => Partial<Record<string, unknown>>;
 }
 
 export interface AppStartupConfig {
@@ -62,36 +62,4 @@ export interface AppStartupConfig {
    * Never set this in production — only passed via --inject-halt CLI flag.
    */
   injectHalt?: boolean;
-  /**
-   * TEST SEAM (A): when true, dispatch a synthetic `sprint_failed` halt chunk
-   * (Resume / Retry / Skip verify / Abort) after first idle. Lets harness E2E
-   * specs verify the sprint-break recovery card without a real mid-run failure.
-   * Never set this in production — only passed via --inject-halt-sprint.
-   */
-  injectHaltSprint?: boolean;
-}
-
-export interface AppProps {
-  agent: Agent;
-  startupConfig: AppStartupConfig;
-  initialMessage?: string;
-  onExit?: () => void;
-  /**
-   * Restart the CLI bound to a different session id (used by the /sessions
-   * picker). Routes through the same terminal teardown as onExit and supervises
-   * the child process, so resuming never strands the user at a corrupted shell
-   * prompt.
-   */
-  onRelaunch?: (sessionId: string) => void;
-}
-
-export interface ActiveTurnState {
-  kind: "local" | "telegram";
-  agent: Agent;
-  modeColor?: string;
-  remoteKey?: string;
-  sourceLabel?: string;
-  userId?: number;
-  latestAssistantText: string;
-  flushedAssistantChars: number;
 }

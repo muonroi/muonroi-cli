@@ -91,6 +91,18 @@ interface HaltCardOpenPayload {
   reason: string;
   optionCount: number;
   optionIds: string[];
+  /**
+   * Present only for a "sprint_failed" halt raised from a caught exception in
+   * use-app-logic.tsx (`trigger: "loop_throw"`). Before this existed the error
+   * text shown on screen was dropped before it reached this row, leaving no
+   * error text at all for a post-mortem to read (see
+   * `../ui/sprint-failed-halt.ts`). Truncated — never dump an unbounded
+   * message/stack into one row.
+   */
+  trigger?: string;
+  sprintN?: number | null;
+  errorMessage?: string;
+  errorStack?: string;
 }
 
 interface HaltCardAnsweredPayload {

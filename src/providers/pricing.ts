@@ -100,15 +100,23 @@ export const STATIC_PRICING_FALLBACK: Record<string, Record<string, PricePerMill
  * Returns undefined if provider or model is not found in either source.
  * Ollama uses a '*' wildcard in the static table that matches any model.
  */
-export function lookupPricing(provider: string, model: string): PricePerMillion | undefined {
+export function lookupPricing(provider: string, model: string, inputTokens = 0): PricePerMillion | undefined {
   // 1. Try catalog first
   const catalogModel = MODELS.find((m) => m.id === model && m.provider === provider);
   if (catalogModel && catalogModel.inputPrice != null) {
+    const longContext = catalogModel.longContextPricing;
+    const premium = longContext && inputTokens > longContext.inputTokenThreshold;
+    const inputMultiplier = premium ? longContext.inputMultiplier : 1;
+    const outputMultiplier = premium ? longContext.outputMultiplier : 1;
     return {
-      input_per_million_usd: catalogModel.inputPrice,
-      output_per_million_usd: catalogModel.outputPrice,
-      ...(catalogModel.cachedInputPrice != null ? { cached_input_per_million_usd: catalogModel.cachedInputPrice } : {}),
-      ...(catalogModel.cacheWritePrice != null ? { cache_write_per_million_usd: catalogModel.cacheWritePrice } : {}),
+      input_per_million_usd: catalogModel.inputPrice * inputMultiplier,
+      output_per_million_usd: catalogModel.outputPrice * outputMultiplier,
+      ...(catalogModel.cachedInputPrice != null
+        ? { cached_input_per_million_usd: catalogModel.cachedInputPrice * inputMultiplier }
+        : {}),
+      ...(catalogModel.cacheWritePrice != null
+        ? { cache_write_per_million_usd: catalogModel.cacheWritePrice * inputMultiplier }
+        : {}),
     };
   }
   // 2. Fallback to static table for models not in catalog (legacy providers)

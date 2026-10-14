@@ -1,3 +1,17 @@
+# A Windows BOOT smoke under PowerShell — and only that.
+#
+# This used to re-run the full typecheck + `bunx vitest run` on windows-latest,
+# which is exactly ci-matrix's windows leg: ci-matrix triggers on `push` to every
+# branch and on `pull_request` to every branch, so every push/PR this workflow
+# fires on already gets the identical Windows unit run there. The duplicate never
+# finished — the serial unit suite needs ~19-20 min on windows-latest (see the
+# comment on ci-matrix's `timeout-minutes`) and this job had 15, so it was
+# cancelled at the Test step on every run, adding a red X and ~15 runner-minutes
+# while proving nothing ci-matrix did not.
+#
+# What is NOT duplicated is the shell: ci-matrix's boot smoke runs under bash
+# (Git Bash on Windows), this one under pwsh — the shell a Windows user actually
+# launches the CLI from.
 name: windows-smoke
 on:
   push:
@@ -19,10 +33,6 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build agent-harness-core (browser bundle)
         run: bun --filter @muonroi/agent-harness-core build
-      - name: Typecheck
-        run: bunx tsc --noEmit
-      - name: Test
-        run: bunx vitest run
       - name: Boot smoke (headless)
         shell: pwsh
         run: bun run src/index.ts --smoke-boot-only

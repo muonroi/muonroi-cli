@@ -320,7 +320,10 @@ driver.expect("id=foo", { field: "value", op: "eq", rhs: "bar" })  // boolean
 driver.press("Enter")                   // single key
 driver.press_sequence(["Down", "Down", "Enter"])
 driver.type("hello")                    // literal text
-driver.focus("id=composer")             // dispatches __focus__:<id>; throws on ambiguous
+driver.focus("id=composer")             // dispatches __focus__:<id>; throws on ambiguous (does NOT verify)
+await driver.focus_verified("id=x")     // dispatches AND verifies; {ok:false, reason:"not_focusable"|"no_match"|"ambiguous"}
+                                        // `tui.focus` uses this and returns isError when focus did not actually move.
+                                        // Most surfaces reject programmatic focus — drive them with press()/press_sequence().
 await driver.wait_for({ idle: true, timeoutMs: 5000 })
 await driver.wait_for({ selector: "role=toast", timeoutMs: 3000 })
 await driver.wait_for({ all: [{ selector: "id=log" }, { idle: true }], timeoutMs: 5000 })
@@ -444,7 +447,8 @@ watcher you might be tempted to write. Reach for them FIRST:
 | What stage is it in? | `tui.last_event {kind: "sprint-stage"}` |
 | Did it fail? | `tui.last_event {kind: "sprint-halt"}` / `{kind: "toast"}` |
 | Block until X happens | `tui.wait_for {event\|selector\|idle, timeoutMs}` |
-| Has the run ended? | `tui.wait_for {idle: true}` |
+| Did it END, and how? | `tui.wait_for {event: "run-finished"}` → `tui.last_event {kind: "run-finished"}` (`outcome` names the exit) |
+| Is the UI quiet? | `tui.wait_for {idle: true}` — idle means the TUI settled, NOT that the run succeeded |
 
 `tui.last_event` reads the driver's event ring and returns the FULL payload —
 the entire askcard question, not the truncated `name` that `tui.query` exposes.
@@ -471,8 +475,8 @@ var on the **MCP server process** to a path to choose your own, or to `0` /
 `off` / `false` / `no` to disable. `tui.capabilities` reports the resolved path
 as `eventLogPath` — read it rather than recomputing the rule.
 
-Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `ee-timeout`,
-`ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
+Ephemeral kinds (`toast`, `disconnect`, `stream-retry`, `model-fallback`,
+`ee-timeout`, `ee-error`, `grounding-flag`) additionally carry a `visualText` snapshot
 captured at emit time, so flash events aren't lost before an agent wakes.
 Wiring: `event-tee.ts` + `makeLineHandler` in `mcp-server.ts`.
 
@@ -497,7 +501,17 @@ ephemeral flashes need the embedded snapshot.
 
 See authoritative schema in `docs/agent-harness/PROTOCOL.md` and https://docs.muonroi.com (covers 18+ kinds + `usage`, idle sentinel etc).
 
-Commonly used: `route-decision`, `council-step` / `council-speaker`, `askcard-*`, `sprint-stage` / `sprint-halt` / `sprint-plan-committed`, `toast`, `ee-timeout` / `ee-error`, `steer-inject`, `llm-done`. `llm-token` is opt-in only (very high volume).
+Commonly used: `route-decision`, `council-step` / `council-speaker`, `askcard-*`, `sprint-stage` / `sprint-halt` / `sprint-plan-committed`, `run-finished`, `toast`, `ee-timeout` / `ee-error`, `steer-inject`, `llm-done`. `llm-token` is opt-in only (very high volume).
+
+**`run-finished` is the terminal event of a `/ideal` run — wait on it rather than
+guessing.** A failing run announces itself (`sprint-halt reason=…`); before this
+kind existed a run that finished FINE emitted nothing, so "approved" and "hung"
+were the same observation. It fires exactly once per run, from the choke point
+every subcommand returns through, and names the exit in `outcome`:
+`approved` | `halted` | `error` | `threw` | `abandoned` (the consumer stopped
+iterating), alongside `runId`, `subcommand`, `success`, `reason`, `sprintsRun`,
+`shipped`. Block on it with `tui.wait_for {event: "run-finished"}`; read the
+outcome with `tui.last_event {kind: "run-finished"}`.
 
 ## Selector grammar quick reference
 
@@ -534,7 +548,7 @@ Add to your MCP client config (Claude Desktop / Cursor / etc.):
 Then drive via tool calls: `tui.start`, `tui.snapshot`, `tui.press`, `tui.type`, `tui.query`, `tui.wait_for`, `tui.expect`, `tui.last_event`, `tui.stop`.
 
 `tui.start` security boundary (enforced before any spawn):
-- argv allowlist: `--agent-*`, `--mock-llm=*`, `--profile=*`. Anything else → `{error: "argv_rejected"}`
+- argv allowlist: `--agent-<name>[=<v>]`, `--mock-llm[=<dir>]`, `--profile=<id>`, `--session=<id>`. Matching is **per-token and whole**, so a flag's value never rides in the next `args` element — `["--mock-llm", "<dir>"]` is rejected on `<dir>`; write `--mock-llm=<dir>` or pass the `mockLlmDir` input. Anything else → `{error: "argv_rejected", bad, index, message, allowed, callExamples}`. **Do not restate the rule anywhere**: it is declared once in `packages/agent-harness-core/src/argv-contract.ts`, the enforced regex is assembled from it, and `tui.capabilities` publishes it as `argv` so an agent with no repo access can build a valid call. Drift is pinned by `packages/agent-harness-core/__tests__/argv-contract.spec.ts`.
 - env strip: `NODE_OPTIONS`, `BUN_OPTIONS`, `LD_PRELOAD`, `DYLD_*`, `LD_AUDIT`, `NODE_PATH` removed
 - cwd containment: `realpathSync` against `homedir()` or repo root
 - cwd extra roots (opt-in, default-deny preserved): set env `MUONROI_HARNESS_EXTRA_ROOTS` (OS-path-list or comma-separated) **or** create `.muonroi-harness-roots.json` (`{ "roots": [...] }`, gitignored) at repo root to also allow dogfooding sibling ecosystem repos (e.g. `D:\sources\Core\*`). Clean checkouts have neither → identical to home+repo-only. Implemented in `packages/agent-harness-core/src/mcp-server.ts` (`loadExtraRoots`)

@@ -25,6 +25,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { LspDiagnostic, LspDiagnosticFile } from "../lsp/types.js";
 import { logger } from "../utils/logger.js";
+import { loadProjectSettings } from "../utils/settings.js";
 
 const pexecFile = promisify(execFile);
 
@@ -101,7 +102,8 @@ export async function gateStagedPaths(
   if (!isCommitGateEnabled()) return { ok: true };
   try {
     const { readFile } = await import("node:fs/promises");
-    const { syncFileWithLsp, summarizeDiagnostics } = await import("../lsp/runtime.js");
+    const { syncFileWithLsp, describeDiagnostics } = await import("../lsp/runtime.js");
+    const { LSP_DETAIL_MAX_GATE } = await import("../lsp/manager.js");
 
     // Per-file diagnostics wait. The LSP default (1.5s) is fine for a WARM
     // server (diagnostics cached) but a COLD tsserver loading the project on
@@ -140,7 +142,14 @@ export async function gateStagedPaths(
       return { ok: true };
     }
     if (errorFiles.length === 0) return { ok: true };
-    const summary = summarizeDiagnostics(errorFiles) ?? `${errorFiles.length} file(s) have LSP errors`;
+    // NAME the diagnostics, don't just count them. A bare count ("6 LSP issues ·
+    // 6 errors") is what wedged /ideal run muc2joffe506 for ten minutes across
+    // four blocked commits — the agent had nothing to act on, so it edited blind
+    // and the count went 6 → 6 → 6 → 7. errorFiles is already filtered to
+    // severity 1 by blockingErrorsForFile, so nothing here can read as a warning.
+    const summary =
+      describeDiagnostics(errorFiles, { cwd, max: LSP_DETAIL_MAX_GATE }) ??
+      `${errorFiles.length} file(s) have LSP errors`;
     return { ok: false, summary };
   } catch (err) {
     logger.error("orchestrator", "gate failed open", {
@@ -193,12 +202,43 @@ export async function pathsForCommitGate(
   return [...set];
 }
 
+/**
+ * "May the PASSIVE, automatic end-of-turn auto-commit run in the CURRENT
+ * project" (`maybeAutoCommitTurn`) — NOT the `git_commit` tool
+ * (`commitSpecificPaths`, which checks the env var + project setting
+ * directly, deliberately without the test-environment guard below; see its
+ * own comment). Only a DISABLE is settable here: `MUONROI_AUTO_COMMIT=0`
+ * (env, existing), the VITEST/NODE_ENV=test guard (this function only), or a
+ * committed `.muonroi-cli/settings.json` `{"autoCommit": false}` (project
+ * setting, read-only-safe — a repo can turn this OFF for whoever runs it,
+ * never ON).
+ */
 export function isAutoCommitEnabled(): boolean {
   if (process.env.MUONROI_AUTO_COMMIT === "0") return false;
   // Never auto-commit while the unit-test suite runs — it executes in the repo
   // working tree and would commit junk.
   if (process.env.VITEST || process.env.NODE_ENV === "test") return false;
+  if (loadProjectSettings().autoCommit === false) return false;
   return true;
+}
+
+/**
+ * Gap (b), "consider also refusing a bash-tool git commit/push": when a
+ * project's `.muonroi-cli/settings.json` sets `autoCommit: false`, that is a
+ * deliberate policy choice (e.g. a Shipd/Olympus challenge repo whose own
+ * process owns every commit) — a model reaching for the bash tool to run
+ * `git commit`/`git push` directly undoes the same policy the setting exists
+ * to enforce. `src/tools/registry.ts`'s pre-execution git-safety gate is the
+ * right place to enforce it (it already parses the command via
+ * `analyzeGitCommand` and has the `_prefixBlock("git-safety", …)` askcard
+ * plumbing); this predicate is deliberately narrow — the explicit project
+ * setting only, never `MUONROI_AUTO_COMMIT=0` or the VITEST/NODE_ENV=test
+ * guard `isAutoCommitEnabled()` also checks, since those are broader,
+ * incidental disables (e.g. every unit test run) that must not also block a
+ * developer's own manual `git commit` in a bash tool call.
+ */
+export function isAutoCommitDisabledByProject(): boolean {
+  return loadProjectSettings().autoCommit === false;
 }
 
 async function git(
@@ -256,6 +296,111 @@ export function isExcludedPath(path: string): boolean {
   return isSensitivePath(path) || isCliArtifactPath(path);
 }
 
+/* ------------------------------------------------------------------------- *
+ * Run-root containment gate (incident 2026-09-06)
+ *
+ * A run confined to one directory must not be able to write git history
+ * outside it. It could:
+ *
+ *   `/ideal` was launched in the linked worktree `D:\...\muonroi-cli\.sprint-a7`
+ *   (process.chdir at src/index.ts:735 via `-d`, so BashTool started there —
+ *   src/orchestrator/orchestrator.ts:489 `new BashTool(process.cwd())`, and
+ *   sessions.cwd_at_start recorded `...\.sprint-a7`). At 2026-09-06T10:15:04Z a
+ *   sub-agent ran `cd D:/sources/Core/muonroi-cli && git log --oneline -5`. The
+ *   bash tool's `cd` handler mutates BashTool.cwd with NO containment check
+ *   (src/tools/bash.ts:170 `this.cwd = nextCwd`), so the tool cwd moved
+ *   permanently to the PARENT repo. Both commit entry points read that same
+ *   cwd — orchestrator.ts:3590 `const cwd = this.bash.getCwd()` and
+ *   src/tools/registry.ts:836 `commitSpecificPaths(bash.getCwd(), ...)` — so
+ *   three commits landed on the parent repo's branch (b3ff377e, 8cbc08b7,
+ *   29b5abfe) while the run believed it was confined to the worktree.
+ *
+ * The invariant enforced here: the git worktree root of the commit cwd must
+ * equal the git worktree root of the directory the run was LAUNCHED in. A `cd`
+ * into a SUB-directory of the same repo keeps the same toplevel and is
+ * unaffected (ordinary sessions are untouched); a `cd` into a different repo —
+ * or, as here, out of a linked worktree into its parent, which git reports as a
+ * DIFFERENT toplevel — is refused before anything is staged.
+ *
+ * Fails LOUD, never silent: a block is logged AND returned as an explicit
+ * `outside-run-root` reason carrying both roots, which the orchestrator prints
+ * in the transcript and the git_commit tool hands back to the agent.
+ * ------------------------------------------------------------------------- */
+
+/** Pinned launch directory; `null` means "derive from process.cwd()". */
+let commitRunRoot: string | null = null;
+
+/**
+ * Pin the directory this run is confined to. Normally unnecessary — the default
+ * (`process.cwd()`) already IS the `-d` directory, because index.ts chdirs into
+ * it before anything else boots and nothing else in src/ ever calls chdir.
+ * Exported as the wiring/test seam.
+ */
+export function setCommitRunRoot(dir: string | null): void {
+  commitRunRoot = dir === null ? null : resolve(dir);
+}
+
+/** The directory this run is confined to. */
+export function getCommitRunRoot(): string {
+  return commitRunRoot ?? process.cwd();
+}
+
+/**
+ * Default ON. `MUONROI_COMMIT_SCOPE=0` is a USER escape hatch (mirrors the
+ * `MUONROI_AUTO_COMMIT=0` / `MUONROI_COMMIT_GATE=0` convention) for the rare
+ * session that deliberately drives commits across repos. Deliberately never
+ * surfaced to the model — same treatment as the LSP gate's bypass.
+ */
+export function isCommitScopeGuardEnabled(): boolean {
+  return process.env.MUONROI_COMMIT_SCOPE !== "0";
+}
+
+/** Absolute git worktree root for `dir`, or null when `dir` is not in a repo. */
+async function worktreeRoot(dir: string): Promise<string | null> {
+  const r = await git(dir, ["rev-parse", "--show-toplevel"]);
+  if (!r.ok) return null;
+  const top = r.stdout.trim();
+  return top ? resolve(top) : null;
+}
+
+export interface CommitScopeVerdict {
+  ok: boolean;
+  /** The directory the run was launched in. */
+  runRoot: string;
+  /** Worktree root of the cwd the commit would run in (null = not a repo). */
+  commitRoot: string | null;
+  /** Worktree root of `runRoot` (null = the run did not start inside a repo). */
+  expectedRoot: string | null;
+}
+
+/**
+ * Decide whether a commit issued with `cwd` writes history this run owns.
+ * Never throws — a git failure resolves to `null` roots and is handled below.
+ */
+export async function checkCommitScope(cwd: string): Promise<CommitScopeVerdict> {
+  const runRoot = getCommitRunRoot();
+  if (!isCommitScopeGuardEnabled()) return { ok: true, runRoot, commitRoot: null, expectedRoot: null };
+
+  const expectedRoot = await worktreeRoot(runRoot);
+  // The run did not start inside a repo, so it has no history of its own to be
+  // confined to and there is nothing to compare against. Allow (this is not the
+  // incident shape — that run was launched inside a worktree).
+  if (!expectedRoot) return { ok: true, runRoot, commitRoot: null, expectedRoot: null };
+
+  const commitRoot = await worktreeRoot(cwd);
+  return { ok: commitRoot !== null && commitRoot === expectedRoot, runRoot, commitRoot, expectedRoot };
+}
+
+/** The operator-facing explanation of a refused commit. Used for log + result detail. */
+export function describeCommitScopeBlock(cwd: string, v: CommitScopeVerdict): string {
+  return (
+    `commit target is OUTSIDE this run's directory — nothing was staged or committed. ` +
+    `cwd=${cwd} (repo ${v.commitRoot ?? "<not a repo>"}), but the run was launched in ` +
+    `${v.runRoot} (repo ${v.expectedRoot}). The tool cwd most likely drifted out of the ` +
+    `launch directory via a \`cd\`. Run the CLI from the repo you intend to commit to.`
+  );
+}
+
 /**
  * Backstop subject naming the changed FILES — used only by the deterministic
  * end-of-turn safety net (when the agent did not commit its own work via the
@@ -310,6 +455,14 @@ export async function maybeAutoCommitTurn(opts: {
 
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
   if (!inRepo.ok || inRepo.stdout.trim() !== "true") return { committed: false, reason: "not-a-repo" };
+
+  // Containment gate — before ANY staging. See "Run-root containment gate" above.
+  const scope = await checkCommitScope(cwd);
+  if (!scope.ok) {
+    const detail = describeCommitScopeBlock(cwd, scope);
+    logger.error("orchestrator", `[auto-commit] REFUSED — ${detail}`);
+    return { committed: false, reason: "outside-run-root", detail };
+  }
 
   const dirtyAfter = await snapshotDirtyPaths(cwd);
   const newPaths = [...dirtyAfter].filter((p) => !dirtyBefore.has(p) && !isExcludedPath(p));
@@ -368,11 +521,37 @@ export async function maybeAutoCommitTurn(opts: {
  * (e.g. already committed). Never throws.
  */
 export async function commitSpecificPaths(cwd: string, paths: string[], message: string): Promise<AutoCommitResult> {
-  if (process.env.MUONROI_AUTO_COMMIT === "0") return { committed: false, reason: "disabled" };
+  // Gate (b): this used to check `MUONROI_AUTO_COMMIT === "0"` directly,
+  // bypassing the project-level `autoCommit: false` setting — the git_commit
+  // tool path stayed live even when a repo's own `.muonroi-cli/settings.json`
+  // disabled it. Fixed by adding the project-setting check — but NOT by
+  // routing through `isAutoCommitEnabled()` (a regression a later loop-2 run
+  // caught, bun test src/tools/registry-git-commit-empty-ledger.test.ts and
+  // src/orchestrator/__tests__/auto-commit-run-root.test.ts, 5 failures):
+  // `isAutoCommitEnabled()` ALSO disables under VITEST/NODE_ENV=test, which
+  // is correct for the PASSIVE end-of-turn auto-commit (`maybeAutoCommitTurn`
+  // — it could fire during an unrelated test that never asked for a commit)
+  // but wrong here — `git_commit` is a DELIBERATE, explicit tool call, and
+  // tests that invoke it directly (in their own isolated temp repo) expect
+  // it to actually run, exactly like `bash`'s `git commit` isn't silently
+  // disabled under the test runner either. Only the explicit env escape
+  // hatch and the project setting are checked; the test-environment guard
+  // is deliberately NOT applied to this tool.
+  if (process.env.MUONROI_AUTO_COMMIT === "0" || isAutoCommitDisabledByProject()) {
+    return { committed: false, reason: "disabled" };
+  }
   const safe = paths.filter((p) => !isExcludedPath(p));
   if (safe.length === 0) return { committed: false, reason: "no-eligible-paths" };
   const inRepo = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
   if (!inRepo.ok || inRepo.stdout.trim() !== "true") return { committed: false, reason: "not-a-repo" };
+
+  // Containment gate — before ANY staging. See "Run-root containment gate" above.
+  const scope = await checkCommitScope(cwd);
+  if (!scope.ok) {
+    const detail = describeCommitScopeBlock(cwd, scope);
+    logger.error("orchestrator", `[git_commit] REFUSED — ${detail}`);
+    return { committed: false, reason: "outside-run-root", detail };
+  }
 
   const add = await git(cwd, ["add", "--", ...safe]);
   if (!add.ok) {

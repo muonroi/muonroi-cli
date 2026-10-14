@@ -1,4 +1,5 @@
 import { buildStackLockSection } from "./decisions-lock.js";
+import { buildResearchSourcePreference } from "./research-mode.js";
 import type { ClarifiedSpec, DebatePlan, DebateStance, OutputSection, OutputShape } from "./types.js";
 
 // ── Clarification prompts ────────────────────────────────────────────────────
@@ -207,6 +208,21 @@ const ENGLISH_ONLY_RULE =
  *     from the brief that every debate prompt already embeds).
  *   - any other value → write in that named language.
  */
+/**
+ * Defect (c), run mttwpmu8ee5b: rounds 0-1 were Vietnamese for all four speakers
+ * and in round 2 one speaker answered in English. Round 2+ (`buildFollowupPrompt`)
+ * is the first turn whose message body is machine-made text — a running summary
+ * and a leader directive — rather than the user's own words, so "match the brief"
+ * had nothing left to match. The brief is restored in that prompt AND the rule is
+ * made explicit here: the debate language is fixed for the whole debate, never
+ * re-derived from whatever text happens to be in this turn.
+ */
+const NO_LANGUAGE_SWITCH_RULE =
+  `Never switch language between rounds: the debate has ONE language for its ` +
+  `whole run, and your own earlier turns are in it. A running summary, a leader ` +
+  `directive, or a partner turn that arrives in another language does NOT change ` +
+  `it — answer in the debate language regardless.\n`;
+
 const NON_ENGLISH_TOKENS_RULE =
   `Keep these verbatim in English no matter what: code identifiers, tool output, ` +
   `JSON keys and the \`type\` field, citation tags (\`[CONFIRMED via …]\`, ` +
@@ -218,9 +234,11 @@ export function buildLanguageRule(lang?: string): string {
   if (lang === "auto") {
     return (
       `\n## Language Rule (mandatory)\n` +
-      `Write your ENTIRE response in the SAME language the user used in the ` +
-      `Discussion Brief / topic below. If the brief is in Vietnamese, write in ` +
-      `Vietnamese; if Japanese, Japanese; if English, English. ` +
+      `Write your ENTIRE response in the SAME language the user used in their ` +
+      `problem statement for this debate — it is quoted in the "Problem:" line of ` +
+      `this prompt. If it is Vietnamese, write in Vietnamese; if Japanese, ` +
+      `Japanese; if English, English. ` +
+      NO_LANGUAGE_SWITCH_RULE +
       NON_ENGLISH_TOKENS_RULE
     );
   }
@@ -228,6 +246,7 @@ export function buildLanguageRule(lang?: string): string {
     `\n## Language Rule (mandatory)\n` +
     `Write your ENTIRE response in ${lang}. Do not switch to English for the ` +
     `prose even if the brief or your partner's message is in another language. ` +
+    NO_LANGUAGE_SWITCH_RULE +
     NON_ENGLISH_TOKENS_RULE
   );
 }
@@ -441,6 +460,17 @@ export function buildResponsePrompt(ctx: {
   spec: ClarifiedSpec;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Lives in the `prompt` tail, never `system` — round 1 only
+   * calls this builder once per pair, so there is no cache-prefix concern,
+   * but keeping the placement consistent with `buildFollowupPrompt` means a
+   * caller never has to remember which builder is cache-sensitive. Omitted →
+   * `prompt` is byte-identical to today (the shared topic in `system` above
+   * is unaffected either way).
+   */
+  focus?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -467,6 +497,7 @@ export function buildResponsePrompt(ctx: {
       `or any numeric counter referring to the discussion round in your output. ` +
       `The orchestrator already prints round headers above your response.`,
     prompt:
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
       `Their analysis (${them.label}):\n${ctx.partnerPosition}\n\n` +
       `Your own analysis for context:\n${ctx.speakerPosition}`,
   };
@@ -493,6 +524,31 @@ export function buildFollowupPrompt(ctx: {
    * exactly the rounds a user is most likely to steer.
    */
   steering?: string;
+  /**
+   * The LEADER's directive for this round — its focus plus the criteria still
+   * unmet, from `buildLeaderDirective`.
+   *
+   * Until this existed the leader graded every round with a real model call
+   * (`evaluateDebate`) and the verdict went only to the UI and the round record:
+   * the speakers never learned which criteria were still open or what the leader
+   * wanted next, so every round restarted from the same spec. That is why a live
+   * run could sit at 0/3 criteria after several rounds — nothing steered the
+   * debate toward the gap.
+   *
+   * Tail, not `system`, for the same reason as `steering`: it changes every round
+   * and would otherwise bust the cacheable prefix. Kept as its own field rather
+   * than folded into `steering` so a speaker can tell a human's instruction apart
+   * from the leader's.
+   */
+  leaderDirective?: string;
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Tail-only, same reason as `steering`/`leaderDirective`: it
+   * changes every round and would otherwise bust the cacheable `system`
+   * prefix. Omitted → `prompt` is byte-identical to today.
+   */
+  focus?: string;
 }): { system: string; prompt: string } {
   const me = personaOf(ctx.speakerRole, ctx.speakerStance);
   const them = personaOf(ctx.partnerRole, ctx.partnerStance);
@@ -512,7 +568,13 @@ export function buildFollowupPrompt(ctx: {
       EVIDENCE_RULE_FOLLOWUP +
       concisenessRule(140) +
       (stackLock ? `\n${stackLock}\n` : "") +
-      `\n` +
+      // The user's OWN words. Rounds 0-1 (`buildOpeningPrompt` /
+      // `buildResponsePrompt`) both carry this block; round 2+ did not, which is
+      // what let the "auto" language rule come loose (defect (c)) — it pointed at
+      // a brief that was not in the prompt. Derived only from `spec`, so the
+      // cacheable prefix stays byte-identical from round 2..N.
+      `\n## Discussion Brief\n` +
+      `Problem: ${ctx.spec.problemStatement}\n\n` +
       ongoingContextBlock(ctx.spec) +
       `## Success Criteria (what we need to resolve)\n` +
       ctx.spec.successCriteria.map((c, i) => `${i + 1}. ${c}`).join("\n") +
@@ -537,6 +599,8 @@ export function buildFollowupPrompt(ctx: {
       // a human watching the run, and it must not be read as part of the
       // partner's argument.
       (ctx.steering ? `${ctx.steering}\n\n` : "") +
+      (ctx.leaderDirective ? `## Leader directive for this round\n${ctx.leaderDirective}\n\n` : "") +
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
       (ctx.runningSummary ? `## Discussion State So Far\n${ctx.runningSummary}\n\n` : "") +
       (ctx.speakerLastPosition ? `Your previous position:\n${ctx.speakerLastPosition}\n\n` : "") +
       `Their latest (${them.label}):\n${ctx.partnerPosition}`,
@@ -545,10 +609,52 @@ export function buildFollowupPrompt(ctx: {
 
 // ── Leader evaluation prompt (replaces convergence-check) ────────────────────
 
+/**
+ * One criterion's verdict as the leader itself decided it in the PREVIOUS round,
+ * projected onto the pinned spec criteria (index-aligned by the caller).
+ *
+ * The leader re-graded every criterion from scratch each round with no memory of
+ * what it had already concluded, which is how a criterion marked MET in round 2
+ * could silently regress to unmet in round 3 once the supporting exchange
+ * scrolled out of the evidence window.
+ */
+export interface LeaderPriorVerdict {
+  criterion: string;
+  met: boolean;
+  /** Closable only after the debate (code landed, tests run) — not a debate failure. */
+  deferred: boolean;
+  /** The reason/evidence the leader gave for that verdict; "" when unrecorded. */
+  evidence: string;
+}
+
+/**
+ * Render the leader's own previous verdict for the prompt TAIL.
+ *
+ * Exported for the caller to reuse and for direct testing; the builder below
+ * calls it, so it reaches the shipped path either way. Returns "" when there is
+ * nothing to show (round 1, or no pinned criteria) so the caller can concatenate
+ * unconditionally.
+ */
+export function renderPriorVerdictBlock(round: number, verdicts: readonly LeaderPriorVerdict[]): string {
+  if (verdicts.length === 0 || round <= 1) return "";
+  const lines = verdicts.map((v, i) => {
+    const mark = v.deferred ? "DEFERRED (closable only after the debate)" : v.met ? "MET" : "OPEN";
+    const why = v.evidence.trim() ? v.evidence.trim() : "(no reason recorded)";
+    return `${i + 1}. [${mark}] ${v.criterion}\n   you said: ${why}`;
+  });
+  return `## Your verdict last round (Round ${round - 1})\n${lines.join("\n")}\n\n`;
+}
+
 export function buildLeaderEvaluationPrompt(ctx: {
   spec: ClarifiedSpec;
   exchangeLogs: string;
   round: number;
+  /**
+   * B1 — the leader's OWN verdict from the previous round, per criterion, with
+   * the reason it gave. Rendered in the prompt tail (never in `system`) so the
+   * cacheable prefix stays byte-stable across rounds. Omit on round 1.
+   */
+  priorVerdicts?: readonly LeaderPriorVerdict[];
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
   /**
@@ -559,6 +665,14 @@ export function buildLeaderEvaluationPrompt(ctx: {
    * legacy schema exactly as it was.
    */
   participants?: readonly string[];
+  /**
+   * C2 — this round's item-scoped focus text (see `CouncilConfig.perRoundFocus`
+   * / `buildItemDebateTopic`), when the debate was scoped to argue one item
+   * per round. Tail-only, same cache-prefix-stability reason as
+   * `priorVerdicts`/`exchangeLogs` below. Omitted → `prompt` is byte-identical
+   * to today.
+   */
+  focus?: string;
 }): {
   system: string;
   prompt: string;
@@ -610,6 +724,23 @@ export function buildLeaderEvaluationPrompt(ctx: {
       `- The remaining disagreements are minor wording, not substantive trade-offs\n` +
       `- The next round would mostly repeat already-stated positions\n` +
       `Continuing past convergence wastes ~120-150s per round and adds no new content. Prefer to stop early — the user can always /ask-followup to clarify a specific point.\n\n` +
+      // B1 — continuity rule. STATIC on purpose: it is emitted every round with
+      // identical bytes (including round 1, where it is inert) so the `system`
+      // prefix stays cacheable. The per-round DATA it refers to lives in the
+      // prompt tail, per the same discipline buildFollowupPrompt documents.
+      `## Continuity with your own prior verdict (IMPORTANT)\n` +
+      `When a "Your verdict last round" block appears in the message below, it lists what YOU already decided ` +
+      `for each criterion and the reason you gave. It is your record, not a suggestion from anyone else.\n` +
+      `- Start from it. Do not re-derive every criterion from scratch — the debate is cumulative, and evidence ` +
+      `that satisfied a criterion in an earlier round does not stop counting because it is no longer in the ` +
+      `most recent exchanges below.\n` +
+      `- A criterion you previously marked MET may be marked not-met again ONLY if you state, in that ` +
+      `criterion's "evidence", what specifically un-did it (an objection raised since, a fact that turned out ` +
+      `wrong, a scope change). Name it.\n` +
+      `- Silently flipping MET back to not-met with no such statement is a grading error, not a valid outcome: ` +
+      `it makes the run look like it is losing ground when nothing changed.\n` +
+      `- A criterion previously marked DEFERRED stays deferred unless the debate has since made it settleable ` +
+      `by argument.\n\n` +
       stanceRule +
       outOfStackCheck +
       `Output ONLY a JSON object (no markdown):\n` +
@@ -629,7 +760,13 @@ export function buildLeaderEvaluationPrompt(ctx: {
           `  "outOfStackViolations": []  // list of out-of-stack tech names cited by participants (empty when none)\n`
         : "") +
       `}`,
-    prompt: `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
+    // Per-round dynamic content lives here ONLY — the `system` string above must
+    // stay byte-identical from round to round or the provider prompt cache misses
+    // on every leader evaluation (the single largest non-panel cost of a run).
+    prompt:
+      (ctx.focus ? `## This round's item focus\n${ctx.focus}\n\n` : "") +
+      renderPriorVerdictBlock(ctx.round, ctx.priorVerdicts ?? []) +
+      `## Debate (Round ${ctx.round})\n${ctx.exchangeLogs}`,
   };
 }
 
@@ -810,6 +947,7 @@ export function buildSynthesisPrompt(ctx: {
   outputStyle?: string | null; // CQ-18: from PIL Layer 6 ctx.outputStyle
   refineContext?: string; // User answers from post-debate refinement askcard
   planEmphasis?: boolean; // If true, instruct LLM to produce a concrete action plan
+  synthesisOutputContract?: string;
   /** Feature B — resolved council debate language (undefined → English). */
   language?: string;
 }): { system: string; prompt: string } {
@@ -917,6 +1055,14 @@ export function buildSynthesisPrompt(ctx: {
     system = `${styleDirective}\n\n${system}`;
   }
 
+  if (ctx.synthesisOutputContract) {
+    system +=
+      `\n\n## Caller-required final output\n` +
+      `Preserve the outcome JSON and readable synthesis above. Additionally emit the following ` +
+      `decision block in your final answer; prose alone does not satisfy the caller.\n` +
+      ctx.synthesisOutputContract;
+  }
+
   let extraContext = "";
   if (ctx.refineContext) {
     extraContext += `
@@ -969,14 +1115,11 @@ export function buildResearchSystemPrompt(hasUrl: boolean, internetFirst = false
       `before reporting Frontend Findings. Do not skip this step.\n`
     : "";
 
-  const modeBlock = internetFirst
-    ? `\n## Research Mode: INTERNET-FIRST\n` +
-      `The workspace has no existing source code. Prefer internet search (tavily, web-fetch, ` +
-      `context7 docs) and official documentation. Do NOT spend cycles grep-ing an empty repo. ` +
-      `If browser/search tools are unavailable, state the gap explicitly under "Research Gap".\n`
-    : `\n## Research Mode: CODEBASE-FIRST\n` +
-      `The workspace contains source code. Investigate it first (grep, file read, ` +
-      `repo-deep-map). Use the internet only to fill gaps the codebase cannot answer.\n`;
+  // Source preference is declared ONCE in research-mode.ts and rendered
+  // identically by the isolated explore research path (debate.ts) — the two
+  // used to carry independent copies, and only the internet-first copy named
+  // any external tool. See research-mode.ts for the measured cost of that.
+  const modeBlock = `\n${buildResearchSourcePreference(internetFirst)}`;
 
   return (
     `You are a research specialist. Gather FACTS using available tools.\n` +

@@ -1,4 +1,5 @@
 import type { Plan, ToolCall, ToolResult } from "../types/index";
+import { logger } from "../utils/logger.js";
 import type { ProcessMessageFinishReason, ProcessMessageUsage } from "./agent-options";
 import { asNumber } from "./batch-utils";
 
@@ -42,7 +43,67 @@ export function toToolResult(output: unknown): ToolResult {
       lspDiagnostics: r.lspDiagnostics,
     };
   }
+  const mcp = renderMcpToolResult(output);
+  if (mcp) {
+    return mcp.isError ? { success: false, output: mcp.text, error: mcp.text } : { success: true, output: mcp.text };
+  }
+  if (output !== null && typeof output === "object") {
+    // `String({})` is "[object Object]" — the literal string that reached the
+    // transcript, the interaction_logs `outputPreview`, and the stall-rescue
+    // digest for every tool whose result is not a plain string.
+    try {
+      return { success: true, output: JSON.stringify(output) ?? String(output) };
+    } catch (err) {
+      logger.warn("orchestrator", "[tool-utils] toToolResult: result not serializable", {
+        error: (err as Error)?.message,
+        keys: Object.keys(output as Record<string, unknown>).slice(0, 10),
+      });
+      return { success: true, output: String(output) };
+    }
+  }
   return { success: true, output: String(output) };
+}
+
+/**
+ * Render an MCP tool result into the plain text every UI/DB/digest consumer of
+ * `ToolResult.output` assumes it is getting.
+ *
+ * Two shapes reach here and NEITHER carries a `success` key, so both fell to
+ * `String(output)` → the literal "[object Object]":
+ *   - `@ai-sdk/mcp` `execute()` returns the raw MCP CallToolResult:
+ *     `{ content: [{type:"text",text}|media], isError?: boolean }`. This is the
+ *     shape observed in production (measured: interaction_logs rows recorded
+ *     `{"success":true,"outputPreview":"[object Object]"}` for every MCP call).
+ *   - the AI-SDK `ToolResultOutput` envelope `{ type:"content", value:[...] }`,
+ *     which is what `mcpToModelOutput` produces on the prompt side.
+ *
+ * Media parts are summarized rather than inlined — base64 in the transcript and
+ * in `outputPreview` would be worse than the bug. `isError` is honoured so an
+ * MCP failure stops being reported to the user as a success.
+ *
+ * Returns null when `output` is not an MCP result, so the caller falls through.
+ */
+function renderMcpToolResult(output: unknown): { text: string; isError: boolean } | null {
+  if (!output || typeof output !== "object") return null;
+  const o = output as { content?: unknown; type?: unknown; value?: unknown; isError?: unknown };
+  const parts = Array.isArray(o.content) ? o.content : o.type === "content" && Array.isArray(o.value) ? o.value : null;
+  if (!parts) return null;
+  const rendered: string[] = [];
+  for (const part of parts) {
+    if (!part || typeof part !== "object") {
+      rendered.push(String(part));
+      continue;
+    }
+    const pt = part as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown; mediaType?: unknown };
+    if (typeof pt.text === "string") {
+      rendered.push(pt.text);
+      continue;
+    }
+    const media = typeof pt.mimeType === "string" ? pt.mimeType : typeof pt.mediaType === "string" ? pt.mediaType : "";
+    const bytes = typeof pt.data === "string" ? pt.data.length : 0;
+    rendered.push(`[${String(pt.type ?? "part")}${media ? ` ${media}` : ""}${bytes ? `, ${bytes} bytes` : ""}]`);
+  }
+  return { text: rendered.join("\n"), isError: o.isError === true };
 }
 
 export function formatSubagentActivity(toolName: string, args?: unknown): string {

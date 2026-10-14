@@ -64,7 +64,7 @@ describe("mid-debate resume (real runDebate)", () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), "debate-resume-"));
   });
   afterEach(async () => {
-    await fs.rm(dir, { recursive: true, force: true });
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
 
   it("resumes from the checkpoint: skips openings, continues at round+1, clears checkpoint", async () => {

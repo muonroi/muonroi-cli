@@ -1,0 +1,160 @@
+{
+  "workspace": "D:\\sources\\Core\\muonroi-cli",
+  "startedAt": "2026-10-07T08:43:22.822Z",
+  "start": {
+    "runId": "ff192c19-e3d9-48cb-9f10-8faef9722a92"
+  },
+  "status": {
+    "runId": "ff192c19-e3d9-48cb-9f10-8faef9722a92",
+    "status": "done",
+    "kind": "tier1",
+    "startedAt": 1791362604128,
+    "finishedAt": 1791362605449,
+    "elapsedMs": 1321,
+    "logTail": [
+      "[self-verify] Planned 1 scenario(s): 1 drivable, 0 skipped",
+      "[self-qa] → smoke-boot: CLI boots and reaches idle within budget",
+      "[self-verify] Summary: 1/1 passed, 0 failed, 0 inconclusive, 0 skipped"
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "result": {
+    "scenarios": [
+      {
+        "id": "smoke-boot",
+        "description": "CLI boots and reaches idle within budget",
+        "derivedFrom": {
+          "files": [
+            ".muonroi-flow/decisions.md",
+            "src/orchestrator/__tests__/council-manager.test.ts",
+            "src/orchestrator/council-manager.ts",
+            "src/orchestrator/message-processor.ts",
+            "src/orchestrator/preprocessor.ts",
+            "src/pil/discovery-types.ts",
+            "src/pil/discovery.ts",
+            "src/pil/pipeline.ts",
+            "src/pil/timeout.ts",
+            "src/ui/use-app-logic.tsx"
+          ],
+          "semanticIds": []
+        },
+        "steps": [
+          {
+            "op": "wait_for",
+            "idle": true,
+            "timeoutMs": 60000
+          }
+        ],
+        "expectations": [
+          {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          {
+            "kind": "noErrorToast"
+          }
+        ],
+        "budgetMs": 90000
+      }
+    ],
+    "runs": [
+      {
+        "scenario": {
+          "id": "smoke-boot",
+          "description": "CLI boots and reaches idle within budget",
+          "derivedFrom": {
+            "files": [
+              ".muonroi-flow/decisions.md",
+              "src/orchestrator/__tests__/council-manager.test.ts",
+              "src/orchestrator/council-manager.ts",
+              "src/orchestrator/message-processor.ts",
+              "src/orchestrator/preprocessor.ts",
+              "src/pil/discovery-types.ts",
+              "src/pil/discovery.ts",
+              "src/pil/pipeline.ts",
+              "src/pil/timeout.ts",
+              "src/ui/use-app-logic.tsx"
+            ],
+            "semanticIds": []
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "idle": true,
+              "timeoutMs": 60000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            {
+              "kind": "noErrorToast"
+            }
+          ],
+          "budgetMs": 90000
+        },
+        "events": [],
+        "finalFrame": {
+          "mode": "live",
+          "version": "0.4.0",
+          "seq": 0,
+          "ts": 1791362605386,
+          "nodes": []
+        },
+        "startedAt": 1791362604260,
+        "endedAt": 1791362605448,
+        "timedOut": false,
+        "crashed": false,
+        "idleObserved": 1,
+        "syncTimeouts": [],
+        "mounted": true,
+        "childAlive": true,
+        "stderrTail": "[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\council.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\default.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\discovery-model.json (provider=mock, modelId=mock-discovery)\n"
+      }
+    ],
+    "results": [
+      {
+        "verdict": "pass",
+        "scenarioId": "smoke-boot",
+        "durationMs": 1188,
+        "checks": [
+          {
+            "expectation": {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            "passed": true,
+            "reason": "Idle reached in 1188ms after 1 idle sentinel(s) (budget 60000ms)"
+          },
+          {
+            "expectation": {
+              "kind": "noErrorToast"
+            },
+            "passed": true,
+            "reason": "No error-level toasts observed"
+          }
+        ]
+      }
+    ],
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "skipped": [],
+    "emittedSpecs": [],
+    "durationMs": 1311
+  },
+  "stderrTail": "",
+  "finishedAt": "2026-10-07T08:43:26.173Z"
+}

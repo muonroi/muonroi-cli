@@ -1,15 +1,25 @@
 import { type ChildProcess, spawn } from "child_process";
 import { createReadStream, createWriteStream, existsSync } from "fs";
-import { mkdtemp, rm, stat, unlink } from "fs/promises";
+import { mkdtemp, open, stat, unlink } from "fs/promises";
 import os from "os";
 import path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { CwdChangedHookInput } from "../hooks/types";
 import type { ToolResult } from "../types/index";
+import {
+  BACKGROUND_WAIT_GUIDANCE,
+  type BackgroundProcessState,
+  formatBackgroundProcessStarted,
+  processJobKey,
+} from "../utils/background-jobs.js";
+import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
+import { logger } from "../utils/logger.js";
+import { killProcessTree } from "../utils/process-tree.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
+import { describeCwdDrift, normalizeMsysDrivePath } from "./write-scope.js";
 
 const MAX_TAIL_BYTES = 8_192;
 const MAX_BACKGROUND_PROCESSES = 8;
@@ -24,60 +34,6 @@ const MAX_BACKGROUND_PROCESSES = 8;
  */
 const POST_KILL_SETTLE_MS = 2_000;
 
-/**
- * Kill a process and everything it spawned.
- *
- * `child.kill()` signals ONLY the direct child. That is not enough here:
- * `bash -lc "<cmd>"` re-execs itself (observed live: bash.exe 21272 → bash.exe
- * 5024 → bun.exe 7464), so signalling the top shell leaves the real workload
- * running AND holding the stdio handles. Session 7ec700df5589's
- * `bun test src/providers --runInBand; bun run typecheck` survived that way for
- * over 24 hours and burned 59,244s of CPU until it was reaped by hand with
- * `taskkill /F /T`. `src/orchestrator/delegations.ts` already used this pattern;
- * the foreground bash path did not.
- */
-function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
-  const pid = child.pid;
-  if (typeof pid !== "number") return;
-
-  if (process.platform === "win32") {
-    try {
-      // /T = tree, /F = force. The only reliable tree kill on Windows — there is
-      // no process-group signalling to fall back on.
-      spawn("taskkill", ["/F", "/T", "/PID", String(pid)], { windowsHide: true, stdio: "ignore" }).unref();
-      return;
-    } catch (err) {
-      console.error(
-        `[bash] taskkill tree-kill failed for pid ${pid}, falling back to child.kill: ${(err as Error)?.message}`,
-      );
-    }
-  } else {
-    // POSIX: the child is spawned `detached`, making it its own process-group
-    // leader, so a NEGATIVE pid signals the whole group — shell, its re-exec, and
-    // every grandchild. `child.kill()` alone reaches only the direct child, which
-    // CI caught on ubuntu/macos: the grandchild kept ticking (43 -> 63 writes)
-    // after the "tree kill" while the Windows job passed.
-    try {
-      process.kill(-pid, signal);
-      return;
-    } catch (err) {
-      // ESRCH: the group is already gone. Anything else (e.g. the child never
-      // became a group leader) falls through to the single-process kill below.
-      const code = (err as NodeJS.ErrnoException)?.code;
-      if (code === "ESRCH") return;
-      console.error(
-        `[bash] process-group kill failed for pgid ${pid} (${code ?? "?"}), falling back to child.kill: ${(err as Error)?.message}`,
-      );
-    }
-  }
-  try {
-    child.kill(signal);
-  } catch (err) {
-    // Already exited — the caller's settle path still runs, so this is benign.
-    console.error(`[bash] kill(${signal}) failed for pid ${pid}: ${(err as Error)?.message}`);
-  }
-}
-
 export interface BackgroundProcess {
   id: number;
   command: string;
@@ -88,7 +44,15 @@ export interface BackgroundProcess {
   logPath: string;
   alive: boolean;
   exitCode: number | null;
+  /** Stopped on request (process_stop) — an intended end, not a result to report. */
+  stopped?: boolean;
+  /** Exit already reported to the agent by consumeExitNotifications. */
+  notified?: boolean;
 }
+
+/** Lines of a finished background process's log quoted in its exit notice. */
+const EXIT_NOTICE_TAIL_LINES = 20;
+const EXIT_NOTICE_TAIL_CHARS = 2_000;
 
 interface BashToolOptions {
   /**
@@ -111,6 +75,10 @@ export class BashTool {
   private shellSettings: ShellSettings;
   private resolvedShell: ResolvedShell;
   private sandboxSettings: SandboxSettings = {};
+  /** Reports whether background work this tool cannot see (delegations) is running. */
+  private backgroundJobProbe: (() => Promise<boolean>) | null = null;
+  /** Epoch ms this tool was created — every background process it owns started after. */
+  readonly createdAt = Date.now();
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
     this.cwd = initialCwd;
@@ -159,6 +127,11 @@ export class BashTool {
         const dir = rawDir.replace(/^["']|["']$/g, "").replace(process.platform === "win32" ? /\\$/ : /(?!x)x/, "");
         let cdSucceeded = false;
         let cdError: ToolResult | null = null;
+        // Set when the new cwd leaves the run root. `cd` is NOT refused — escape
+        // #1's drifting command was `cd <parent> && git log`, a harmless read, and
+        // cross-repo inspection is normal work here. What made it dangerous was
+        // that the move was silent and permanent. See src/tools/write-scope.ts.
+        let driftWarning: string | null = null;
         try {
           const translated = this.resolvedShell.isPosix ? posixToNative(dir) : dir;
           const nextCwd = path.resolve(this.cwd, translated);
@@ -169,6 +142,15 @@ export class BashTool {
             const oldCwd = this.cwd;
             this.cwd = nextCwd;
             cdSucceeded = true;
+            try {
+              driftWarning = describeCwdDrift(nextCwd);
+              if (driftWarning) console.error(`[bash] cwd drift: ${oldCwd} -> ${nextCwd}`);
+            } catch (err) {
+              // Never let the advisory break a legitimate cd; the hard guard on
+              // the write path is what actually protects the tree.
+              console.error(`[bash] cwd drift check failed for ${nextCwd}: ${(err as Error)?.message}`);
+              driftWarning = null;
+            }
 
             const cwdInput: CwdChangedHookInput = {
               hook_event_name: "CwdChanged",
@@ -183,18 +165,28 @@ export class BashTool {
           cdError = { success: false, error: `Cannot change directory: ${msg}` };
         }
 
+        const cdOk = (): ToolResult => ({
+          success: true,
+          output: `Changed directory to: ${this.cwd}${driftWarning ? `\n${driftWarning}` : ""}`,
+        });
+
         if (!remainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
         const shouldRunRemainder =
           chainOp === ";" || (chainOp === "&&" && cdSucceeded) || (chainOp === "||" && !cdSucceeded);
 
         if (!shouldRunRemainder) {
-          return cdSucceeded ? { success: true, output: `Changed directory to: ${this.cwd}` } : cdError!;
+          return cdSucceeded ? cdOk() : cdError!;
         }
 
-        return await this.execute(remainder, timeout, abortSignal);
+        const chained = await this.execute(remainder, timeout, abortSignal);
+        // `cd X && <cmd>` returns the REMAINDER's result, so without this the
+        // warning would be dropped for exactly the command shape that caused
+        // escape #1 (`cd <parent-repo> && git log --oneline -5`).
+        if (!driftWarning) return chained;
+        return { ...chained, output: `${driftWarning}\n${chained.output ?? ""}` };
       }
 
       if (abortSignal?.aborted) {
@@ -295,7 +287,7 @@ export class BashTool {
           chunks.push(s);
           if (bufferedLen > MAX_BUFFER) {
             maxBufferHit = true;
-            killProcessTree(child, "SIGKILL");
+            killProcessTree(child, "SIGKILL", "bash");
             // Same `close`-never-fires hazard as the timeout/abort paths.
             settleTimer = setTimeout(
               () => finishAfterKill(`[output exceeded ${MAX_BUFFER} bytes; process killed]`),
@@ -309,9 +301,9 @@ export class BashTool {
         if (timeout && timeout > 0) {
           timeoutTimer = setTimeout(() => {
             timedOut = true;
-            killProcessTree(child, "SIGTERM");
+            killProcessTree(child, "SIGTERM", "bash");
             forceKillTimer = setTimeout(() => {
-              killProcessTree(child, "SIGKILL");
+              killProcessTree(child, "SIGKILL", "bash");
               // Do NOT depend on `close` to settle: if anything in the tree
               // survived holding our stdio, it never fires.
               settleTimer = setTimeout(
@@ -399,9 +391,9 @@ export class BashTool {
 
         const onAbort = () => {
           aborted = true;
-          killProcessTree(child, "SIGTERM");
+          killProcessTree(child, "SIGTERM", "bash");
           forceKillTimer = setTimeout(() => {
-            killProcessTree(child, "SIGKILL");
+            killProcessTree(child, "SIGKILL", "bash");
             // Same backstop as the timeout path — an abort must not be able to
             // leave the turn waiting on a `close` that will never arrive.
             settleTimer = setTimeout(() => finishAfterKill("[Cancelled]"), POST_KILL_SETTLE_MS);
@@ -482,9 +474,10 @@ export class BashTool {
       return {
         success: true,
         output: [
-          `Background process started (id: ${id}, pid: ${entry.pid})`,
+          formatBackgroundProcessStarted(id, entry.pid),
           `Command: ${truncCmd(command, 80)}`,
           `Use process_logs(${id}) to view output, process_stop(${id}) to terminate.`,
+          BACKGROUND_WAIT_GUIDANCE,
         ].join("\n"),
         backgroundProcess: { id, pid: entry.pid, command },
       };
@@ -548,6 +541,7 @@ export class BashTool {
     try {
       entry.child.kill("SIGTERM");
       entry.alive = false;
+      entry.stopped = true;
       return { success: true, output: `Process ${id} terminated.` };
     } catch (err: unknown) {
       return {
@@ -575,28 +569,131 @@ export class BashTool {
     };
   }
 
+  /**
+   * Let the owner report background work outside this tool (delegations), so
+   * {@link hasRunningBackgroundJobs} sees every job the agent is waiting on.
+   */
+  setBackgroundJobProbe(probe: (() => Promise<boolean>) | null): void {
+    this.backgroundJobProbe = probe;
+  }
+
+  /** True while any background process — or probed background job — is still running. */
+  async hasRunningBackgroundJobs(): Promise<boolean> {
+    for (const entry of this.bgProcesses.values()) if (entry.alive) return true;
+    if (!this.backgroundJobProbe) return false;
+    try {
+      return await this.backgroundJobProbe();
+    } catch (err) {
+      logger.warn("orchestrator", "bash: background job probe failed — treating as no running jobs", {
+        message: (err as Error)?.message,
+      });
+      return false;
+    }
+  }
+
+  /** Live state of every background process this tool started, keyed by processJobKey. */
+  getBackgroundProcessStates(): Record<string, BackgroundProcessState> {
+    const out: Record<string, BackgroundProcessState> = {};
+    for (const entry of this.bgProcesses.values()) {
+      const state = entry.alive ? "running" : entry.stopped || entry.exitCode === 0 ? "done" : "failed";
+      out[processJobKey(entry.id, entry.pid)] = { state, exitCode: entry.exitCode };
+    }
+    return out;
+  }
+
+  /**
+   * One notice per background process that exited on its own since the last
+   * call, quoting the tail of its log. A process stopped via process_stop is
+   * not reported — the agent asked for that end and already knows.
+   */
+  async consumeExitNotifications(): Promise<string[]> {
+    const notices: string[] = [];
+    for (const entry of this.bgProcesses.values()) {
+      if (entry.alive || entry.stopped || entry.notified) continue;
+      entry.notified = true;
+      const status = entry.exitCode === 0 ? "finished" : "failed";
+      const lines = [
+        `Background process ${status}: id ${entry.id} (exit code ${entry.exitCode ?? "unknown"})`,
+        `Command: ${truncCmd(entry.command, 120)}`,
+      ];
+      const tail = await this.readLogTail(entry.logPath);
+      lines.push(tail ? `Last output:\n${tail}` : "Last output: (none)");
+      lines.push(`Use process_logs(${entry.id}) to view more output.`);
+      notices.push(lines.join("\n"));
+    }
+    return notices;
+  }
+
+  private async readLogTail(logPath: string): Promise<string> {
+    try {
+      // Read only the end — a long-running job's log can be arbitrarily large.
+      const { size } = await stat(logPath);
+      const fh = await open(logPath, "r");
+      let content: string;
+      try {
+        const length = Math.min(size, EXIT_NOTICE_TAIL_CHARS * 4);
+        const buf = Buffer.alloc(length);
+        await fh.read(buf, 0, length, size - length);
+        content = buf.toString("utf8");
+      } finally {
+        await fh.close();
+      }
+      const tail = content.trimEnd().split("\n").slice(-EXIT_NOTICE_TAIL_LINES).join("\n");
+      return tail.length > EXIT_NOTICE_TAIL_CHARS ? tail.slice(-EXIT_NOTICE_TAIL_CHARS) : tail;
+    } catch (err) {
+      logger.debug("orchestrator", "bash: background log unreadable for exit notice", {
+        target: logPath,
+        message: (err as Error)?.message,
+      });
+      return "";
+    }
+  }
+
   async cleanup(): Promise<void> {
     for (const entry of this.bgProcesses.values()) {
       if (entry.alive) {
         try {
           entry.child.kill("SIGTERM");
-        } catch {
-          /* */
+        } catch (err) {
+          logger.warn("orchestrator", "bash.cleanup: SIGTERM to background child failed — it may outlive the CLI", {
+            pid: entry.child.pid,
+            message: (err as Error)?.message,
+          });
         }
       }
       try {
         await unlink(entry.logPath);
-      } catch {
-        /* */
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException)?.code;
+        // ENOENT is the normal path — the log was already removed or never written.
+        if (code !== "ENOENT") {
+          logger.warn("orchestrator", "bash.cleanup: background log unlink failed — a stale log file is left behind", {
+            target: entry.logPath,
+            code,
+            message: (err as Error)?.message,
+          });
+        }
       }
     }
     this.bgProcesses.clear();
     if (this.tmpDir) {
-      try {
-        await rm(this.tmpDir, { recursive: true, force: true });
-      } catch {
-        /* */
-      }
+      // DECISION (Defect 3, site 1/10): log, do NOT retry.
+      //
+      // Nothing here may fail the CLI's shutdown: the target is a `muonroi-bg-*`
+      // scratch tree under os.tmpdir() holding background-process logs, and the
+      // OS reclaims it. But it must not be silent either — that was a bare
+      // `catch { /* *\/ }` (No Silent Catch), so a leak had no record at all.
+      //
+      // No retries, deliberately: the likely cause is a background child that has
+      // not released its log handle after the SIGTERM above, and a held handle was
+      // measured to return EPERM/EBUSY in 1-2ms WITHOUT node entering the retry
+      // loop. Passing maxRetries here would claim a protection that does not
+      // apply; the log line is what actually makes the leak visible.
+      await removeTreeLoggingFailure(this.tmpDir, {
+        module: "bash.cleanup",
+        namespace: "orchestrator",
+        consequence: "the background temp dir is left behind under os.tmpdir()",
+      });
     }
   }
 
@@ -604,14 +701,34 @@ export class BashTool {
     return this.cwd;
   }
 
+  /**
+   * Move the tool cwd — the anchor every later relative path in the session
+   * resolves against, and the value `stream-runner.ts` propagates to sub-agents.
+   *
+   * The MSYS spelling is normalised FIRST because `path.isAbsolute("/c/x")` is
+   * TRUE on win32: the guard below passed such a path through untouched, and
+   * `existsSync` then tested the CURRENT-drive resolution instead. Measured: a
+   * `setCwd("/c/Users/.../msys-probe-X")` naming a directory that exists threw
+   * `path does not exist` because what got tested was `D:\c\Users\...`. The
+   * in-band `cd` handler above never had this hole — it runs `posixToNative`
+   * (utils/shell.ts:171) whenever the resolved shell is POSIX — but `setCwd` is
+   * called straight from the orchestrator (`orchestrator.ts:889`, reached from
+   * `use-app-logic.tsx` on project adoption) and bypasses that path entirely.
+   *
+   * Neither guard's CONDITION changes: on win32 both spellings were already
+   * `isAbsolute`-true, and on POSIX `normalizeMsysDrivePath` is identity, so
+   * `/d/x` stays an ordinary absolute path. What changes is only WHICH path the
+   * existence check tests, which path is stored, and which path a refusal names.
+   */
   setCwd(next: string): void {
-    if (!path.isAbsolute(next)) {
+    const spelled = normalizeMsysDrivePath(next);
+    if (!path.isAbsolute(spelled)) {
       throw new Error(`setCwd: path must be absolute, got: ${next}`);
     }
-    if (!existsSync(next)) {
-      throw new Error(`setCwd: path does not exist: ${next}`);
+    if (!existsSync(spelled)) {
+      throw new Error(`setCwd: path does not exist: ${spelled}`);
     }
-    this.cwd = next;
+    this.cwd = spelled;
   }
 
   getToolDescription(): string {

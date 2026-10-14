@@ -52,6 +52,14 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     consoleUrl: "https://opencode.ai",
   },
   stepfun: {
+    // Pay-as-you-go platform API. StepFun *subscription* plans (the Builder
+    // Program's "Step Pro Plan") bill through a SEPARATE base that this key
+    // does NOT reach: https://api.stepfun.ai/step_plan/v1 — same
+    // OpenAI-compatible shape, same model ids, different billing route.
+    // Symptom of using the wrong one with a plan-only key: HTTP 402
+    // {"type":"quota_exceeded"} on /chat/completions while GET /v1/models
+    // still returns 200 (measured 2026-09-03), i.e. the key looks valid.
+    // Plan users set `providers.stepfun.baseURL` in user-settings.json.
     apiBase: "https://api.stepfun.ai/v1",
     consoleUrl: "https://platform.stepfun.ai/",
   },

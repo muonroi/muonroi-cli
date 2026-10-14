@@ -1,0 +1,129 @@
+{
+  "scenarios": [
+    {
+      "id": "smoke-boot",
+      "description": "CLI boots and reaches idle within budget",
+      "derivedFrom": {
+        "files": [
+          ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+          ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/runs/session-ea7378-stops.md",
+          "src/orchestrator/__tests__/helper-receipt.test.ts",
+          "src/orchestrator/__tests__/message-processor.test.ts",
+          "src/orchestrator/__tests__/nested-council-stall.test.ts",
+          "src/orchestrator/helper-receipt.ts",
+          "src/orchestrator/message-processor.ts",
+          "src/orchestrator/orchestrator.ts",
+          "src/orchestrator/tool-engine.ts"
+        ],
+        "semanticIds": []
+      },
+      "steps": [
+        {
+          "op": "wait_for",
+          "idle": true,
+          "timeoutMs": 60000
+        }
+      ],
+      "expectations": [
+        {
+          "kind": "idleReached",
+          "withinMs": 60000
+        },
+        {
+          "kind": "noErrorToast"
+        }
+      ],
+      "budgetMs": 90000
+    }
+  ],
+  "runs": [
+    {
+      "scenario": {
+        "id": "smoke-boot",
+        "description": "CLI boots and reaches idle within budget",
+        "derivedFrom": {
+          "files": [
+            ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/STATE.md",
+            ".quick-codex-flow/sessions/01a11553-1861-71b1-ae14-b6f2bd03444e/runs/session-ea7378-stops.md",
+            "src/orchestrator/__tests__/helper-receipt.test.ts",
+            "src/orchestrator/__tests__/message-processor.test.ts",
+            "src/orchestrator/__tests__/nested-council-stall.test.ts",
+            "src/orchestrator/helper-receipt.ts",
+            "src/orchestrator/message-processor.ts",
+            "src/orchestrator/orchestrator.ts",
+            "src/orchestrator/tool-engine.ts"
+          ],
+          "semanticIds": []
+        },
+        "steps": [
+          {
+            "op": "wait_for",
+            "idle": true,
+            "timeoutMs": 60000
+          }
+        ],
+        "expectations": [
+          {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          {
+            "kind": "noErrorToast"
+          }
+        ],
+        "budgetMs": 90000
+      },
+      "events": [],
+      "finalFrame": {
+        "mode": "live",
+        "version": "0.4.0",
+        "seq": 0,
+        "ts": 1791448150887,
+        "nodes": []
+      },
+      "startedAt": 1791448149347,
+      "endedAt": 1791448150950,
+      "timedOut": false,
+      "crashed": false,
+      "idleObserved": 1,
+      "syncTimeouts": [],
+      "mounted": true,
+      "childAlive": true,
+      "stderrTail": "[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\council.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\default.json has no \"model\" top-level key — skipping\n[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\tests\\harness\\fixtures\\llm\\discovery-model.json (provider=mock, modelId=mock-discovery)\n"
+    }
+  ],
+  "results": [
+    {
+      "verdict": "pass",
+      "scenarioId": "smoke-boot",
+      "durationMs": 1603,
+      "checks": [
+        {
+          "expectation": {
+            "kind": "idleReached",
+            "withinMs": 60000
+          },
+          "passed": true,
+          "reason": "Idle reached in 1603ms after 1 idle sentinel(s) (budget 60000ms)"
+        },
+        {
+          "expectation": {
+            "kind": "noErrorToast"
+          },
+          "passed": true,
+          "reason": "No error-level toasts observed"
+        }
+      ]
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "inconclusive": 0,
+    "passRate": 1
+  },
+  "skipped": [],
+  "emittedSpecs": [],
+  "durationMs": 1770
+}

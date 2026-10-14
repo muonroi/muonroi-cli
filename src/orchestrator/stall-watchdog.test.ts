@@ -1,5 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  __resetProviderBackoffForTests,
+  beginProviderBackoff,
+  endProviderBackoff,
+} from "../providers/rate-limit-backoff.js";
+import {
   createStallWatchdog,
   type MidLoopStallState,
   STALL_ABORT_REASON,
@@ -11,7 +16,23 @@ import {
 
 describe("createStallWatchdog", () => {
   beforeEach(() => vi.useFakeTimers());
-  afterEach(() => vi.useRealTimers());
+  afterEach(() => {
+    __resetProviderBackoffForTests();
+    vi.useRealTimers();
+  });
+
+  it("re-arms instead of aborting while a provider rate-limit backoff is in progress", () => {
+    // A 60s announced backoff produces no chunk; it must not read as a dead provider.
+    const wd = createStallWatchdog(1000, undefined, { progressTimeoutMs: 1500 });
+    beginProviderBackoff();
+    vi.advanceTimersByTime(5000);
+    expect(wd.signal.aborted).toBe(false);
+    endProviderBackoff();
+    // Judged again the moment the hold ends.
+    vi.advanceTimersByTime(1001);
+    expect(wd.signal.aborted).toBe(true);
+    wd.dispose();
+  });
 
   it("aborts with a TimeoutError when no chunk arrives within timeoutMs", () => {
     const wd = createStallWatchdog(1000);

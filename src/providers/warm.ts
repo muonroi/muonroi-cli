@@ -81,6 +81,34 @@ export async function rewarmProviderFactory(id: ProviderId): Promise<boolean> {
 
     await createProviderFactoryAsync(id, { ...(apiKey ? { apiKey } : {}), ...(baseURL ? { baseURL } : {}) });
     logger.info("cli", `[provider-warm] rebuilt ${id} factory after a credential change`, { providerId: id });
+
+    // A new credential invalidates the auth blocks recorded against the old
+    // one. Without this the rebuilt factory is used for fresh calls while the
+    // council still skips the model: measured 2026-09-09, a key fixed at
+    // 01:59 left `step-3.5-flash` reporting `reason: "blocked"` at 02:05, and
+    // only a CLI restart cleared it. Every blocklist entry is a 401/403 by
+    // construction, so scoping by provider clears exactly the blocks a key
+    // change can fix and leaves everything else alone.
+    try {
+      const [{ clearAuthBlocksWhere }, { detectProviderForModel }] = await Promise.all([
+        import("../council/model-blocklist.js"),
+        import("./runtime.js"),
+      ]);
+      const cleared = clearAuthBlocksWhere((info) => detectProviderForModel(info.modelId) === id);
+      if (cleared > 0) {
+        logger.info("cli", `[provider-warm] cleared ${cleared} auth block(s) for ${id} after the credential change`, {
+          providerId: id,
+          cleared,
+        });
+      }
+    } catch (err) {
+      // Never let blocklist hygiene fail the rebuild — the factory is already
+      // replaced and that is the load-bearing half.
+      logger.warn("cli", `[provider-warm] could not clear auth blocks for ${id}: ${(err as Error)?.message}`, {
+        error: err,
+        providerId: id,
+      });
+    }
     return true;
   } catch (err) {
     logger.warn("cli", `[provider-warm] failed to rebuild factory for ${id}: ${(err as Error)?.message}`, {

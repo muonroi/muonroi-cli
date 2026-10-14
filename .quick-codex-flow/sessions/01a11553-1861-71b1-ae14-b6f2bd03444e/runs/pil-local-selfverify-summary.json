@@ -1,0 +1,12 @@
+{
+  "provenance": "Metadata captured from the earlier native MCP result in this session. The full report file was overwritten by the subsequent wallet QA run; this is a summary, not a reconstructed full report.",
+  "runId": "c5dc94df-37f1-4bd1-bfba-33d57547761a",
+  "status": "done",
+  "total": 1,
+  "passed": 1,
+  "failed": 0,
+  "inconclusive": 0,
+  "elapsedMs": 1442,
+  "finalFrameNodes": 0,
+  "scope": "tier1 smoke boot/idle only; no mounted React or PIL interview proof"
+}

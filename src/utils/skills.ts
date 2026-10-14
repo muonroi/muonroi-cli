@@ -98,15 +98,34 @@ function loadSkillFromDir(rootDir: string, scope: SkillScope): DiscoveredSkill |
   }
 }
 
+/**
+ * Round 4 (G10): a `Dirent` for a symlink is not a directory — `e.isDirectory()`
+ * is false for it even when the link resolves to one, so a symlinked skill dir
+ * (e.g. Shipd's `.agents/skills/shipd-challenge -> ../../shipd-verify/skill`,
+ * matching Claude Code's own support for symlinked skill dirs) was silently
+ * invisible here. `e.isSymbolicLink()` gets a `statSync` follow-through instead;
+ * a dangling link (target missing) or a link to a plain file is skipped, not
+ * thrown — same "just don't list it" behaviour as any other non-directory entry.
+ */
 function listSkillDirectories(skillsRoot: string): string[] {
   try {
     if (!fs.existsSync(skillsRoot) || !fs.statSync(skillsRoot).isDirectory()) return [];
     const entries = fs.readdirSync(skillsRoot, { withFileTypes: true });
     const dirs: string[] = [];
     for (const e of entries) {
-      if (!e.isDirectory()) continue;
       if (e.name.startsWith(".")) continue;
-      dirs.push(path.join(skillsRoot, e.name));
+      const full = path.join(skillsRoot, e.name);
+      if (e.isDirectory()) {
+        dirs.push(full);
+        continue;
+      }
+      if (e.isSymbolicLink()) {
+        try {
+          if (fs.statSync(full).isDirectory()) dirs.push(full);
+        } catch {
+          // Dangling symlink (target does not exist) — skip silently.
+        }
+      }
     }
     return dirs.sort();
   } catch {

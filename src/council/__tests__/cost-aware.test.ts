@@ -27,17 +27,43 @@ describe("pickCouncilTaskModel", () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
+  // POLICY (operator, 2026-09-09): every judgement, act of leading and act of
+  // planning runs on the leader model — cost-aware or not — because one wrong
+  // decision at those points propagates through the whole downstream run. Only
+  // work that DECIDES NOTHING may be downshifted. These tests pin both halves.
+  //
+  // Note the vehicle change: the mechanics below (provider isolation, tier
+  // floor, missing-tier fallback) used to be exercised through research_need /
+  // evaluate_round. Those now return the leader immediately, so those tests
+  // would still PASS while testing nothing. They are re-pointed at
+  // round_summary, which is still downshiftable.
 
   it("returns leader unchanged when costAware=false", () => {
-    expect(pickCouncilTaskModel("research_need", "premium-x", false)).toBe("premium-x");
+    expect(pickCouncilTaskModel("round_summary", "premium-x", false)).toBe("premium-x");
   });
 
-  it("downshifts to fast tier for trivial classifier (research_need)", () => {
-    expect(pickCouncilTaskModel("research_need", "premium-x", true)).toBe("fast-x");
+  it("never downshifts a decision-grade task, even with costAware on", () => {
+    for (const task of [
+      "evaluate_round",
+      "readiness_judge",
+      "spec_synthesis",
+      "clarify_questions",
+      "sprint_goal",
+      "effort_estimate",
+      "maintain_design",
+      "maintain_review",
+      "research_need",
+    ] as const) {
+      expect(pickCouncilTaskModel(task, "premium-x", true)).toBe("premium-x");
+    }
   });
 
-  it("downshifts to balanced tier for evaluate_round", () => {
-    expect(pickCouncilTaskModel("evaluate_round", "premium-x", true)).toBe("balanced-x");
+  it("still downshifts work that decides nothing", () => {
+    // Summarizing what was already argued, ad-hoc Q&A, and prose over a final
+    // diff cannot change what the run does next — cheap is correct there.
+    expect(pickCouncilTaskModel("round_summary", "premium-x", true)).toBe("fast-x");
+    expect(pickCouncilTaskModel("reporter_qa", "premium-x", true)).toBe("fast-x");
+    expect(pickCouncilTaskModel("pr_body", "premium-x", true)).toBe("fast-x");
   });
 
   it("does not switch providers (leader anthropic, no anthropic-fast → falls back)", () => {
@@ -45,16 +71,15 @@ describe("pickCouncilTaskModel", () => {
       tier === "fast" ? catalog.find((m) => m.id === "fast-y") : undefined,
     );
     // fast-y is openai — must NOT be selected; fall back to leader.
-    expect(pickCouncilTaskModel("research_need", "premium-x", true)).toBe("premium-x");
+    expect(pickCouncilTaskModel("round_summary", "premium-x", true)).toBe("premium-x");
   });
 
   it("does not downshift when leader is already at or below target tier", () => {
-    expect(pickCouncilTaskModel("evaluate_round", "balanced-x", true)).toBe("balanced-x");
-    expect(pickCouncilTaskModel("evaluate_round", "fast-x", true)).toBe("fast-x");
+    expect(pickCouncilTaskModel("round_summary", "fast-x", true)).toBe("fast-x");
   });
 
   it("falls back to leader when target tier has no model anywhere", () => {
     vi.spyOn(registry, "getModelByTier").mockReturnValue(undefined);
-    expect(pickCouncilTaskModel("research_need", "premium-x", true)).toBe("premium-x");
+    expect(pickCouncilTaskModel("round_summary", "premium-x", true)).toBe("premium-x");
   });
 });

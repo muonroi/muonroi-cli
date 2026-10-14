@@ -22,6 +22,7 @@
  * Use both together: pass the signal into the call for clean cancellation, and
  * wrap the await in the race for a hard caller-side guarantee.
  */
+import { logger } from "./logger.js";
 
 /**
  * Combine an optional parent AbortSignal with a wall-clock deadline. Returns
@@ -34,13 +35,22 @@ export function withTimeoutSignal(
   timeoutMs: number,
 ): { signal: AbortSignal; cleanup: () => void } {
   const controller = new AbortController();
-  const timer = setTimeout(() => {
-    controller.abort(new Error(`LLM call exceeded ${timeoutMs}ms deadline (timeout)`));
-  }, timeoutMs);
+  // A non-positive / non-finite budget means NO wall-clock deadline — the parent
+  // signal alone drives the abort. "No deadline" must therefore arm NO timer:
+  // `setTimeout(…, 0)` would abort the call instantly, and `setTimeout(…,
+  // Infinity)` is clamped to 1ms (measured on Bun 1.3.13 and Node 24.18.0:
+  // `TimeoutOverflowWarning: Infinity does not fit into a 32-bit signed integer.
+  // Timeout duration was set to 1.`), so it fires immediately too.
+  const armed = Number.isFinite(timeoutMs) && timeoutMs > 0;
+  const timer = armed
+    ? setTimeout(() => {
+        controller.abort(new Error(`LLM call exceeded ${timeoutMs}ms deadline (timeout)`));
+      }, timeoutMs)
+    : undefined;
   let parentListener: (() => void) | null = null;
   if (parent) {
     if (parent.aborted) {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       controller.abort(parent.reason);
     } else {
       parentListener = () => controller.abort(parent.reason);
@@ -50,7 +60,7 @@ export function withTimeoutSignal(
   return {
     signal: controller.signal,
     cleanup: () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       if (parent && parentListener) parent.removeEventListener("abort", parentListener);
     },
   };
@@ -82,11 +92,18 @@ export async function withDeadlineRace<T>(
   let timer: ReturnType<typeof setTimeout> | null = null;
   let abortTimer: ReturnType<typeof setTimeout> | null = null;
   let abortListener: (() => void) | null = null;
-  const deadline = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label} exceeded ${deadlineMs}ms deadline (timeout)`));
-    }, deadlineMs);
-  });
+  // A non-positive / non-finite budget means NO wall-clock deadline: the caller
+  // is bounded by `fn()` settling or by `abortSignal`, nothing else. As in
+  // `withTimeoutSignal` above, that has to mean arming no timer — 0 rejects
+  // instantly and Infinity is clamped to 1ms on both runtimes this repo uses.
+  const deadlineArmed = Number.isFinite(deadlineMs) && deadlineMs > 0;
+  const deadline = deadlineArmed
+    ? new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(new Error(`${label} exceeded ${deadlineMs}ms deadline (timeout)`));
+        }, deadlineMs);
+      })
+    : null;
   // Losing the race does NOT cancel `fn()` — it keeps running and may reject
   // later, with nobody attached. That rejection escapes to the process-level
   // handler, which knows only `err.message`: crash.log for session
@@ -111,7 +128,8 @@ export async function withDeadlineRace<T>(
     }
     throw err;
   });
-  const racers: Array<Promise<T>> = [work, deadline as Promise<T>];
+  const racers: Array<Promise<T>> = [work];
+  if (deadline) racers.push(deadline as Promise<T>);
   if (abortSignal) {
     const abortRace = new Promise<never>((_, reject) => {
       const arm = () => {
@@ -132,6 +150,51 @@ export async function withDeadlineRace<T>(
     if (timer) clearTimeout(timer);
     if (abortTimer) clearTimeout(abortTimer);
     if (abortListener && abortSignal) abortSignal.removeEventListener("abort", abortListener);
+  }
+}
+
+/** Abort the consumer even when an SDK/provider ignores abort in a pending next(). */
+export async function* abortableStream<T>(
+  stream: AsyncIterable<T>,
+  signal: AbortSignal,
+  label: string,
+  abortValue?: T,
+): AsyncGenerator<T> {
+  const iterator = stream[Symbol.asyncIterator]();
+  let completed = false;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const next = await withDeadlineRace(() => iterator.next(), 0, label, signal, 0);
+      if (next.done) {
+        completed = true;
+        return;
+      }
+      yield next.value;
+    }
+  } catch (err) {
+    logger.debug("orchestrator", "Provider stream drain interrupted", {
+      label,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    if (!signal.aborted || abortValue === undefined) throw err;
+    // Preserve the engine's abort-part path (mid-loop continuation and rescue).
+    yield abortValue;
+  } finally {
+    if (!completed && iterator.return) {
+      // Queued return can itself wait behind the wedged next; never await it.
+      try {
+        void Promise.resolve(iterator.return()).catch((err: unknown) => {
+          console.error(
+            `[llm-deadline] ${label}: stream cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        });
+      } catch (err) {
+        console.error(
+          `[llm-deadline] ${label}: stream cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
   }
 }
 

@@ -17,6 +17,7 @@
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { redactSecrets } from "../utils/logger.js";
 
 const ENABLED = process.env.MUONROI_DEBUG_LLM_WIRE === "1";
 
@@ -60,7 +61,19 @@ function append(label: string, data: unknown): void {
   if (!ENABLED) return;
   try {
     ensureDirAndRotate();
-    const line = JSON.stringify({ t: new Date().toISOString(), label, data });
+    // Redact the SERIALIZED line — one pass, at the single choke point every
+    // logRequest/logChunk/logError write funnels through, so no future `log*`
+    // helper can be added that forgets to scrub.
+    //
+    // `logError` is the reason this is required: it persists `err.message`,
+    // `err.url` and the first 4000 chars of the provider's raw `responseBody`
+    // verbatim. An auth rejection is exactly the error this flag gets turned on
+    // for, and several OpenAI-compatible gateways echo the submitted key back in
+    // the 401 body; a Gemini-style URL carries the key as a query parameter.
+    // `redactSecrets` keeps the status code, the provider id and the request
+    // body SHAPE — everything the flag exists to capture — and replaces only
+    // the credential-shaped span.
+    const line = redactSecrets(JSON.stringify({ t: new Date().toISOString(), label, data }));
     appendFileSync(LOG_FILE, `${line}\n`, "utf8");
   } catch {
     /* fail-open */

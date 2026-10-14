@@ -1,10 +1,24 @@
-import { mkdtemp, readFile, rm, writeFile as writeFsFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile as writeFsFile } from "fs/promises";
 import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { editFile, readFiles, writeFile } from "./file";
 
-const summarizeDiagnosticsMock = vi.fn<(diagnostics: unknown) => string>(() => "1 LSP issue · 1 error");
+interface MockDiagnostic {
+  message: string;
+  severity: number;
+  code?: string;
+  range: {
+    start: { line: number; character: number };
+    end: { line: number; character: number };
+  };
+}
+interface MockDiagnosticFile {
+  filePath: string;
+  serverId: string;
+  diagnostics: MockDiagnostic[];
+}
+
 const syncFileWithLspMock = vi.fn<
   (
     cwd: string,
@@ -12,28 +26,16 @@ const syncFileWithLspMock = vi.fn<
     content: string,
     save: boolean,
     waitForDiagnostics: boolean,
-  ) => Promise<
-    Array<{
-      filePath: string;
-      serverId: string;
-      diagnostics: Array<{
-        message: string;
-        severity: number;
-        range: {
-          start: { line: number; character: number };
-          end: { line: number; character: number };
-        };
-      }>;
-    }>
-  >
->(async () => [
+  ) => Promise<MockDiagnosticFile[]>
+>(async (_cwd, filePath) => [
   {
-    filePath: "/tmp/demo.ts",
+    filePath,
     serverId: "typescript",
     diagnostics: [
       {
         message: "Type error",
         severity: 1,
+        code: "2322",
         range: {
           start: { line: 0, character: 0 },
           end: { line: 0, character: 5 },
@@ -43,16 +45,21 @@ const syncFileWithLspMock = vi.fn<
   },
 ]);
 
-vi.mock("../lsp/runtime", () => ({
-  summarizeDiagnostics: (diagnostics: unknown) => summarizeDiagnosticsMock(diagnostics),
-  syncFileWithLsp: (cwd: string, filePath: string, content: string, save: boolean, waitForDiagnostics: boolean) =>
-    syncFileWithLspMock(cwd, filePath, content, save, waitForDiagnostics),
-}));
+// The LSP *runtime* is mocked (no language server in unit tests) but the
+// diagnostic FORMATTER is the real one — the ack text is what the defect was
+// about, so a stubbed formatter would assert nothing.
+vi.mock("../lsp/runtime", async () => {
+  const manager = await import("../lsp/manager");
+  return {
+    describeDiagnostics: manager.describeLspDiagnostics,
+    syncFileWithLsp: (cwd: string, filePath: string, content: string, save: boolean, waitForDiagnostics: boolean) =>
+      syncFileWithLspMock(cwd, filePath, content, save, waitForDiagnostics),
+  };
+});
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
-  summarizeDiagnosticsMock.mockClear();
   syncFileWithLspMock.mockClear();
   await Promise.all(
     tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })),
@@ -65,7 +72,11 @@ describe("file tool LSP integration", () => {
     const result = await writeFile("demo.ts", "const answer = 42;\n", cwd);
 
     expect(result.success).toBe(true);
-    expect(result.output).toContain("1 LSP issue");
+    expect(result.output).toContain("1 LSP issue · 1 error");
+    // The ack must NAME the diagnostic, not only count it, and with a
+    // repo-relative path (the live trace carried absolute D:/sources/... noise).
+    expect(result.output).toContain("demo.ts:1:1 error [2322] Type error");
+    expect(result.output).not.toContain(cwd);
     expect(result.lspDiagnostics).toHaveLength(1);
     expect(syncFileWithLspMock).toHaveBeenCalledWith(
       cwd,
@@ -87,6 +98,53 @@ describe("file tool LSP integration", () => {
     expect(result.success).toBe(true);
     expect(content).toContain("42");
     expect(syncFileWithLspMock).toHaveBeenCalledWith(cwd, filePath, "const answer = 42;\n", true, true);
+  });
+
+  it("the edit ack names the real diagnostics that wedged /ideal run muc2joffe506", async () => {
+    // Measured: the blind-edit loop STARTED at this exact ack
+    // ("Edited …/test_artifact_store_smoke.py (+3 -0)\n6 LSP issues · 6 errors",
+    // interaction_logs 04:05:50, session bf39c59e4dd1). Line/code/message below
+    // are verbatim from that file; columns are synthetic (the trace had lines only).
+    const cwd = await createTempDir();
+    const rel = "tests/test_artifact_store_smoke.py";
+    const abs = path.join(cwd, "tests", "test_artifact_store_smoke.py");
+    await mkdir(path.dirname(abs), { recursive: true });
+    await writeFsFile(abs, "import sys\nold\n", "utf8");
+
+    const at = (line: number, character: number, message: string, code: string): MockDiagnostic => ({
+      message,
+      severity: 1,
+      code,
+      range: { start: { line: line - 1, character: character - 1 }, end: { line: line - 1, character: character + 3 } },
+    });
+    syncFileWithLspMock.mockResolvedValueOnce([
+      {
+        filePath: abs,
+        serverId: "pyright",
+        diagnostics: [
+          at(159, 5, '"_pytest" is not defined', "reportUndefinedVariable"),
+          at(
+            173,
+            9,
+            'Argument of type "bytes" cannot be assigned to parameter "file_content" of type "BinaryIO" in function "save"',
+            "reportArgumentType",
+          ),
+          at(356, 1, 'Import "sys" is not accessed', "reportUnusedImport"),
+          at(357, 1, 'Import "importlib.util" is not accessed', "reportUnusedImport"),
+        ],
+      },
+    ]);
+
+    const result = await editFile(rel, "old", "new", cwd);
+
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("4 LSP issues · 4 errors");
+    expect(result.output).toContain(`${rel}:159:5 error [reportUndefinedVariable] "_pytest" is not defined`);
+    expect(result.output).toContain(`${rel}:173:9 error [reportArgumentType] Argument of type "bytes" cannot be`);
+    expect(result.output).toContain(`${rel}:356:1 error [reportUnusedImport] Import "sys" is not accessed`);
+    expect(result.output).toContain(`${rel}:357:1 error [reportUnusedImport] Import "importlib.util" is not accessed`);
+    // All four fit under the ack cap, so nothing is hidden.
+    expect(result.output).not.toContain("not shown");
   });
 });
 

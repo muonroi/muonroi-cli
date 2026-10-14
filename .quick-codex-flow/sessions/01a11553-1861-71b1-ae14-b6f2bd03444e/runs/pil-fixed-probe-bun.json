@@ -1,0 +1,24 @@
+{
+  "runtime": "Bun",
+  "cases": [
+    {
+      "interactive": false,
+      "elapsedMs": 59,
+      "fallbackReason": "pipeline-timeout"
+    },
+    {
+      "interactive": true,
+      "elapsedMs": 43,
+      "fallbackReason": "pipeline-timeout"
+    }
+  ],
+  "humanWait": {
+    "answer": "answered",
+    "elapsedMs": 253,
+    "budgetMs": 50
+  },
+  "cancel": {
+    "message": "request cancelled",
+    "elapsedMs": 15
+  }
+}

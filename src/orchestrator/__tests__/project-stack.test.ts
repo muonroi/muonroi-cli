@@ -22,7 +22,7 @@ describe("detectProjectStack", () => {
     try {
       expect(detectProjectStack(dir)).toBe("");
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -32,7 +32,7 @@ describe("detectProjectStack", () => {
       writeFileSync(join(dir, "Cargo.toml"), "[package]\nname = 'x'\n");
       expect(detectProjectStack(dir)).toMatch(/^Rust/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -42,7 +42,7 @@ describe("detectProjectStack", () => {
       writeFileSync(join(dir, "App.csproj"), "<Project/>");
       expect(detectProjectStack(dir)).toMatch(/\.NET\/C#/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
@@ -57,7 +57,7 @@ describe("detectProjectStack", () => {
       expect(out).toMatch(/pkg: bun/);
       expect(out).toMatch(/tests: vitest/);
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 
