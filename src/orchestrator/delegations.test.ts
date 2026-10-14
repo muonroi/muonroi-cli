@@ -27,6 +27,10 @@ async function importDelegationsModule(options: { home?: string; spawnMock?: Ret
   vi.doUnmock("child_process");
 
   if (options.home) {
+    // delegations.ts resolves its root as `MUONROI_CLI_HOME ?? homedir()/.muonroi-cli`
+    // and vitest-setup.ts pins that var suite-wide, so the homedir mock alone no
+    // longer redirects it. Restored in afterEach.
+    process.env.MUONROI_CLI_HOME = path.join(options.home, ".muonroi-cli");
     const osActual = await vi.importActual<typeof import("os")>("os");
     vi.doMock("os", () => ({
       ...osActual,
@@ -46,7 +50,11 @@ async function importDelegationsModule(options: { home?: string; spawnMock?: Ret
   return import("./delegations");
 }
 
+const originalCliHome = process.env.MUONROI_CLI_HOME;
+
 afterEach(() => {
+  if (originalCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+  else process.env.MUONROI_CLI_HOME = originalCliHome;
   for (const dir of tempDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }

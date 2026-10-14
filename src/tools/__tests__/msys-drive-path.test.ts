@@ -26,8 +26,23 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setCommitRunRoot } from "../../orchestrator/auto-commit.js";
+
+// The LSP runtime is mocked — the same seam `file.test.ts` and
+// `file-tracker.test.ts` use. What this file asserts is path RESOLUTION and
+// write-scope containment; the post-write diagnostics sync is not under test.
+// Unmocked, every successful `.py` write/edit here booted a REAL pyright for the
+// fixture workspace (resolve/install + spawn + wait for diagnostics). Measured on
+// the windows-latest CI leg: the edit test hit the 30 s test timeout, the
+// write test took 19.9 s, the file 50 s in all; the late spawn then failed with
+// `spawn C:\Windows\system32\cmd.exe ENOENT` because afterEach had already
+// removed its cwd, and the still-running server held the fixture dir open
+// (`EBUSY ... rmdir`). None of that is a statement about MSYS paths.
+vi.mock("../../lsp/runtime", () => ({
+  describeDiagnostics: () => null,
+  syncFileWithLsp: async () => [],
+}));
 import { editFile, writeFile } from "../file.js";
 import { FileTracker } from "../file-tracker.js";
 import { checkWriteScope, normalizeMsysDrivePath, resetWorktreeCache } from "../write-scope.js";

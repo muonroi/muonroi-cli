@@ -17,7 +17,9 @@ function getProjectId(cwd: string): string {
 
 async function getDelegationsDir(cwd: string): Promise<string> {
   const projectId = getProjectId(cwd);
-  return path.join(os.homedir(), ".muonroi-cli", "delegations", projectId);
+  // Same root delegations.ts resolves: the suite-pinned MUONROI_CLI_HOME, never
+  // the developer's real home.
+  return path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "delegations", projectId);
 }
 
 describe("DelegationManager.kill", () => {

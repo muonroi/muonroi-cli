@@ -161,7 +161,18 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
   // smaller, nearer one — then emit the ACCEPTED segments back in the
   // original broadest-first order, so the "general first, specific last"
   // ordering intent is unaffected by which candidates happened to fit.
-  const home = os.homedir();
+  //
+  // `home` is canonicalised the SAME way `canonicalCwd` was (and `root` is
+  // found by walking up from `canonicalCwd`, so it is canonical too).
+  // Comparing a raw `os.homedir()` against a realpath'd root silently
+  // answered "the git root is outside $HOME" — `path.relative` starts with
+  // `..` — whenever the two spellings of one directory differ: macOS paths
+  // under `/var` → `/private/var`, a symlinked `/home`, or Windows' 8.3 short
+  // `USERPROFILE` (`C:\Users\RUNNER~1`) vs the long name that
+  // `realpathSync.native` returns. CI measured exactly this on macOS and
+  // Windows: every ancestor test got `null` while Linux (no symlink in its
+  // tmpdir) passed. Both sides must live in one canonical space.
+  const home = canonicalizePath(os.homedir());
   const ancestorCandidates: Array<{ seg: string; bytes: number }> = [];
   for (const dir of ancestorDirsAboveGitRoot(home, root)) {
     for (const fname of INSTRUCTION_FILENAMES) {
@@ -203,13 +214,22 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
   return segments;
 }
 
-export function loadCustomInstructions(cwd: string): string | null {
-  let canonical: string;
+/**
+ * The one spelling the OS reports for a path: symlinks resolved, Windows 8.3
+ * short names expanded, drive-letter case normalised. Falls back to
+ * `path.resolve` for a path that does not exist (or cannot be stat'd), so the
+ * loader never throws on it.
+ */
+function canonicalizePath(p: string): string {
   try {
-    canonical = fs.realpathSync.native(cwd);
+    return fs.realpathSync.native(p);
   } catch {
-    canonical = path.resolve(cwd);
+    return path.resolve(p);
   }
+}
+
+export function loadCustomInstructions(cwd: string): string | null {
+  const canonical = canonicalizePath(cwd);
 
   // Check cache first
   const now = Date.now();

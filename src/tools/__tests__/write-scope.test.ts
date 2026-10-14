@@ -15,8 +15,20 @@
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { setCommitRunRoot } from "../../orchestrator/auto-commit.js";
+
+// The LSP runtime is mocked (same seam as `file.test.ts`): this file asserts
+// write-scope CONTAINMENT, not post-write diagnostics. Unmocked, every allowed
+// `.ts` write booted a real typescript-language-server per fixture worktree
+// (CI logs on all three OSes: "[lsp] Failed to start typescript for
+// typescript:<fixture>/.wt-sprint ..."), and on Windows the still-running
+// server held the fixture open so cleanup failed with `EBUSY ... rmdir` — a
+// leaked process per test, outliving the file that started it.
+vi.mock("../../lsp/runtime", () => ({
+  describeDiagnostics: () => null,
+  syncFileWithLsp: async () => [],
+}));
 import { editFile, writeFile } from "../file.js";
 import { FileTracker } from "../file-tracker.js";
 import { checkWriteScope, describeCwdDrift, resetWorktreeCache } from "../write-scope.js";

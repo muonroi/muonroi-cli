@@ -17,7 +17,23 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { canonicalize } from "../../tools/write-scope.js";
 import { planningRoot, resolveStateDirOverride } from "../paths.js";
+
+// A project `stateDir` is returned in write-scope CANONICAL form — the
+// `candidate` that `resolveStateDirOverride` confined against the git root is
+// `canonicalize(join(cwd, stateDir))`, and that same value is what it returns.
+// Assertions therefore spell the expectation through `canonicalize`, never
+// through the lexical `cwd` nor through `fs.realpath`:
+//   - macOS: `os.tmpdir()` is `/var/folders/...`, a symlink to
+//     `/private/var/...`. The lexical `path.join(cwd, ...)` expectation was
+//     red there (CI: expected `/var/...`, received `/private/var/...`).
+//   - Windows: `os.tmpdir()` is the 8.3 `C:\Users\RUNNER~1\...`. `canonicalize`
+//     resolves symlinks via the JS `realpathSync`, which keeps `RUNNER~1`;
+//     `fs.realpath` is the libuv/native one, which expands it to the long name.
+//     Comparing against `fs.realpath` was red there for a value that is
+//     correct — two spellings of one directory.
+// Linux's tmpdir has neither, which is why both assumptions were green there.
 
 describe("gsd/paths — state dir relocation (gap a)", () => {
   let cwd: string;
@@ -69,7 +85,31 @@ describe("gsd/paths — state dir relocation (gap a)", () => {
       "utf8",
     );
     process.chdir(cwd);
-    expect(planningRoot(cwd)).toBe(path.join(cwd, "shipd-agent-state"));
+    expect(planningRoot(cwd)).toBe(canonicalize(path.join(cwd, "shipd-agent-state")));
+  });
+
+  it("project setting stateDir is reported canonically when cwd is spelled through a symlink (macOS /var → /private/var)", async () => {
+    // Reproduces the macOS tmpdir shape on any POSIX host: the project is
+    // reached THROUGH a symlinked parent, so the lexical and canonical
+    // spellings of the same directory differ.
+    const linkParent = await fs.mkdtemp(path.join(os.tmpdir(), "gsd-paths-linkparent-"));
+    try {
+      const linkedCwd = path.join(linkParent, "via-link");
+      await fs.symlink(cwd, linkedCwd, process.platform === "win32" ? "junction" : "dir");
+      await fs.mkdir(path.join(cwd, ".muonroi-cli"), { recursive: true });
+      await fs.writeFile(
+        path.join(cwd, ".muonroi-cli", "settings.json"),
+        JSON.stringify({ stateDir: "shipd-agent-state" }),
+        "utf8",
+      );
+      process.chdir(linkedCwd);
+      const resolved = planningRoot(linkedCwd);
+      expect(resolved).not.toBe(path.join(linkedCwd, "shipd-agent-state")); // not the lexical spelling
+      expect(resolved).toBe(canonicalize(path.join(cwd, "shipd-agent-state")));
+    } finally {
+      process.chdir(prevCwd);
+      await fs.rm(linkParent, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
   });
 
   it("env MUONROI_STATE_DIR takes priority over the project setting", async () => {
@@ -162,8 +202,13 @@ describe("gsd/paths — stateDir confinement (round-2, HIGH)", () => {
     process.chdir(cwd);
     const resolved = resolveStateDirOverride(cwd);
     expect(resolved).toBeDefined();
-    // realpath'd: resolves to the real target, not the symlink path.
-    expect(resolved).toBe(await fs.realpath(realTarget));
+    // realpath'd: resolves to the real target, not the symlink path — in the
+    // same canonical spelling the confinement check used (see the header).
+    expect(resolved).not.toContain("state-link");
+    expect(resolved).toBe(canonicalize(realTarget));
+    // And it names the same directory the OS reports for the target, however
+    // either side spells it (8.3 vs long name on Windows).
+    expect(await fs.realpath(resolved!)).toBe(await fs.realpath(realTarget));
   });
 
   it("rejects a project stateDir whose symlink escapes the git root even though the lexical path looks contained", async () => {

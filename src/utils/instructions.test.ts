@@ -230,5 +230,30 @@ describe("loadCustomInstructions", () => {
       expect(out).toContain(nearFileContent);
       expect(out).not.toContain(oversizedHomeAgents);
     });
+
+    // CI regression (macOS + Windows red, Linux green): the loader realpath'd
+    // `cwd` (hence the git root) but compared it against the RAW
+    // `os.homedir()`. macOS's tmpdir is `/var/...` → realpath `/private/var/...`;
+    // a Windows runner's USERPROFILE is the 8.3 `C:\Users\RUNNER~1` → realpath
+    // the long name. Either way `path.relative(home, root)` began with `..`, the
+    // root looked "outside $HOME", and no ancestor file was ever read. Linux's
+    // tmpdir has no symlink, so this reproduces that mismatch explicitly: $HOME
+    // is reached THROUGH a symlink, exactly as `/var` is on macOS.
+    it("still walks ancestors when $HOME is spelled through a symlink (macOS /var → /private/var, Windows 8.3 names)", async () => {
+      const realHome = makeTempDir("muonroi-home-real-");
+      const linkParent = makeTempDir("muonroi-home-link-");
+      const home = path.join(linkParent, "home");
+      fs.symlinkSync(realHome, home, process.platform === "win32" ? "junction" : "dir");
+      expect(fs.realpathSync.native(home)).not.toBe(home); // the precondition the bug needs
+      const repoRoot = path.join(home, "Personal", "Core", "shipd-challenges");
+      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      writeFile(path.join(home, "Personal", "Core", "CLAUDE.md"), "reply in the user's own language");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(repoRoot);
+      expect(out).toContain("reply in the user's own language");
+      // The label is relative to the CANONICAL home — still a `~`-relative path.
+      expect(out).toContain(`<!-- ${path.join("~", "Personal", "Core", "CLAUDE.md")} -->`);
+    });
   });
 });

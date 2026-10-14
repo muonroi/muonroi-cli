@@ -23,11 +23,12 @@
  * records, and these cases fail if anyone reintroduces it.
  */
 
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { breadcrumbFilePath } from "../../council/crash-breadcrumb.js";
+import { DelegationManager } from "../../orchestrator/delegations.js";
 import { loadTokens, saveTokens } from "../../providers/auth/token-store.js";
 import { ensureSchedulesDir, getScheduleDaemonPidPath, getScheduleRecordPath } from "../../tools/schedule.js";
 import { loadCustomInstructions, resetInstructionsCache } from "../../utils/instructions.js";
@@ -119,6 +120,19 @@ describe("MUONROI_CLI_HOME reaches the modules that resolved os.homedir() direct
       if (saved === undefined) delete process.env.MUONROI_AUTH_DIR;
       else process.env.MUONROI_AUTH_DIR = saved;
     }
+  });
+
+  it("delegations.ts creates its per-project delegations/ dir inside the pinned home", async () => {
+    // A sixth direct `os.homedir()` resolver, found because it made
+    // delegations-rate-limit.test.ts red on Windows (that test redirected
+    // `HOME`, which win32's `os.homedir()` ignores). `list()` MKDIRs — unpinned,
+    // every test listing delegations created a directory in the real home.
+    const cwd = mkdtempSync(path.join(os.tmpdir(), "home-pin-delegations-"));
+    const mgr = new DelegationManager(() => cwd);
+    await mgr.list();
+    expect(existsSync(path.join(pinnedHome, "delegations")), "delegations/ not created in the pinned home").toBe(true);
+    const projectDirs = readdirSync(path.join(pinnedHome, "delegations"));
+    expect(projectDirs.some((d) => d.startsWith(path.basename(cwd)))).toBe(true);
   });
 
   it("token-store.ts still lets the more specific MUONROI_AUTH_DIR win over the general pin", async () => {

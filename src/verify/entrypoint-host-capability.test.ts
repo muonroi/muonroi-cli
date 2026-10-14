@@ -136,6 +136,16 @@ describe("hasHostExecutable", () => {
     expect(() =>
       hasHostExecutable("node", { pathValue: "\u0000::::", pathExt: undefined, platform: "linux" }),
     ).not.toThrow();
-    expect(hasHostExecutable("node", { pathValue: undefined, pathExt: undefined, platform: "linux" })).toBe(false);
+    // An ABSENT PATH is the empty string. `pathValue: undefined` is not "absent" —
+    // the documented contract (`HostExecutableProbeOptions.pathValue`) is that an
+    // omitted value defaults to `process.env.PATH`, so asserting `false` for it
+    // only held on a machine whose real PATH lacks `node` (i.e. never: node is
+    // running this test). That was a test bug, red on every CI OS.
+    expect(hasHostExecutable("node", { pathValue: "", pathExt: undefined, platform: "linux" })).toBe(false);
+  });
+
+  it("an omitted pathValue falls back to the real PATH, per its documented default", () => {
+    expect(hasHostExecutable("node", { pathValue: undefined })).toBe(hasHostExecutable("node"));
+    expect(hasHostExecutable("node", { pathValue: undefined })).toBe(true);
   });
 });

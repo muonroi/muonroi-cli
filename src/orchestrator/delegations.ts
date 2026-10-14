@@ -431,9 +431,26 @@ export async function failDelegation(
   });
 }
 
+/**
+ * Root of the muonroi home — the repo-wide `MUONROI_CLI_HOME ?? homedir() +
+ * "/.muonroi-cli"` convention (`src/storage/config.ts`, `src/tools/schedule.ts`
+ * et al.), resolved LAZILY per call.
+ *
+ * This module used to join `os.homedir()` itself, so the suite-wide pin in
+ * `src/__test-stubs__/vitest-setup.ts` could not reach it: every test that
+ * listed delegations mkdir'd into the developer's REAL `~/.muonroi-cli`. It
+ * also made `delegations-rate-limit.test.ts` red on Windows only — that test
+ * redirected `HOME`, which `os.homedir()` honours on POSIX but ignores on
+ * win32 (it reads `USERPROFILE`), so the manager listed one directory while
+ * the test looked in another.
+ */
+function muonroiHome(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+}
+
 async function ensureDelegationsDir(cwd: string): Promise<string> {
   const projectId = getProjectId(cwd);
-  const dir = path.join(os.homedir(), ".muonroi-cli", "delegations", projectId);
+  const dir = path.join(muonroiHome(), "delegations", projectId);
   await fs.mkdir(dir, { recursive: true });
   return dir;
 }

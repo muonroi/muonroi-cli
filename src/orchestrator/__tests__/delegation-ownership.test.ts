@@ -9,6 +9,7 @@ let home: string;
 let cwd: string;
 let dir: string;
 let mod: typeof import("../delegations.js");
+let prevCliHome: string | undefined;
 const children: ReturnType<typeof spawn>[] = [];
 
 beforeEach(async () => {
@@ -22,6 +23,12 @@ beforeEach(async () => {
     `project-${createHash("sha1").update(cwd).digest("hex").slice(0, 10)}`,
   );
   fs.mkdirSync(dir, { recursive: true });
+  // delegations.ts resolves its root through the repo-wide `MUONROI_CLI_HOME ??
+  // homedir()/.muonroi-cli` convention, and vitest-setup.ts pins that var
+  // suite-wide — so the homedir mock alone no longer redirects it. Point the var
+  // at this test's temp home; the mock stays as belt-and-braces.
+  prevCliHome = process.env.MUONROI_CLI_HOME;
+  process.env.MUONROI_CLI_HOME = path.join(home, ".muonroi-cli");
   const actual = await vi.importActual<typeof import("os")>("os");
   vi.doMock("os", () => ({ ...actual, default: { ...actual, homedir: () => home } }));
   vi.resetModules();
@@ -30,6 +37,8 @@ beforeEach(async () => {
 
 afterEach(() => {
   for (const child of children.splice(0)) child.kill();
+  if (prevCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+  else process.env.MUONROI_CLI_HOME = prevCliHome;
   vi.doUnmock("os");
   vi.resetModules();
   fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });

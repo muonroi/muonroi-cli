@@ -51,7 +51,15 @@ describe("auto-commit run-root containment", () => {
   const savedEnv = { ...process.env };
 
   beforeEach(() => {
-    root = realpathSync(mkdtempSync(join(tmpdir(), "muonroi-runroot-")));
+    // `.native`, not the JS `realpathSync`: the roots compared below come from
+    // `git rev-parse --show-toplevel`, and git reports the OS's FINAL path. On
+    // the windows-latest runner `tmpdir()` is the 8.3 `C:\Users\RUNNER~1\...`;
+    // the JS realpath keeps that spelling (it only resolves symlinks) while git
+    // and `realpathSync.native` both report `C:\Users\runneradmin\...`. With the
+    // JS spelling the fixture disagreed with git about the SAME directory and
+    // the two toplevel/verdict assertions were red on Windows only. The
+    // product compares git-vs-git (`checkCommitScope`), so it was never wrong.
+    root = realpathSync.native(mkdtempSync(join(tmpdir(), "muonroi-runroot-")));
     parent = join(root, "parent");
     mkdirSync(parent);
     initRepo(parent);

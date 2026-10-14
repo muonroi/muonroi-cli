@@ -113,6 +113,9 @@ process.env.MUONROI_FLOOR_BASELINE_DIR ??= nodePath.join(
 //   src/utils/stderr-mirror.ts           (tui-stderr.log)
 //   src/council/crash-breadcrumb.ts      (council-breadcrumbs.jsonl)
 //   src/providers/auth/token-store.ts    (auth/, under its own MUONROI_AUTH_DIR)
+//   src/orchestrator/delegations.ts      (delegations/ — a sixth, found later:
+//                                         its test redirected HOME, which
+//                                         win32's os.homedir() ignores)
 // Their old tests stayed green only because each mocked `os.homedir()` per file,
 // so the pin was never in their path — safety by coincidence, and a NEW test
 // touching any of them would have reached the real home. Evidence it was real:

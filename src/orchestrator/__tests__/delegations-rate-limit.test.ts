@@ -102,10 +102,13 @@ describe("rate-limited delegation records", () => {
   });
 
   it("exposes failureKind on the listed run (the hook for the parent)", async () => {
-    // List through the manager against a fake home so ensureDelegationsDir resolves into tmp.
+    // List through the manager against a fake muonroi home so ensureDelegationsDir
+    // resolves into tmp. Redirected through MUONROI_CLI_HOME — the var the
+    // product reads — not `HOME`: `os.homedir()` honours `HOME` on POSIX but
+    // reads `USERPROFILE` on win32, which is why this was red on Windows only.
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-delegation-home-"));
-    const prevHome = process.env.HOME;
-    process.env.HOME = home;
+    const prevCliHome = process.env.MUONROI_CLI_HOME;
+    process.env.MUONROI_CLI_HOME = path.join(home, ".muonroi-cli");
     try {
       const mgr = new DelegationManager(() => tmpDir);
       const runs0 = await mgr.list();
@@ -121,8 +124,8 @@ describe("rate-limited delegation records", () => {
       const [run] = await mgr.list();
       expect(run).toMatchObject({ id: "calm-teal-owl", status: "error", failureKind: "rate-limited" });
     } finally {
-      if (prevHome === undefined) delete process.env.HOME;
-      else process.env.HOME = prevHome;
+      if (prevCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = prevCliHome;
       fs.rmSync(home, { recursive: true, force: true });
     }
   });
