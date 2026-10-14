@@ -4,7 +4,9 @@
  *
  * What this spec covers (drives the TUI as a real user would):
  *   1. /ideal halts with no verify recipe (synthetic via --inject-halt).
- *   2. The HaltRecoveryCard renders with 3 options; user selects "Init new".
+ *   2. The HaltRecoveryCard renders with 3 options, pre-selected on the safe
+ *      "Point to existing" (init_new is never the default — f70968ec); the
+ *      user presses Up and selects "Init new" deliberately.
  *   3. The InitNewFormCard opens at step="name".
  *   4. User types project name → step="fe-stack".
  *   5. User confirms FE stack → step="bb-template".
@@ -75,15 +77,31 @@ describe("/ideal halt → init-new → BB template picker E2E", { retry: 0 }, ()
   });
 
   // ---------------------------------------------------------------------------
-  // Stage 1 — Halt card visible, "Init new" highlighted, press Enter
+  // Stage 1 — Halt card visible, cursor moved Up onto "Init new", press Enter
   // ---------------------------------------------------------------------------
 
-  it("stage 1: halt card renders with Init new selected by default", async () => {
+  it("stage 1: halt card renders with Point to existing pre-selected, not Init new", async () => {
     await driver.wait_for({ selector: "id=ideal-halt-card", timeoutMs: 8_000 });
     const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
     expect(opts).toHaveLength(3);
     expect(opts[0]?.name).toBe("Init new project");
+    // Since f70968ec the card opens on `deriveHaltRecommendation(halt).index`:
+    // init_new scaffolds into the cwd, so it is never the default — the
+    // advice-less --inject-halt chunk pre-selects point_to_existing instead.
+    expect(opts[0]?.selected).toBeFalsy();
+    expect(opts[1]?.name).toBe("Point to existing recipe");
+    expect(opts[1]?.selected).toBe(true);
+  });
+
+  it("stage 1: Up arrow moves the cursor onto Init new deliberately", async () => {
+    driver.press("Up");
+    await waitForStable(() => {
+      const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
+      return opts.length === 3 && opts[0]?.selected === true && opts[1]?.selected !== true;
+    }, 5_000);
+    const opts = driver.queryAll("id=ideal-halt-card >> role=listitem");
     expect(opts[0]?.selected).toBe(true);
+    expect(opts[1]?.selected).toBeFalsy();
   });
 
   it("stage 1: Enter on Init new dismisses halt card and opens init-new form", async () => {
