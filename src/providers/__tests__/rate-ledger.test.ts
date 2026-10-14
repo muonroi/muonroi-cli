@@ -12,6 +12,7 @@ import {
   evaluateBudget,
   type LedgerDeps,
   noteProviderRateLimited,
+  settleLedgerWrites,
   usageTotalTokens,
 } from "../rate-ledger.js";
 
@@ -34,9 +35,7 @@ function deps(pid: number, sleeps: number[] = []): LedgerDeps {
 }
 
 /** Let the lease's fire-and-forget ledger update land. */
-async function flush(): Promise<void> {
-  for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 5));
-}
+const flush = settleLedgerWrites;
 
 beforeEach(() => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-ledger-"));
@@ -45,7 +44,10 @@ beforeEach(() => {
   process.env.MUONROI_RATE_LEDGER = "1";
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // A lease's release/settle write is fire-and-forget; removing the directory
+  // under it races the lock + temp files it creates (macOS: ENOTEMPTY).
+  await settleLedgerWrites();
   fs.rmSync(dir, { recursive: true, force: true });
   if (prevEnv === undefined) delete process.env.MUONROI_RATE_LEDGER;
   else process.env.MUONROI_RATE_LEDGER = prevEnv;
@@ -212,5 +214,19 @@ describe("usageTotalTokens", () => {
     expect(usageTotalTokens({ inputTokens: { total: 10 }, outputTokens: { total: 7 } })).toBe(17);
     expect(usageTotalTokens({ totalTokens: 9 })).toBe(9);
     expect(usageTotalTokens(undefined)).toBeUndefined();
+  });
+});
+
+describe("settleLedgerWrites", () => {
+  // Regression: a release issued as the last act of a test used to still be
+  // writing (lock + temp file) when afterEach removed the directory.
+  it("waits for a fire-and-forget release to finish writing", async () => {
+    const lease = await acquireLedgerSlot("acme", { concurrency: 1 }, 0, undefined, deps(1));
+    lease.release();
+    await settleLedgerWrites();
+    const leftovers = fs.readdirSync(dir).filter((f) => f.endsWith(".lock") || f.endsWith(".tmp"));
+    expect(leftovers).toEqual([]);
+    const ledger = JSON.parse(fs.readFileSync(path.join(dir, "acme.json"), "utf8"));
+    expect(ledger.entries.every((e: { inFlight: boolean }) => !e.inFlight)).toBe(true);
   });
 });

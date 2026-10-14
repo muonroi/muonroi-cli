@@ -239,6 +239,25 @@ export function evaluateBudget(
   return null;
 }
 
+/**
+ * Lease settle/release writes are fire-and-forget: a call must not wait on
+ * bookkeeping after its stream ended. They are still TRACKED, so whoever owns
+ * the ledger directory's lifetime can wait for them before removing it —
+ * without that, a release still holding the lock file or a temp file races the
+ * removal (seen on macOS as `ENOTEMPTY` from `rmSync` after a test).
+ */
+const pendingLedgerWrites = new Set<Promise<unknown>>();
+
+function trackLedgerWrite(write: Promise<unknown>): void {
+  pendingLedgerWrites.add(write);
+  void write.finally(() => pendingLedgerWrites.delete(write));
+}
+
+/** Resolve once every lease write started so far has landed (or failed and been logged). */
+export async function settleLedgerWrites(): Promise<void> {
+  while (pendingLedgerWrites.size > 0) await Promise.allSettled([...pendingLedgerWrites]);
+}
+
 let warnedFault = false;
 function warnFaultOnce(err: unknown): void {
   if (warnedFault) return;
@@ -402,17 +421,19 @@ export async function acquireLedgerSlot(
   }
 
   const update = (fn: (e: LedgerEntry) => void) => {
-    void withFileLock(
-      file,
-      async () => {
-        const ledger = await readLedger(file);
-        const entry = ledger.entries.find((e) => e.id === id);
-        if (!entry) return;
-        fn(entry);
-        await writeLedger(file, ledger);
-      },
-      { staleMs: LOCK_STALE_MS },
-    ).catch(warnFaultOnce);
+    trackLedgerWrite(
+      withFileLock(
+        file,
+        async () => {
+          const ledger = await readLedger(file);
+          const entry = ledger.entries.find((e) => e.id === id);
+          if (!entry) return;
+          fn(entry);
+          await writeLedger(file, ledger);
+        },
+        { staleMs: LOCK_STALE_MS },
+      ).catch(warnFaultOnce),
+    );
   };
   let released = false;
   return {

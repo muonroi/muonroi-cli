@@ -83,6 +83,17 @@ export interface TurnWatchdogOptions {
   hasProgressSince?: (sinceMs: number) => boolean;
 }
 
+/**
+ * Whether an idle timer armed at `armedAt` for `idleMs` is firing late enough
+ * that the event loop must have been blocked for a large part of the window.
+ * Half the window (min 25 ms) keeps ordinary timer jitter from counting, and
+ * at the production idle (minutes) only a block of tens of seconds qualifies.
+ */
+export function firedLate(armedAt: number, idleMs: number, now: number = Date.now()): boolean {
+  const lateBy = now - armedAt - idleMs;
+  return lateBy > Math.max(idleMs / 2, 25);
+}
+
 export async function* withTurnWatchdog(
   gen: AsyncGenerator<StreamChunk, void, unknown>,
   opts: TurnWatchdogOptions,
@@ -138,6 +149,18 @@ export async function* withTurnWatchdog(
                     return;
                   }
                   if (hasProgressSince?.(armedAt)) {
+                    armIdle();
+                    return;
+                  }
+                  // The timer fired LATE: this process's own event loop was
+                  // blocked (module loading, a large synchronous parse, a slow
+                  // CI runner) for part of the window, so the window did not
+                  // measure the turn's silence — it measured our own busy time.
+                  // A turn genuinely hung on an await never blocks the loop, so
+                  // its timer fires on time and is still caught below. Observed
+                  // on windows-latest: a 150 ms test window fired 180 ms late
+                  // during sub-session setup and killed a healthy turn.
+                  if (firedLate(armedAt, idleMs)) {
                     armIdle();
                     return;
                   }

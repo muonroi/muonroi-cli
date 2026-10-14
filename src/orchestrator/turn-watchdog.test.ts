@@ -5,7 +5,7 @@
  */
 import { describe, expect, it } from "vitest";
 import type { StreamChunk } from "../types/index.js";
-import { TurnStallError, withTurnWatchdog } from "./turn-watchdog.js";
+import { firedLate, TurnStallError, withTurnWatchdog } from "./turn-watchdog.js";
 
 const chunk = (content: string): StreamChunk => ({ type: "content", content }) as StreamChunk;
 
@@ -141,6 +141,46 @@ describe("withTurnWatchdog", () => {
           }),
         ),
       ).rejects.toMatchObject({ name: "TurnStallError", kind: "total" });
+    });
+  });
+
+  // The idle window measures the TURN's silence. When this process's own event
+  // loop is blocked (synchronous setup work, a slow CI runner) the timer fires
+  // late, and that window measured our busy time instead — windows-latest killed
+  // a healthy sub-session handoff exactly so (150 ms window, fired 180 ms late).
+  describe("a late fire (event loop blocked) is not silence", () => {
+    async function* blockThenEmit(blockMs: number): AsyncGenerator<StreamChunk, void, unknown> {
+      const end = Date.now() + blockMs;
+      while (Date.now() < end) {
+        // Deliberate synchronous block — stands in for module loading / sync IO.
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      yield chunk("after-block");
+    }
+
+    it("re-arms instead of firing when the window was eaten by a synchronous block", async () => {
+      const out = await drain(withTurnWatchdog(blockThenEmit(250), { idleMs: 60, totalMs: 5000, label: "t" }));
+      expect(out.map((c) => (c as { content: string }).content)).toEqual(["after-block"]);
+    });
+
+    it("still fires on a genuine silence after the block", async () => {
+      async function* blockThenHang(): AsyncGenerator<StreamChunk, void, unknown> {
+        const end = Date.now() + 250;
+        while (Date.now() < end) {
+          // synchronous block, then a real hang on an await
+        }
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      await expect(
+        drain(withTurnWatchdog(blockThenHang(), { idleMs: 60, totalMs: 5000, label: "t" })),
+      ).rejects.toMatchObject({ name: "TurnStallError", kind: "idle" });
+    });
+
+    it("ignores ordinary timer jitter", () => {
+      expect(firedLate(0, 150, 150 + 20)).toBe(false);
+      expect(firedLate(0, 150, 150 + 180)).toBe(true);
+      // At the production idle (minutes) only a block of tens of seconds counts.
+      expect(firedLate(0, 120_000, 120_000 + 5_000)).toBe(false);
     });
   });
 
