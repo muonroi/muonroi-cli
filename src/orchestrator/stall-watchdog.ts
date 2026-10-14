@@ -19,6 +19,7 @@
  * `timeoutMs <= 0` disables the watchdog (signal never fires).
  */
 
+import { isProviderBackoffActive } from "../providers/rate-limit-backoff.js";
 import { logger } from "../utils/logger.js";
 
 export interface StallWatchdog {
@@ -201,8 +202,11 @@ export function createStallWatchdog(
     if (!enabled) return;
     timer = setTimeout(() => {
       // Hold open (re-arm) while an interactive card blocks the turn — the
-      // human is thinking, not a stalled provider.
-      if (shouldSuppressFire?.()) {
+      // human is thinking, not a stalled provider. Likewise while a call waits
+      // out a provider rate limit (rate-limit-backoff.ts): that silence is an
+      // announced backoff the provider asked for, and aborting it would turn a
+      // recoverable 429 into a "provider stall" failure.
+      if (shouldSuppressFire?.() || isProviderBackoffActive()) {
         arm();
         return;
       }
@@ -215,7 +219,7 @@ export function createStallWatchdog(
   const armProgress = () => {
     if (!progressEnabled) return;
     progressTimer = setTimeout(() => {
-      if (shouldSuppressFire?.()) {
+      if (shouldSuppressFire?.() || isProviderBackoffActive()) {
         armProgress();
         return;
       }

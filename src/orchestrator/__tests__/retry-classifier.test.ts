@@ -57,6 +57,18 @@ describe("classifyStreamError", () => {
     expect(result.transient).toBe(true);
   });
 
+  it("classifies a rate limit that already spent its wait budget as NOT transient (even wrapped)", () => {
+    // Carries statusCode 429 — without the marker check every outer layer would
+    // stack its own retries on top of the gate's full budget.
+    const exhausted = Object.assign(new Error("Rate-limited by the provider account"), {
+      statusCode: 429,
+      rateLimitRetryExhausted: true,
+    });
+    expect(classifyStreamError(exhausted)).toEqual({ transient: false, reason: "rate-limit-exhausted" });
+    const wrapped = Object.assign(new Error("stream failed"), { cause: exhausted });
+    expect(classifyStreamError(wrapped).transient).toBe(false);
+  });
+
   it("classifies HTTP 401 as NOT transient", () => {
     const err = Object.assign(new Error("Unauthorized"), { statusCode: 401 });
     const result = classifyStreamError(err);

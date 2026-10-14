@@ -39,6 +39,21 @@
  * {@link IN_FLIGHT_STALE_MS}, stops counting toward concurrency; an abandoned
  * lock file is broken after {@link LOCK_STALE_MS}.
  *
+ * PROVIDER COOLDOWN (the reactive half)
+ * -------------------------------------
+ * The declared budget is our MODEL of the account; the provider's 429 is the
+ * truth. When any process gets a rate-limit answer from provider P, it records
+ * `cooldown.until` in P's ledger ({@link noteProviderRateLimited}) — from the
+ * provider's Retry-After when sent, else the backoff step — and every process's
+ * next call to P holds until it passes ({@link acquireLedgerSlot}). Without it,
+ * six background agents that each got their own 429 would each retry on their
+ * own schedule and keep the window full for one another. This applies to EVERY
+ * provider, including those whose catalog entry declares no `rate_limits`: for
+ * them the acquire is a single lock-free read of the ledger file (ENOENT when
+ * the provider has never pushed back), so the common path stays cheap.
+ * Consecutive refusals escalate the cooldown (`strikes`); a 429 that lands while
+ * a cooldown is still active (a request dispatched before it began) does not.
+ *
  * Fail-open: any ledger fault (unwritable home dir, corrupt file) degrades to
  * the in-process pacer only — a broken ledger must never stop calls.
  *
@@ -52,6 +67,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ModelRateLimits } from "../types/index.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { rateLimitBackoffMs } from "./rate-limit-backoff.js";
 import { RATE_LIMIT_WINDOW_MS } from "./rate-limiter.js";
 
 /** chars/4 under-counts real provider tokens ~2× (see the metered gate notes). */
@@ -67,7 +83,7 @@ const LOCK_STALE_MS = 5_000;
 const MAX_POLL_MS = 2_000;
 const MIN_POLL_MS = 100;
 
-export type LedgerWaitKind = "concurrency" | "requests-per-minute" | "tokens-per-minute";
+export type LedgerWaitKind = "concurrency" | "requests-per-minute" | "tokens-per-minute" | "provider-cooldown";
 
 export interface LedgerWait {
   kind: LedgerWaitKind;
@@ -86,9 +102,20 @@ interface LedgerEntry {
   inFlight: boolean;
 }
 
+/** The provider said 429: every process holds calls to it until `until`. */
+interface LedgerCooldown {
+  /** Epoch ms the cooldown lifts. */
+  until: number;
+  /** Consecutive refusals that each outlasted the previous cooldown. */
+  strikes: number;
+  /** When it was last set or extended, epoch ms. */
+  at: number;
+}
+
 interface LedgerFile {
   v: 1;
   entries: LedgerEntry[];
+  cooldown?: LedgerCooldown;
 }
 
 export interface LedgerLease {
@@ -142,7 +169,9 @@ function ledgerPath(dir: string, provider: string): string {
 async function readLedger(file: string): Promise<LedgerFile> {
   try {
     const parsed = JSON.parse(await fs.readFile(file, "utf8")) as LedgerFile;
-    return parsed && Array.isArray(parsed.entries) ? parsed : { v: 1, entries: [] };
+    if (!parsed || typeof parsed !== "object") return { v: 1, entries: [] };
+    // Keep the cooldown even when entries are missing — it is the shared 429 state.
+    return { ...parsed, v: 1, entries: Array.isArray(parsed.entries) ? parsed.entries : [] };
   } catch {
     // Missing (first use) or torn by a crash mid-write — start a fresh window.
     return { v: 1, entries: [] };
@@ -219,9 +248,109 @@ function warnFaultOnce(err: unknown): void {
   );
 }
 
+/** The active provider cooldown as a wait, or null when none is in force. */
+function cooldownWait(ledger: LedgerFile, now: number): LedgerWait | null {
+  const until = ledger.cooldown?.until;
+  if (typeof until !== "number" || !Number.isFinite(until) || until <= now) return null;
+  // `limit` names a declared ceiling for the other kinds; a cooldown has none.
+  return { kind: "provider-cooldown", limit: 0, waitMs: until - now };
+}
+
+/**
+ * Hold until provider P's cooldown (if any) has passed. Lock-free: a reader
+ * that races a writer sees either the old or the new file (writes are an atomic
+ * rename), and either answer is safe — the worst case is one extra poll.
+ */
+async function waitOutCooldown(
+  file: string,
+  onWait: ((wait: LedgerWait) => void) | undefined,
+  deps: LedgerDeps,
+): Promise<void> {
+  let announced = false;
+  while (true) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(file, "utf8");
+    } catch (err) {
+      // ENOENT is the common case: this provider never pushed back.
+      if ((err as NodeJS.ErrnoException).code !== "ENOENT") warnFaultOnce(err);
+      return;
+    }
+    let wait: LedgerWait | null;
+    try {
+      wait = cooldownWait(JSON.parse(raw) as LedgerFile, deps.now());
+    } catch {
+      // Torn/corrupt file — no cooldown can be read, so none is enforced.
+      return;
+    }
+    if (!wait) return;
+    if (!announced) {
+      announced = true;
+      onWait?.(wait);
+    }
+    await deps.sleep(Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, wait.waitMs)));
+  }
+}
+
+/**
+ * Record that provider P just answered with a rate limit, and return how long
+ * this caller should wait before trying again — the time until the SHARED
+ * cooldown lifts, which every process honours.
+ *
+ * - The provider's Retry-After (`hintMs`) wins when present.
+ * - A refusal that arrives after the previous cooldown already lifted (within a
+ *   window) escalates `strikes`, and the backoff with it: the last pause was not
+ *   long enough. One that arrives WHILE a cooldown is active was dispatched
+ *   before it began; it neither escalates nor shortens anything.
+ * - The cooldown only ever extends (`max`), never shrinks.
+ *
+ * Ledger disabled or faulty → the caller's own proposal: it waits alone.
+ */
+export async function noteProviderRateLimited(
+  provider: string,
+  proposal: { proposedMs: number; hintMs: number | null },
+  deps: LedgerDeps = defaultLedgerDeps(),
+): Promise<number> {
+  const fallback = Math.max(0, proposal.hintMs ?? proposal.proposedMs);
+  if (ledgerDisabled()) return fallback;
+  const file = ledgerPath(deps.dir, provider);
+  try {
+    await fs.mkdir(deps.dir, { recursive: true });
+    return await withFileLock(
+      file,
+      async () => {
+        const ledger = await readLedger(file);
+        const now = deps.now();
+        const prev = ledger.cooldown;
+        let strikes: number;
+        let delay: number;
+        if (prev && prev.until > now) {
+          strikes = prev.strikes;
+          delay = proposal.hintMs ?? 0;
+        } else {
+          strikes = prev && now - prev.until < RATE_LIMIT_WINDOW_MS ? prev.strikes + 1 : 1;
+          delay = proposal.hintMs ?? Math.max(proposal.proposedMs, rateLimitBackoffMs(strikes));
+        }
+        const until = Math.max(prev?.until ?? 0, now + Math.max(0, delay));
+        ledger.cooldown = { until, strikes, at: now };
+        await writeLedger(file, ledger);
+        return until - now;
+      },
+      { staleMs: LOCK_STALE_MS },
+    );
+  } catch (err) {
+    warnFaultOnce(err);
+    return fallback;
+  }
+}
+
 /**
  * Hold until a call needing ~`estTokens` fits the provider's machine-wide
  * budget, then record it. The returned lease MUST be released.
+ *
+ * A provider cooldown (see {@link noteProviderRateLimited}) holds the call
+ * first — also for a provider that declares no limits at all, which then gets
+ * the cheap lock-free check and a no-op lease.
  */
 export async function acquireLedgerSlot(
   provider: string,
@@ -230,10 +359,13 @@ export async function acquireLedgerSlot(
   onWait?: (wait: LedgerWait) => void,
   deps: LedgerDeps = defaultLedgerDeps(),
 ): Promise<LedgerLease> {
-  if (!limits || ledgerDisabled()) return NOOP_LEASE;
-  if (!limits.concurrency && !limits.requestsPerMinute && !limits.tokensPerMinute) return NOOP_LEASE;
-
+  if (ledgerDisabled()) return NOOP_LEASE;
   const file = ledgerPath(deps.dir, provider);
+  if (!limits || (!limits.concurrency && !limits.requestsPerMinute && !limits.tokensPerMinute)) {
+    await waitOutCooldown(file, onWait, deps);
+    return NOOP_LEASE;
+  }
+
   const id = randomUUID();
   const tokens = Math.max(0, Math.round(estTokens));
   let lastKind: LedgerWaitKind | null = null;
@@ -246,7 +378,8 @@ export async function acquireLedgerSlot(
         async () => {
           const ledger = await readLedger(file);
           prune(ledger, deps);
-          const blocked = evaluateBudget(ledger.entries, limits, tokens, deps.now());
+          const blocked =
+            cooldownWait(ledger, deps.now()) ?? evaluateBudget(ledger.entries, limits, tokens, deps.now());
           if (!blocked) {
             ledger.entries.push({ id, pid: deps.pid, at: deps.now(), tokens, inFlight: true });
           }

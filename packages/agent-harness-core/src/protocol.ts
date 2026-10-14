@@ -424,9 +424,14 @@ export type LiveEvent =
       modelId: string;
       /** Pipeline stage of the held call (main / council / subagent / …). */
       stage: string;
-      /** Which declared budget bound: the per-minute request count, or in-flight concurrency. */
-      limitKind: "requests-per-minute" | "concurrency" | "tokens-per-minute";
-      /** The declared ceiling that produced the wait, verbatim from the catalog. */
+      /**
+       * Which budget bound: a declared per-minute request/token count or
+       * in-flight concurrency — or `provider-cooldown`: the provider itself
+       * answered 429 recently (this or another muonroi process) and every call
+       * to it is held until the shared cooldown in the machine-wide ledger lifts.
+       */
+      limitKind: "requests-per-minute" | "concurrency" | "tokens-per-minute" | "provider-cooldown";
+      /** The declared ceiling that produced the wait, verbatim from the catalog. `0` for `provider-cooldown`. */
       limit: number;
       /** How long the call was held, in ms. */
       waitMs: number;

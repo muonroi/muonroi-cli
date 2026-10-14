@@ -42,9 +42,16 @@ import {
 import { loadCatalog, normalizeModelId } from "./models/registry.js";
 // Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
 import { createAbortContext } from "./orchestrator/abort.js";
-import { completeDelegation, failDelegation, loadDelegation } from "./orchestrator/delegations";
+import {
+  completeDelegation,
+  delegationFailureKind,
+  failDelegation,
+  loadDelegation,
+  noteDelegationProgress,
+} from "./orchestrator/delegations";
 import { Agent } from "./orchestrator/orchestrator";
 import { createPendingCallsLog } from "./orchestrator/pending-calls.js";
+import { withStreamRetry } from "./orchestrator/retry-stream.js";
 import { loadKeyForProvider, setKeyForProvider } from "./providers/keychain.js";
 import { detectProviderForModel } from "./providers/runtime.js";
 import type { ProviderId } from "./providers/types.js";
@@ -57,6 +64,7 @@ import { runScriptManagedUninstall } from "./utils/install-manager";
 import type { PermissionMode } from "./utils/permission-mode.js";
 import { getApiKey, getBaseURL, getCurrentModel, saveUserSettings } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
+import { reportRetryNotice, setRetryReporter } from "./utils/visible-retry.js";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
 
 // Hydrate chat secrets (no-op now: secrets live in the environment/env-store)
@@ -833,6 +841,19 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
   let output = "";
   let agent: Agent | undefined;
 
+  // The child is detached with stdio ignored, so a `[retry] …` notice (the
+  // metered gate's provider rate-limit backoff, or the retry below) written to
+  // stderr would vanish and a backing-off worker would look exactly like a hung
+  // one. Route every notice into the job record instead — `delegation_list` and
+  // `/jobs` then show what the worker is waiting on.
+  setRetryReporter((message) => {
+    noteDelegationProgress(jobPath, message).catch((err: unknown) => {
+      console.error(
+        `[delegation] failed to record progress in ${jobPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    });
+  });
+
   try {
     const delegation = await loadDelegation(jobPath);
 
@@ -865,16 +886,40 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
       persistSession: false,
       batchApi: Boolean(delegation.batchApi ?? options.batchApi === true),
     });
-    const result = await agent.runTaskRequest({
-      agent: delegation.agent,
-      description: delegation.description,
-      prompt: delegation.prompt,
-    });
+    const childAgent = agent;
+    // Same retry wrapper the foreground `task` tool uses (orchestrator runTask).
+    // The child used to call runTaskRequest bare, so the transient errors it
+    // re-throws (a 429 or a dropped socket before any output) ended the job on
+    // the FIRST occurrence. Rate limits get the long, time-budgeted schedule;
+    // one the metered gate already waited out is non-transient and not stacked.
+    let provider: string | undefined;
+    try {
+      provider = detectProviderForModel(childAgent.getModel());
+    } catch {
+      provider = undefined; // Only names the account in the exhausted error text.
+    }
+    const result = await withStreamRetry(
+      () =>
+        childAgent.runTaskRequest({
+          agent: delegation.agent,
+          description: delegation.description,
+          prompt: delegation.prompt,
+        }),
+      {
+        provider,
+        onRetry: (info) =>
+          reportRetryNotice(
+            `[retry] ${info.errorMessage.slice(0, 80)} — waiting ${Math.ceil(info.nextDelayMs / 1000)}s before ` +
+              `attempt ${info.attempt + 1}/${info.maxAttempts}`,
+          ),
+      },
+    );
 
     output = (result.output || "").trim();
 
     if (!result.success) {
-      await failDelegation(jobPath, result.output || result.error || "Background delegation failed.", output);
+      const failure = result.output || result.error || "Background delegation failed.";
+      await failDelegation(jobPath, failure, output, { failureKind: delegationFailureKind(failure) });
       return;
     }
 
@@ -882,12 +927,13 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     try {
-      await failDelegation(jobPath, msg, output);
+      await failDelegation(jobPath, msg, output, { failureKind: delegationFailureKind(err) });
     } catch {
       // Best effort — background tasks should fail silently if persistence is unavailable.
     }
     process.exit(1);
   } finally {
+    setRetryReporter(null);
     await agent?.cleanup();
   }
 }

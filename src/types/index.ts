@@ -57,12 +57,22 @@ export interface TaskRun {
 
 export type DelegationStatus = "running" | "complete" | "error";
 
+/**
+ * Known, actionable failure cause of a background delegation.
+ * `rate-limited`: the provider account answered HTTP 429 even after the retry
+ * budget — the account budget is shared by every agent, so the right response is
+ * to wait / launch fewer, not to re-launch at once.
+ */
+export type DelegationFailureKind = "rate-limited";
+
 export interface DelegationRun {
   id: string;
   agent: "explore";
   description: string;
   summary: string;
   status: DelegationStatus;
+  /** Set on a failed delegation whose cause is known (see {@link DelegationFailureKind}). */
+  failureKind?: DelegationFailureKind;
 }
 
 export interface SubagentStatus {

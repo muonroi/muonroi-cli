@@ -38,6 +38,7 @@
  * whole time the inner one is active, so the outer turn's own pinger is
  * never mistaken for orphaned just because a nested turn began.
  */
+import { isProviderBackoffActive } from "../providers/rate-limit-backoff.js";
 import type { StreamChunk } from "../types/index.js";
 import { beginTurnGeneration, endTurnGeneration } from "./turn-progress.js";
 
@@ -129,7 +130,10 @@ export async function* withTurnWatchdog(
                 // demands a fresh signal, so this cannot stall forever.
                 const armedAt = Date.now();
                 idleTimer = setTimeout(() => {
-                  if (shouldSuppressFire?.()) {
+                  // A provider rate-limit backoff is a known, announced silence
+                  // (rate-limit-backoff.ts) — not a hung turn. Only the IDLE
+                  // guard defers to it; the total ceiling stays absolute.
+                  if (shouldSuppressFire?.() || isProviderBackoffActive()) {
                     armIdle();
                     return;
                   }

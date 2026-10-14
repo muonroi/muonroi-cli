@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { ProviderRateLimitError } from "../../providers/rate-limit-backoff.js";
 import type { RetryInfo } from "../retry-stream.js";
 import { withStreamRetry } from "../retry-stream.js";
 
@@ -182,5 +183,84 @@ describe("withStreamRetry", () => {
     // attempt 1: 500, attempt 2: 2000 → capped to 1000
     expect(delays[0]).toBe(500);
     expect(delays[1]).toBe(1000);
+  });
+});
+
+// A per-minute provider budget can never be outlasted by an 8s cap (the
+// 2026-10-14 delegation die-off), so rate limits get their own schedule.
+describe("withStreamRetry — rate-limit schedule", () => {
+  const rateLimited = (extra: Record<string, unknown> = {}) =>
+    Object.assign(new Error("Rate limit reached, please try again later."), { statusCode: 429, ...extra });
+
+  it("waits on the long schedule and does not burn maxAttempts", async () => {
+    const delays: number[] = [];
+    const factory = vi.fn();
+    for (let i = 0; i < 4; i++) factory.mockRejectedValueOnce(rateLimited());
+    factory.mockResolvedValueOnce("ok");
+
+    const out = await withStreamRetry(factory, {
+      maxAttempts: 2,
+      rateLimitBudgetMs: 240_000,
+      delay: (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    expect(out).toBe("ok");
+    expect(factory).toHaveBeenCalledTimes(5); // 4 rate-limited tries despite maxAttempts 2
+    // 4s → 8s → 16s → 32s, ±20% jitter — far beyond the short 8s cap.
+    expect(delays[0]).toBeGreaterThanOrEqual(3_200);
+    expect(delays[3]).toBeGreaterThanOrEqual(25_600);
+  });
+
+  it("honours a Retry-After above the short-schedule cap", async () => {
+    const delays: number[] = [];
+    const factory = vi
+      .fn()
+      .mockRejectedValueOnce(rateLimited({ retryAfter: "30" }))
+      .mockResolvedValueOnce("ok");
+    await withStreamRetry(factory, {
+      rateLimitBudgetMs: 240_000,
+      delay: (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    });
+    expect(delays).toEqual([30_000]);
+  });
+
+  it("throws the actionable ProviderRateLimitError when the budget is spent", async () => {
+    const factory = vi.fn().mockRejectedValue(rateLimited());
+    const err = await withStreamRetry(factory, {
+      provider: "acme",
+      rateLimitBudgetMs: 20_000,
+      delay: fastDelay,
+    }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ProviderRateLimitError);
+    expect((err as Error).message).toContain('"acme" provider account');
+  });
+
+  it("does not stack retries on a rate limit already exhausted downstream (the gate)", async () => {
+    const exhausted = new ProviderRateLimitError({ attempts: 7, waitedMs: 230_000, cause: rateLimited() });
+    const factory = vi.fn().mockRejectedValue(exhausted);
+    await expect(withStreamRetry(factory, { delay: fastDelay })).rejects.toBe(exhausted);
+    expect(factory).toHaveBeenCalledTimes(1);
+  });
+
+  it("budget 0 restores the short schedule for rate limits", async () => {
+    const delays: number[] = [];
+    const factory = vi.fn().mockRejectedValue(rateLimited());
+    await expect(
+      withStreamRetry(factory, {
+        rateLimitBudgetMs: 0,
+        jitter: 0,
+        delay: (ms) => {
+          delays.push(ms);
+          return Promise.resolve();
+        },
+      }),
+    ).rejects.toMatchObject({ statusCode: 429 });
+    expect(delays).toEqual([500, 2000]);
   });
 });

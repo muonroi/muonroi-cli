@@ -34,7 +34,14 @@ import { wrapLanguageModel } from "ai";
 import { logInteraction } from "../storage/interaction-log.js";
 import type { ModelInfo, ModelRateLimits } from "../types/index.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
-import { acquireLedgerSlot, TPM_ESTIMATE_CALIBRATION, usageTotalTokens } from "./rate-ledger.js";
+import { reportRetryNotice } from "../utils/visible-retry.js";
+import {
+  acquireLedgerSlot,
+  noteProviderRateLimited,
+  TPM_ESTIMATE_CALIBRATION,
+  usageTotalTokens,
+} from "./rate-ledger.js";
+import { type RateLimitRetryInfo, withProviderRateLimitRetry } from "./rate-limit-backoff.js";
 import { acquireRateLimitSlot, type RateLimitLease, type RateLimitWait } from "./rate-limiter.js";
 
 /**
@@ -73,6 +80,17 @@ export interface GateContext {
    * `ModelInfo.rateLimits`. Enforced — unlike `ceiling`, which is recorded only.
    */
   rateLimits?: ModelRateLimits;
+  /**
+   * Arm the REACTIVE half of rate limiting for this model: when the provider
+   * answers 429, wait it out (Retry-After honoured, else backoff up to a time
+   * budget — see rate-limit-backoff.ts) and share the pushback with every other
+   * muonroi process as a ledger cooldown. Independent of `rateLimits`: a model
+   * whose catalog declares no limits can still be refused, and still needs both.
+   * Needs `providerId` (the cooldown is per account). `resolveModelRuntime` sets
+   * it for every real model and leaves it off for the mock model, which has no
+   * account to protect and must not make tests sleep on the real clock.
+   */
+  providerBackpressure?: boolean;
 }
 
 export interface CallComposition {
@@ -377,7 +395,7 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
   // meter; it must not silently also turn off rate limiting, or a user disabling
   // cost telemetry would quietly re-arm the 429 that killed a run.
   const paces = pacingApplies(ctx);
-  if (!model || (gateDisabled() && !paces)) return model;
+  if (!model || (gateDisabled() && !paces && !backpressureApplies(ctx))) return model;
   return wrapLanguageModel({
     model,
     middleware: {
@@ -385,35 +403,116 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
       wrapStream: async ({ doStream, params }) => {
         const prompt = (params as { prompt?: unknown }).prompt;
         const comp = gateDisabled() ? undefined : gateCall(prompt, ctx, "stream");
-        const lease = await paceCall(ctx, estimateCallTokens(prompt, comp, ctx));
-        let result: Awaited<ReturnType<typeof doStream>>;
-        try {
-          result = await doStream();
-        } catch (err) {
-          lease.release();
-          throw err;
-        }
-        // A stream is in flight until it ENDS, not until its promise resolves —
-        // so a held concurrency slot spans the whole stream. When no slot is held
-        // there is nothing to release, and the stream is returned untouched: a
-        // model that declares no `concurrency` must not pay a pipeThrough.
-        if (!lease.holdsSlot) return result;
-        return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx) };
+        const estTokens = estimateCallTokens(prompt, comp, ctx);
+        // Each attempt re-paces: a retry after a 429 waits behind the shared
+        // cooldown and the declared budget exactly like a first call does.
+        return retryOnRateLimit(ctx, params.abortSignal, async () => {
+          const lease = await paceCall(ctx, estTokens);
+          let result: Awaited<ReturnType<typeof doStream>>;
+          try {
+            result = await doStream();
+          } catch (err) {
+            lease.release();
+            throw err;
+          }
+          // A stream is in flight until it ENDS, not until its promise resolves —
+          // so a held concurrency slot spans the whole stream. When no slot is held
+          // there is nothing to release, and the stream is returned untouched: a
+          // model that declares no `concurrency` must not pay a pipeThrough.
+          if (!lease.holdsSlot) return result;
+          return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx) };
+        });
       },
       wrapGenerate: async ({ doGenerate, params }) => {
         const prompt = (params as { prompt?: unknown }).prompt;
         const comp = gateDisabled() ? undefined : gateCall(prompt, ctx, "generate");
-        const lease = await paceCall(ctx, estimateCallTokens(prompt, comp, ctx));
-        try {
-          const result = await doGenerate();
-          lease.settle((result as { usage?: unknown }).usage);
-          return result;
-        } finally {
-          lease.release();
-        }
+        const estTokens = estimateCallTokens(prompt, comp, ctx);
+        return retryOnRateLimit(ctx, params.abortSignal, async () => {
+          const lease = await paceCall(ctx, estTokens);
+          try {
+            const result = await doGenerate();
+            lease.settle((result as { usage?: unknown }).usage);
+            return result;
+          } finally {
+            lease.release();
+          }
+        });
       },
     },
   });
+}
+
+/** Whether the provider-429 backstop (retry + shared cooldown) is armed for this context. */
+function backpressureApplies(ctx: GateContext): boolean {
+  return ctx.providerBackpressure === true && Boolean(ctx.providerId);
+}
+
+/**
+ * Wait out a provider rate limit around ONE request initiation.
+ *
+ * This is the one point every real model call passes through, which is why the
+ * reactive retry lives here rather than in each caller: `streamText` runs with
+ * `maxRetries: 0` everywhere, and the callers' own retry layers can only re-run
+ * a WHOLE turn — which they refuse to do once a sub-agent has made a tool call
+ * (re-running would replay tools), so a 429 on step 3 of an explore agent was
+ * terminal ("Task failed: HTTP 429"), and the background child had no retry
+ * layer at all. Here the unit retried is a single `doStream`/`doGenerate`
+ * whose promise REJECTED: the provider refused before sending a byte, so a
+ * retry cannot duplicate output, on any step.
+ *
+ * When the budget runs out the error is a `ProviderRateLimitError`, which every
+ * outer retry layer classifies non-transient — one budget per call, not one per
+ * layer.
+ */
+function retryOnRateLimit<T>(ctx: GateContext, signal: AbortSignal | undefined, attempt: () => Promise<T>): Promise<T> {
+  if (!backpressureApplies(ctx)) return attempt();
+  const provider = ctx.providerId!;
+  return withProviderRateLimitRetry(attempt, {
+    provider,
+    signal,
+    // Publish the pushback machine-wide and wait for the SHARED deadline, which
+    // another process may already have pushed further out.
+    coordinate: ({ proposedMs, hintMs }) => noteProviderRateLimited(provider, { proposedMs, hintMs }),
+    onRetry: (info) => announceRateLimitRetry(info, ctx),
+  });
+}
+
+/**
+ * Announce a provider rate-limit wait BEFORE it starts, on both channels a
+ * watcher has: the harness `stream-retry` event (an error happened and the same
+ * call is being re-attempted — exactly that kind's meaning) and the `[retry] …`
+ * notice (TUI toast, a background delegation's job record, or stderr). A 60 s
+ * backoff that announced nothing would be indistinguishable from a hang.
+ */
+function announceRateLimitRetry(info: RateLimitRetryInfo, ctx: GateContext): void {
+  const err = info.error;
+  const errorName = err instanceof Error ? err.name : "Error";
+  const errorMessage = err instanceof Error ? err.message : String(err);
+  try {
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent: (e: unknown) => void }
+      | undefined;
+    runtime?.emitEvent({
+      t: "event",
+      kind: "stream-retry",
+      attempt: info.attempt,
+      maxAttempts: info.maxAttempts,
+      errorName,
+      errorMessage,
+      nextDelayMs: info.waitMs,
+    });
+  } catch (emitErr) {
+    console.error(`[model-gate] stream-retry emit failed: ${(emitErr as Error)?.message}`, {
+      provider: ctx.providerId,
+      model: ctx.modelId,
+    });
+  }
+  const source = info.hinted ? "provider Retry-After" : "backoff";
+  reportRetryNotice(
+    `[retry] rate-limited by ${ctx.providerId ?? "provider"} (429) on ${ctx.stage} call — waiting ` +
+      `${Math.ceil(info.waitMs / 1000)}s (${source}) before attempt ${info.attempt + 1}/${info.maxAttempts}`,
+    "warn",
+  );
 }
 
 /** Whether this context declares anything the pacer would act on. */
@@ -430,7 +529,22 @@ function pacingApplies(ctx: GateContext): boolean {
  * not.
  */
 async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease> {
-  if (!pacingApplies(ctx)) return UNPACED;
+  if (!pacingApplies(ctx)) {
+    // Nothing declared to pace against — but the provider may have pushed back
+    // recently (a 429 another process recorded). Honour that cooldown; it is a
+    // single lock-free read when there is none.
+    if (backpressureApplies(ctx)) {
+      try {
+        await acquireLedgerSlot(ctx.providerId!, undefined, 0, (wait) => emitRateLimitWait(wait, ctx));
+      } catch (err) {
+        console.error(`[model-gate] provider cooldown check failed (proceeding): ${(err as Error)?.message}`, {
+          provider: ctx.providerId,
+          model: ctx.modelId,
+        });
+      }
+    }
+    return UNPACED;
+  }
   let local: RateLimitLease;
   try {
     // Emit through the callback, NOT by walking `lease.waits` afterwards: the

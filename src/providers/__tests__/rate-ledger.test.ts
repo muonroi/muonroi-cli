@@ -7,7 +7,13 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { acquireLedgerSlot, evaluateBudget, type LedgerDeps, usageTotalTokens } from "../rate-ledger.js";
+import {
+  acquireLedgerSlot,
+  evaluateBudget,
+  type LedgerDeps,
+  noteProviderRateLimited,
+  usageTotalTokens,
+} from "../rate-ledger.js";
 
 let dir: string;
 let clock: number;
@@ -124,6 +130,79 @@ describe("acquireLedgerSlot across processes", () => {
     process.env.MUONROI_RATE_LEDGER = "1";
     await acquireLedgerSlot("other", {}, 0, undefined, deps(1));
     expect(fs.readdirSync(dir)).toEqual([]);
+  });
+});
+
+describe("provider cooldown (a 429 anywhere holds every process)", () => {
+  it("holds another process's next call until the cooldown lifts — declared limits", async () => {
+    const wait = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(1));
+    expect(wait).toBeGreaterThanOrEqual(4_000);
+    const sleeps: number[] = [];
+    const waits: Array<{ kind: string; limit: number }> = [];
+    const lease = await acquireLedgerSlot(
+      "acme",
+      { concurrency: 5 },
+      0,
+      (w) => waits.push({ kind: w.kind, limit: w.limit }),
+      deps(2, sleeps),
+    );
+    lease.release();
+    expect(waits).toEqual([{ kind: "provider-cooldown", limit: 0 }]);
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(wait);
+  });
+
+  it("also holds a provider whose catalog declares NO limits", async () => {
+    await noteProviderRateLimited("undeclared", { proposedMs: 5_000, hintMs: 30_000 }, deps(1));
+    const sleeps: number[] = [];
+    const waits: string[] = [];
+    await acquireLedgerSlot("undeclared", undefined, 0, (w) => waits.push(w.kind), deps(2, sleeps));
+    expect(waits).toEqual(["provider-cooldown"]);
+    // The provider's Retry-After (30s) set the shared deadline.
+    expect(sleeps.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(30_000);
+    // Once lifted, the next call goes straight through.
+    const after: number[] = [];
+    await acquireLedgerSlot("undeclared", {}, 0, undefined, deps(3, after));
+    expect(after).toEqual([]);
+  });
+
+  it("escalates when a refusal follows a lifted cooldown, not while one is active", async () => {
+    const first = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(1));
+    // A concurrent in-flight request refused DURING the cooldown: no escalation,
+    // and the deadline is shared (this caller waits for the same instant).
+    clock += 1_000;
+    const concurrent = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(2));
+    expect(concurrent).toBe(first - 1_000);
+    // After it lifted, refused again: the pause was too short → longer one.
+    clock += first;
+    const second = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(1));
+    expect(second).toBeGreaterThanOrEqual(6_400); // strike 2 → 8s ± 20%
+    const ledger = JSON.parse(fs.readFileSync(path.join(dir, "acme.json"), "utf8"));
+    expect(ledger.cooldown.strikes).toBe(2);
+  });
+
+  it("only extends, never shortens, the shared deadline", async () => {
+    const long = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: 50_000 }, deps(1));
+    const short = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: 1_000 }, deps(2));
+    expect(long).toBe(50_000);
+    expect(short).toBe(50_000);
+  });
+
+  it("disabled ledger: the caller waits on its own proposal and nothing is written", async () => {
+    process.env.MUONROI_RATE_LEDGER = "0";
+    expect(await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(1))).toBe(4_000);
+    expect(await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: 9_000 }, deps(1))).toBe(9_000);
+    expect(fs.readdirSync(dir)).toEqual([]);
+  });
+
+  it("keeps the cooldown when the declared-limit path rewrites the file", async () => {
+    await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: 20_000 }, deps(1));
+    // A dispatch record written by the slot path must not drop the cooldown.
+    clock += 21_000;
+    (await acquireLedgerSlot("acme", { requestsPerMinute: 100 }, 0, undefined, deps(2))).release();
+    await flush();
+    const ledger = JSON.parse(fs.readFileSync(path.join(dir, "acme.json"), "utf8"));
+    expect(ledger.cooldown).toMatchObject({ strikes: 1 });
+    expect(ledger.entries).toHaveLength(1);
   });
 });
 

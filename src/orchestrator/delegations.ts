@@ -3,7 +3,12 @@ import { createHash, randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
-import type { DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
+import {
+  isRateLimitError,
+  isRateLimitFailureText,
+  isRateLimitRetryExhausted,
+} from "../providers/rate-limit-backoff.js";
+import type { DelegationFailureKind, DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
 import { BACKGROUND_WAIT_GUIDANCE, formatDelegationStarted } from "../utils/background-jobs.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -37,6 +42,12 @@ export interface StoredDelegation {
   outputPath: string;
   notifiedAt?: string;
   parentSessionId?: string;
+  /**
+   * Why a failed delegation failed, when that is known and actionable.
+   * `rate-limited`: the provider account refused it (HTTP 429) even after the
+   * retry budget — see {@link delegationFailureKind}.
+   */
+  failureKind?: DelegationFailureKind;
 }
 
 export interface DelegationNotification {
@@ -326,10 +337,76 @@ export async function completeDelegation(jobPath: string, output: string, fallba
   });
 }
 
-export async function failDelegation(jobPath: string, error: string, output = ""): Promise<void> {
+/**
+ * Classify a background delegation's failure — a thrown error, or the failure
+ * text a `ToolResult` carried back (the sub-agent runner flattens provider
+ * errors to "Task failed: HTTP 429: …" text, so text must be judged too).
+ * Generic across providers: reads only the error's shape/phrasing.
+ */
+export function delegationFailureKind(failure: unknown): DelegationFailureKind | undefined {
+  if (typeof failure === "string") return isRateLimitFailureText(failureTail(failure)) ? "rate-limited" : undefined;
+  if (isRateLimitRetryExhausted(failure) || isRateLimitError(failure)) return "rate-limited";
+  return undefined;
+}
+
+/**
+ * The failure itself, without any partial answer in front of it. A sub-agent
+ * that failed after producing text returns `<partial output>\n\nTask failed: …`;
+ * judging the whole string would call an explore agent that merely RESEARCHED
+ * rate limits "rate-limited", and quoting it would bury the provider's words.
+ */
+function failureTail(text: string): string {
+  const idx = text.lastIndexOf("Task failed:");
+  return idx >= 0 ? text.slice(idx) : text;
+}
+
+/**
+ * Make a rate-limited delegation's error actionable for the MAIN agent, which
+ * reads it verbatim. The bare provider text ("Rate limit reached, please try
+ * again later.") invites an immediate re-launch — the one response that makes
+ * it worse, because the main agent and every background delegation draw on the
+ * same account budget. The gate's own exhausted error already says this; only
+ * text that does not is wrapped.
+ */
+export function rateLimitedDelegationError(error: string): string {
+  if (/shared by every muonroi agent/i.test(error)) return failureTail(error);
+  return (
+    "Rate-limited by the provider account (HTTP 429) — this background agent could not get a request through. " +
+    "The limit is the account's budget, shared by the main agent and every background delegation. Do not " +
+    "re-launch it immediately: wait for running agents to finish, retry later, or launch fewer agents in " +
+    `parallel. Provider said: ${failureTail(error)}`
+  );
+}
+
+/**
+ * Record a live progress line on a RUNNING delegation (e.g. "[retry] rate-limited
+ * … waiting 16s"), so `delegation_list` / `/jobs` show a backing-off worker as
+ * backing off instead of an opaque "Running in the background." — the child is
+ * detached with no stdio, so its job record is the only surface it has. The
+ * final summary replaces it on completion/failure. Best effort.
+ */
+export async function noteDelegationProgress(jobPath: string, text: string): Promise<void> {
+  await withFileLock(jobPath, async () => {
+    const record = await readRecord(jobPath);
+    if (!record || record.status !== "running") return;
+    record.summary = createSummary(text);
+    await writeRecord(jobPath, record);
+  });
+}
+
+export async function failDelegation(
+  jobPath: string,
+  error: string,
+  output = "",
+  opts: { failureKind?: DelegationFailureKind } = {},
+): Promise<void> {
   await withFileLock(jobPath, async () => {
     const record = await loadDelegation(jobPath);
     if (record.status !== "running") return;
+    if (opts.failureKind === "rate-limited") {
+      error = rateLimitedDelegationError(error);
+      record.failureKind = "rate-limited";
+    }
     // `error` is a caught failure's text from the delegated run. It reaches TWO
     // durable artifacts — the job JSON (`record.error`, via writeRecord) and the
     // rendered `.md` (`renderOutput`'s `**Error:**` line + the body fallback) —
@@ -503,5 +580,6 @@ function toDelegationRun(record: StoredDelegation): DelegationRun {
     description: record.description,
     summary: record.summary || (record.status === "running" ? "Running in the background." : "No summary available."),
     status: record.status,
+    ...(record.failureKind ? { failureKind: record.failureKind } : {}),
   };
 }

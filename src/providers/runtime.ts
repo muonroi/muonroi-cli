@@ -306,6 +306,10 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
     // never drains). Metering still runs on the mock path — only enforcement of
     // someone else's rate limit is skipped, because that limit cannot be reached.
     rateLimits: mockModel ? undefined : effectiveRateLimits(resolved.modelInfo),
+    // The 429 backstop (wait-out + machine-wide cooldown) applies to EVERY real
+    // provider, declared limits or not — the provider is the judge of its own
+    // budget. Off for the mock for the same reason as `rateLimits` above.
+    providerBackpressure: !mockModel,
   });
 
   // P0-5b — provider-boundary output guard. StepFun emits its native

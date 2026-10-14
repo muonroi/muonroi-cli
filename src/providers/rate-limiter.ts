@@ -98,8 +98,11 @@ export const UNDECLARED_RATE_LIMITS: ModelRateLimits = Object.freeze({
 });
 
 /** Why a call was made to wait. Distinguishes the two independent budgets. */
-/** `tokens-per-minute` waits come from the machine-wide ledger (rate-ledger.ts). */
-export type RateLimitKind = "requests-per-minute" | "concurrency" | "tokens-per-minute";
+/**
+ * `tokens-per-minute` and `provider-cooldown` waits come from the machine-wide
+ * ledger (rate-ledger.ts); a cooldown is the provider itself having answered 429.
+ */
+export type RateLimitKind = "requests-per-minute" | "concurrency" | "tokens-per-minute" | "provider-cooldown";
 
 /** Reported to the caller so a wait can be surfaced to a driving agent. */
 export interface RateLimitWait {
