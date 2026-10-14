@@ -3,8 +3,10 @@ import { getModelInfo } from "../models/registry";
 import { buildContractSection } from "../pil/agent-operating-contract.js";
 import { buildNativeCapabilitiesSection } from "../pil/native-capabilities-workbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
+import { effectiveRateLimits } from "../providers/runtime.js";
 import type { ProviderId } from "../providers/types.js";
 import type { AgentMode, TaskRequest } from "../types/index";
+import { buildRateLimitRule, maxParallelBackgroundAgents } from "../utils/background-jobs.js";
 import { loadCustomInstructions } from "../utils/instructions";
 import { logger } from "../utils/logger.js";
 import {
@@ -831,6 +833,23 @@ export function buildSubagentPrompt(
 
 export function formatSandboxPromptSection(sandboxMode: SandboxMode, settings?: SandboxSettings): string {
   return "";
+}
+
+/**
+ * Append the provider rate-limit rule for the main agent's model. Applies to
+ * every provider; numbers come from the catalog + account overrides. Appended
+ * at the END so the cached static prefix is untouched, and stable per model so
+ * it does not churn the prompt cache turn to turn.
+ */
+export function applyRateLimitRule(system: string, modelId: string): string {
+  const info = getModelInfo(modelId);
+  if (!info?.provider) return system;
+  const limits = effectiveRateLimits(info);
+  return `${system}\n${buildRateLimitRule({
+    provider: info.provider,
+    ...limits,
+    maxParallelAgents: maxParallelBackgroundAgents(limits?.concurrency),
+  })}`;
 }
 
 export function applyModelConstraints(system: string, modelId: string): string {

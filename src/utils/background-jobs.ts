@@ -175,3 +175,69 @@ export function providerCapacityNote(c: ProviderCapacity): string | null {
     "Do not launch more until some finish; prefer fewer, broader delegations."
   );
 }
+
+/**
+ * Parallel background agents allowed for a provider whose catalog/account
+ * declares no concurrency. A policy number, not a claim about any provider:
+ * every provider rate-limits, and an undeclared limit is not an absent one.
+ */
+export const UNDECLARED_MAX_PARALLEL_AGENTS = 3;
+
+/**
+ * How many background agents may run at once against one provider account.
+ * One concurrency slot is left for the main agent itself. Override with
+ * `MUONROI_MAX_PARALLEL_DELEGATIONS` (a positive integer).
+ *
+ * The SAME number is told to the agent (system-prompt rule) and enforced by the
+ * CLI (delegation start refuses past it), so the rule and the guard never
+ * disagree.
+ */
+export function maxParallelBackgroundAgents(
+  concurrency: number | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const override = Number(env.MUONROI_MAX_PARALLEL_DELEGATIONS);
+  if (Number.isInteger(override) && override > 0) return override;
+  if (concurrency && concurrency > 0) return Math.max(1, concurrency - 1);
+  return UNDECLARED_MAX_PARALLEL_AGENTS;
+}
+
+/** Refusal for a delegation launched past {@link maxParallelBackgroundAgents}. */
+export function parallelLimitRefusal(provider: string, running: number, max: number): string {
+  return (
+    `Refused: ${running} background agents are already running on the ${provider} account and the limit is ${max} ` +
+    "at once (they share one rate-limit budget with you; more in parallel only produces 429 rate-limit errors). " +
+    "End your turn or do other work — you will be woken as each finishes — then launch the next one."
+  );
+}
+
+export interface RateLimitRuleInput {
+  provider: string;
+  concurrency?: number;
+  requestsPerMinute?: number;
+  tokensPerMinute?: number;
+  maxParallelAgents: number;
+}
+
+/**
+ * The agent-facing half of rate-limit handling, appended to the main agent's
+ * system prompt for EVERY provider (the CLI half is the machine-wide ledger +
+ * retry + the parallel-agent guard). Numbers come from the catalog/account
+ * settings; an undeclared limit is stated as such, never as "unlimited".
+ */
+export function buildRateLimitRule(r: RateLimitRuleInput): string {
+  const limits = [
+    r.concurrency ? `${r.concurrency} concurrent requests` : null,
+    r.requestsPerMinute ? `${r.requestsPerMinute} requests/min` : null,
+    r.tokensPerMinute ? `${r.tokensPerMinute.toLocaleString("en-US")} tokens/min` : null,
+  ].filter(Boolean);
+  const declared = limits.length > 0 ? limits.join(", ") : "not published — treat it as limited";
+  return [
+    "",
+    "PROVIDER RATE LIMITS (one account budget shared by you AND every sub-agent / background agent):",
+    `- ${r.provider} account limit: ${declared}.`,
+    `- Run at most ${r.maxParallelAgents} background agents at once; the CLI refuses more. Launch in batches of at most ${r.maxParallelAgents} and wait for completion notices before the next batch.`,
+    "- Every agent's prompt and context count against tokens/min. Keep delegation prompts focused; a large main context alone can exhaust the budget, so compact before fanning out.",
+    "- The CLI already paces calls and retries rate-limit (429) errors with backoff. If a call or a delegation still fails with a rate-limit error, the budget is exhausted: do NOT respawn at once or launch probe agents to test availability — reduce parallelism, end your turn and retry after the wait.",
+  ].join("\n");
+}

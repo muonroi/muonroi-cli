@@ -91,7 +91,12 @@ import type {
 import { appendCostLog } from "../usage/cost-log.js";
 import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
-import { type BackgroundJobSnapshot, providerCapacityNote } from "../utils/background-jobs.js";
+import {
+  type BackgroundJobSnapshot,
+  maxParallelBackgroundAgents,
+  parallelLimitRefusal,
+  providerCapacityNote,
+} from "../utils/background-jobs.js";
 import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
@@ -1955,6 +1960,12 @@ export class Agent {
         return { success: false, output: "[Cancelled]" };
       }
 
+      // CLI half of the fan-out rule: the system prompt tells the agent the
+      // same limit (applyRateLimitRule), this enforces it. Past it, extra agents
+      // only queue on — or 429 against — the one shared account budget.
+      const refusal = await this.parallelDelegationRefusal();
+      if (refusal) return { success: false, output: refusal };
+
       result = await this.delegations.start(request, {
         model: this.modelId,
         sandboxMode: this.bash.getSandboxMode(),
@@ -1987,6 +1998,23 @@ export class Agent {
     await this.fireHook(taskCompletedInput, abortSignal).catch(() => {});
 
     return result;
+  }
+
+  /** Refusal text when starting one more background agent would exceed the parallel limit. */
+  private async parallelDelegationRefusal(): Promise<string | null> {
+    const info = getModelInfo(this.modelId);
+    if (!info?.provider) return null;
+    const max = maxParallelBackgroundAgents(effectiveRateLimits(info)?.concurrency);
+    let running: number;
+    try {
+      running = (await this.delegations.list()).filter((d) => d.status === "running").length;
+    } catch (err) {
+      // Fail-open: an unreadable delegations dir must not block delegation —
+      // the ledger still paces whatever starts.
+      logger.warn("orchestrator", "parallel delegation check skipped", { error: String(err) });
+      return null;
+    }
+    return running >= max ? parallelLimitRefusal(info.provider, running, max) : null;
   }
 
   /** Capacity warning for the provider this session's agents share, or null below its limit. */

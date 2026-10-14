@@ -178,7 +178,7 @@ import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
 import { prepareTurnContext } from "./preprocessor.js";
-import { applyModelConstraints, buildMcpCapabilityBlock, buildSystemPromptParts } from "./prompts";
+import { applyModelConstraints, applyRateLimitRule, buildMcpCapabilityBlock, buildSystemPromptParts } from "./prompts";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
@@ -1709,22 +1709,29 @@ export class MessageProcessor {
           userMessage,
         );
       const playwrightGuidance = isChitchat || !_browserGuidanceNeeded ? "" : getVisionGuidanceForTextOnly(turnModelId);
-      const system = applyModelConstraints(
-        applyPilSuffix(
-          `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
-          pilCtx,
-          _hasResponseTools,
+      // Rate-limit rule: the agent-facing half of 429 handling (the CLI half is
+      // the ledger, retry and parallel-agent guard). Chitchat spawns nothing.
+      const withRateRule = (s: string) => (isChitchat ? s : applyRateLimitRule(s, turnModelId));
+      const system = withRateRule(
+        applyModelConstraints(
+          applyPilSuffix(
+            `${systemParts.staticPrefix}${playwrightGuidance}${systemParts.dynamicSuffix}`,
+            pilCtx,
+            _hasResponseTools,
+          ),
+          turnModelId,
         ),
-        turnModelId,
       );
       // Tool-turn system: same template as system but with toolTurn-prefix
-      const toolTurnSystem = applyModelConstraints(
-        applyPilSuffix(
-          `${toolTurnParts.staticPrefix}${playwrightGuidance}${toolTurnParts.dynamicSuffix}`,
-          pilCtx,
-          _hasResponseTools,
+      const toolTurnSystem = withRateRule(
+        applyModelConstraints(
+          applyPilSuffix(
+            `${toolTurnParts.staticPrefix}${playwrightGuidance}${toolTurnParts.dynamicSuffix}`,
+            pilCtx,
+            _hasResponseTools,
+          ),
+          turnModelId,
         ),
-        turnModelId,
       );
       const runtime = resolveModelRuntime(turnModelId, { stage: "main", sessionId: deps.session?.id });
       const modelInfo = runtime.modelInfo;

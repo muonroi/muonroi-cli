@@ -1,13 +1,17 @@
 import { describe, expect, it } from "vitest";
 import {
   buildBackgroundWakePrompt,
+  buildRateLimitRule,
   formatBackgroundProcessStarted,
   formatDelegationStarted,
   isBackgroundAutoWakeEnabled,
   longestSleepSeconds,
+  maxParallelBackgroundAgents,
+  parallelLimitRefusal,
   parseBackgroundProcessStarted,
   parseDelegationStartedId,
   providerCapacityNote,
+  UNDECLARED_MAX_PARALLEL_AGENTS,
 } from "../background-jobs.js";
 
 describe("started-line round trip", () => {
@@ -83,5 +87,48 @@ describe("providerCapacityNote", () => {
     expect(note).toContain("7 agents (you + 6 background)");
     expect(note).toContain("5 concurrent requests / 100 requests/min / 500,000 tokens/min");
     expect(note).toMatch(/Do not launch more/);
+  });
+});
+
+// The prompt rule and the CLI guard read the same number, for every provider.
+describe("parallel background-agent limit", () => {
+  it("leaves one concurrency slot for the main agent", () => {
+    expect(maxParallelBackgroundAgents(5, {})).toBe(4);
+    expect(maxParallelBackgroundAgents(1, {})).toBe(1);
+  });
+
+  it("still limits a provider that declares no concurrency", () => {
+    expect(maxParallelBackgroundAgents(undefined, {})).toBe(UNDECLARED_MAX_PARALLEL_AGENTS);
+  });
+
+  it("honours the env override", () => {
+    expect(maxParallelBackgroundAgents(5, { MUONROI_MAX_PARALLEL_DELEGATIONS: "2" })).toBe(2);
+    expect(maxParallelBackgroundAgents(5, { MUONROI_MAX_PARALLEL_DELEGATIONS: "nope" })).toBe(4);
+  });
+
+  it("refuses with the reason and what to do instead", () => {
+    const msg = parallelLimitRefusal("anthropic", 4, 4);
+    expect(msg).toMatch(/^Refused: 4 background agents/);
+    expect(msg).toMatch(/woken/);
+  });
+});
+
+describe("buildRateLimitRule", () => {
+  it("states declared limits and the parallel cap", () => {
+    const rule = buildRateLimitRule({
+      provider: "stepfun",
+      concurrency: 5,
+      requestsPerMinute: 100,
+      tokensPerMinute: 500_000,
+      maxParallelAgents: 4,
+    });
+    expect(rule).toContain("stepfun account limit: 5 concurrent requests, 100 requests/min, 500,000 tokens/min.");
+    expect(rule).toContain("at most 4 background agents at once");
+    expect(rule).toMatch(/do NOT respawn at once or launch probe agents/);
+  });
+
+  it("never calls an undeclared limit unlimited", () => {
+    const rule = buildRateLimitRule({ provider: "deepseek", maxParallelAgents: 3 });
+    expect(rule).toContain("deepseek account limit: not published — treat it as limited.");
   });
 });
