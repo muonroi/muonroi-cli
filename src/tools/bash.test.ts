@@ -237,3 +237,50 @@ describe("BashTool background process state", () => {
     }
   });
 });
+
+// The callback that lets the agent end its turn instead of `sleep`-waiting.
+describe("BashTool background exit notifications", () => {
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const idOf = (output: string | undefined) => Number(/id: (\d+)/.exec(output ?? "")?.[1]);
+
+  it("tells a model starting a job not to wait on it", async () => {
+    const bash = new BashTool(os.tmpdir(), { shellSettings: { kind: "bash" } });
+    try {
+      const started = await bash.startBackground("sleep 0.1");
+      expect(started.output).toContain("Do NOT wait for it with sleep");
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("reports each exit once, with the tail of its output", async () => {
+    const bash = new BashTool(os.tmpdir(), { shellSettings: { kind: "bash" } });
+    try {
+      const id = idOf((await bash.startBackground("echo scan-complete; exit 2")).output);
+      await waitFor(() => bash.getProcessState(id)?.state !== "running");
+      await new Promise((r) => setTimeout(r, 100)); // let the log stream flush
+      const [notice, ...rest] = await bash.consumeExitNotifications();
+      expect(rest).toEqual([]);
+      expect(notice).toContain(`Background process ${id} finished — exited with code 2 (failed)`);
+      expect(notice).toContain("scan-complete");
+      expect(await bash.consumeExitNotifications()).toEqual([]);
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("stays quiet for a running or a deliberately stopped job", async () => {
+    const bash = new BashTool(os.tmpdir(), { shellSettings: { kind: "bash" } });
+    try {
+      const id = idOf((await bash.startBackground("sleep 30")).output);
+      expect(await bash.consumeExitNotifications()).toEqual([]);
+      await bash.stopProcess(id);
+      await waitFor(() => bash.getProcessState(id)?.state !== "running");
+      expect(await bash.consumeExitNotifications()).toEqual([]);
+    } finally {
+      await bash.cleanup();
+    }
+  });
+});

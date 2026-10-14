@@ -1496,7 +1496,12 @@ export class Agent {
     // a child. Leave notifications unclaimed until main's context is restored.
     if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
     try {
-      const notifications = await this.delegations.consumeNotifications();
+      const notifications = [
+        ...(await this.delegations.consumeNotifications()),
+        // Background shells report their exit the same way, so a job started
+        // with bash background:true can call the agent back too.
+        ...(await this.bash.consumeExitNotifications()).map((message) => ({ id: "", message })),
+      ];
       for (const notification of notifications) {
         this.messages.push({ role: "system", content: notification.message });
         let seq: number | null = null;

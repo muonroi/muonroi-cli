@@ -81,6 +81,14 @@ function killProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
   }
 }
 
+/**
+ * Appended to every background start result. Models otherwise hold their turn
+ * open with `sleep N; cat result` to wait for the job, which keeps the CLI busy
+ * and the user locked out — the opposite of running it in the background.
+ */
+export const BACKGROUND_WAIT_HINT =
+  "Do NOT wait for it with sleep or by polling. Continue other work, or end your turn if there is nothing else to do — you will be notified with its result when it finishes.";
+
 export interface BackgroundProcess {
   id: number;
   command: string;
@@ -95,6 +103,8 @@ export interface BackgroundProcess {
   errored?: boolean;
   /** Stopped on request (process_stop) — a deliberate end, not a failure. */
   stopped?: boolean;
+  /** Its exit has been reported to the agent (consumeExitNotifications). */
+  notified?: boolean;
 }
 
 /** Outcome of a background process, as far as this process can tell. */
@@ -520,6 +530,7 @@ export class BashTool {
           `Background process started (id: ${id}, pid: ${entry.pid})`,
           `Command: ${truncCmd(command, 80)}`,
           `Use process_logs(${id}) to view output, process_stop(${id}) to terminate.`,
+          BACKGROUND_WAIT_HINT,
         ].join("\n"),
         backgroundProcess: { id, pid: entry.pid, command },
       };
@@ -604,6 +615,37 @@ export class BashTool {
     if (entry.alive) return { command: entry.command, state: "running" };
     const failed = entry.errored || (!entry.stopped && entry.exitCode !== null && entry.exitCode !== 0);
     return { command: entry.command, state: failed ? "failed" : "exited" };
+  }
+
+  /**
+   * One message per background process that ended on its own since the last
+   * call, each reported once. This is the callback that lets the agent start a
+   * job, end its turn, and pick the result up when the job finishes — instead
+   * of holding the turn open with `sleep` to wait for it. A process stopped on
+   * request is not reported: whoever stopped it already knows.
+   */
+  async consumeExitNotifications(): Promise<string[]> {
+    const messages: string[] = [];
+    for (const entry of this.bgProcesses.values()) {
+      if (entry.alive || entry.notified || entry.stopped) continue;
+      entry.notified = true;
+      const state = this.getProcessState(entry.id)?.state;
+      const outcome = entry.errored
+        ? "failed to run"
+        : `exited with code ${entry.exitCode ?? "unknown"}${state === "failed" ? " (failed)" : ""}`;
+      const logs = await this.getProcessLogs(entry.id, 20);
+      messages.push(
+        [
+          `[Background process ${entry.id} finished — ${outcome}]`,
+          `Command: ${truncCmd(entry.command, 120)}`,
+          logs.success ? `Last output:\n${(logs.output ?? "").split("\n").slice(3).join("\n") || "(none)"}` : "",
+          `Use process_logs(${entry.id}) for more output.`,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+    }
+    return messages;
   }
 
   /** getProcessState for every background process this tool started. */

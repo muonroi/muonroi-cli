@@ -311,6 +311,7 @@ import { sanitizeContent } from "./utils/text.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 import { buildAskcardAnswerEntry } from "./askcard-transcript.js";
 import { buildSprintFailedHaltData } from "./sprint-failed-halt.js";
+import { BACKGROUND_WAKE_DISPLAY, BACKGROUND_WAKE_PROMPT, isBackgroundWakeEnabled } from "./utils/background-wake.js";
 
 /**
  * A — recovery options shown when an /ideal run breaks mid-sprint. Resume /
@@ -4793,6 +4794,16 @@ export function useAppLogic(props: AppLogicProps) {
             })),
           ]);
           setTimeout(scrollToBottom, 10);
+          // The callback half of "run it in the background": the agent ended
+          // its turn instead of sleeping on the job, so resume it now that the
+          // job is done. Busy → queue one resume behind the turn in flight.
+          if (!isBackgroundWakeEnabled()) return;
+          if (!isProcessingRef.current) {
+            void processMessageRef.current(BACKGROUND_WAKE_PROMPT, BACKGROUND_WAKE_DISPLAY);
+          } else if (!queuedMessagesRef.current.some((m) => m.text === BACKGROUND_WAKE_PROMPT)) {
+            queuedMessagesRef.current.push({ text: BACKGROUND_WAKE_PROMPT, displayText: BACKGROUND_WAKE_DISPLAY });
+            setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+          }
         })
         .catch(() => {});
     }, 2000);

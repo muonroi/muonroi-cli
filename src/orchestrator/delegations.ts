@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "crypto";
 import { promises as fs } from "fs";
 import os from "os";
 import path from "path";
+import { BACKGROUND_WAIT_HINT } from "../tools/bash";
 import type { DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -137,6 +138,7 @@ export class DelegationManager {
       "Agent: explore",
       "You will be notified when it completes.",
       `Use \`delegation_read("${id}")\` to retrieve the full result later.`,
+      BACKGROUND_WAIT_HINT,
     ].join("\n");
 
     return {
@@ -171,7 +173,7 @@ export class DelegationManager {
     }
 
     if (record.status === "running") {
-      return `Delegation "${id}" is still running. Continue working and wait for the completion notice.`;
+      return `Delegation "${id}" is still running. ${BACKGROUND_WAIT_HINT}`;
     }
 
     try {

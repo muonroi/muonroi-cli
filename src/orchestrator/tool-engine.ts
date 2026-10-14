@@ -2605,10 +2605,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             stepNumber = Math.max(stepNumber, currentStep);
             const stepUsage = getUsage(event);
 
-            // Pull any completed background delegations so their results can be
-            // injected (as system messages) for the *next* LLM step in this same turn.
-            // This improves "self wake" for background jobs without waiting for a new user turn.
-            void deps.consumeBackgroundNotifications?.().catch(() => {});
+            // Background-job notifications are NOT consumed here. This step's
+            // streamText never reads deps.messages again, so a notice claimed
+            // mid-turn reached no model call — and, being claimed, it could no
+            // longer wake the agent once the turn ended. The UI poll consumes
+            // them and resumes the agent (use-app-logic.tsx); the next turn's
+            // pre-stream phase picks up anything left.
             // Realtime status bar update per step
             if (stepUsage.inputTokens || stepUsage.outputTokens) {
               // O1 — thread THIS turn's providerOptions shape per step so every
