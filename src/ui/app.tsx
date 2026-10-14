@@ -248,7 +248,7 @@ import {
 } from "./utils/format.js";
 import { isEscapeKey } from "./utils/modal.js";
 import { sanitizeContent } from "./utils/text.js";
-import { collectAgentActivities } from "./utils/agent-activities.js";
+import { collectAgentActivities, createJobStatusLookup } from "./utils/agent-activities.js";
 import { dominantVerb, toolArgs, toolLabel, tryParseArg } from "./utils/tools.js";
 
 /**
@@ -605,6 +605,8 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     activeSubagent,
     activeToast,
     activeToolCalls,
+    backgroundJobsKey,
+    delegationStatuses,
     agentRows,
     agentRuntime,
     agentsEditorDraft,
@@ -796,7 +798,20 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // Roster of every sub-agent / background job spawned this session, for the
   // rail. Derived from the transcript + in-flight calls, so it cannot drift from
   // what actually ran.
-  const agentActivities = useMemo(() => collectAgentActivities(messages, activeToolCalls), [messages, activeToolCalls]);
+  // Background jobs (delegate, `task` with explore, bash background) report
+  // "started" as their tool result, so their real state comes from the live
+  // registries: delegation records polled by useAppLogic, shells read straight
+  // from the agent (in-memory, so a just-started shell is never missed).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: backgroundJobsKey is the re-derive trigger for the live shell states read inside
+  const agentActivities = useMemo(
+    () =>
+      collectAgentActivities(
+        messages,
+        activeToolCalls,
+        createJobStatusLookup(delegationStatuses, agent.getBackgroundProcessStates()),
+      ),
+    [messages, activeToolCalls, delegationStatuses, agent, backgroundJobsKey],
+  );
   const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into

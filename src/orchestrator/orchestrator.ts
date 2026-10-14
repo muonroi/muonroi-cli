@@ -75,6 +75,7 @@ import { snapshotFromTodoWriteArgs } from "../tools/todo-write-snapshot.js";
 import type {
   AgentMode,
   ChatEntry,
+  DelegationStatus,
   SessionInfo,
   SessionSnapshot,
   StreamChunk,
@@ -1468,6 +1469,26 @@ export class Agent {
     // Don't clear breakdown — onStepFinish fires recordUsage per step within
     // the same streamText call, and they all share the same prompt structure.
     // It is overwritten on the next streamText setup, which is the right scope.
+  }
+
+  /**
+   * Live state of this session's background delegations, keyed by id — what
+   * the Agents rail reads so a launched agent shows as running until it really
+   * finishes, not as done the moment `delegate` returned.
+   */
+  async getDelegationStatuses(): Promise<Record<string, DelegationStatus>> {
+    try {
+      const runs = await this.delegations.list();
+      return Object.fromEntries(runs.map((run) => [run.id, run.status]));
+    } catch (err) {
+      logger.warn("orchestrator", "Listing delegation statuses failed", { error: String(err) });
+      return {};
+    }
+  }
+
+  /** State of every background shell this session started (see BashTool.getProcessState). */
+  getBackgroundProcessStates(): ReturnType<BashTool["getProcessStates"]> {
+    return this.bash.getProcessStates();
   }
 
   async consumeBackgroundNotifications(): Promise<string[]> {

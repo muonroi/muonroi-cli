@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ChatEntry, ToolCall, ToolResult } from "../../../types/index";
-import { activityKindFor, collectAgentActivities } from "../agent-activities.js";
+import { activityKindFor, collectAgentActivities, createJobStatusLookup, startedJob } from "../agent-activities.js";
 
 const call = (id: string, name: string, args: unknown): ToolCall => ({
   id,
@@ -100,6 +100,68 @@ describe("collectAgentActivities", () => {
       resultEntry(DELEGATE, ok("3")),
     ]);
     expect(list.map((a) => a.kind)).toEqual(["subagent", "background", "delegate"]);
+  });
+});
+
+// `delegate`, `task` with the explore agent, and `bash background:true` return
+// as soon as the job STARTS. Their tool result is not the job's outcome, so the
+// rail must not show a check until the job really finishes.
+describe("background job status", () => {
+  const DELEGATION_STARTED =
+    "Delegation started: calm-teal-otter\nAgent: explore\nYou will be notified when it completes.";
+  const SHELL_STARTED = "Background process started (id: 7, pid: 4242)\nCommand: npm run dev";
+  const EXPLORE_TASK = call("e1", "task", { agent: "explore", description: "Hunt screen", prompt: "Look" });
+
+  it("parses the job a start result names", () => {
+    expect(startedJob(DELEGATION_STARTED)).toEqual({ type: "delegation", id: "calm-teal-otter" });
+    expect(startedJob(SHELL_STARTED)).toEqual({ type: "process", id: 7 });
+    expect(startedJob("all done")).toBeNull();
+  });
+
+  it("keeps a launched delegation running until its record finishes", () => {
+    const entries = [resultEntry(DELEGATE, ok(DELEGATION_STARTED)), resultEntry(EXPLORE_TASK, ok(DELEGATION_STARTED))];
+    const before = collectAgentActivities(entries, [], createJobStatusLookup({}, {}));
+    expect(before.map((a) => a.status)).toEqual(["running", "running"]);
+
+    const running = createJobStatusLookup({ "calm-teal-otter": "running" }, {});
+    expect(collectAgentActivities(entries, [], running)[0].status).toBe("running");
+
+    const done = createJobStatusLookup({ "calm-teal-otter": "complete" }, {});
+    expect(collectAgentActivities(entries, [], done)[0].status).toBe("done");
+
+    const failed = createJobStatusLookup({ "calm-teal-otter": "error" }, {});
+    expect(collectAgentActivities(entries, [], failed)[0].status).toBe("failed");
+  });
+
+  it("follows a background shell through running, exit and failure", () => {
+    const entries = [resultEntry(BG, ok(SHELL_STARTED))];
+    const state = (s: "running" | "exited" | "failed") =>
+      createJobStatusLookup({}, { 7: { command: "npm run dev", state: s } });
+    expect(collectAgentActivities(entries, [], state("running"))[0].status).toBe("running");
+    expect(collectAgentActivities(entries, [], state("exited"))[0].status).toBe("done");
+    expect(collectAgentActivities(entries, [], state("failed"))[0].status).toBe("failed");
+  });
+
+  // Shell ids restart at 1 in every CLI process. A resumed session's old shell
+  // must not borrow the state of a new one that happens to share its id.
+  it("treats an unknown or reused shell id as no longer running", () => {
+    const entries = [resultEntry(BG, ok(SHELL_STARTED))];
+    expect(collectAgentActivities(entries, [], createJobStatusLookup({}, {}))[0].status).toBe("done");
+    const other = createJobStatusLookup({}, { 7: { command: "vite", state: "running" } });
+    expect(collectAgentActivities(entries, [], other)[0].status).toBe("done");
+  });
+
+  it("lists a shell the tool auto-backgrounded without background:true", () => {
+    const vite = call("v1", "bash", { command: "vite" });
+    const lookup = createJobStatusLookup({}, { 7: { command: "vite", state: "running" } });
+    const [a] = collectAgentActivities([resultEntry(vite, ok(SHELL_STARTED))], [], lookup);
+    expect(a.kind).toBe("background");
+    expect(a.status).toBe("running");
+  });
+
+  it("still marks a launch that failed to start as failed", () => {
+    const [a] = collectAgentActivities([resultEntry(DELEGATE, fail("Nested background delegations are disabled."))]);
+    expect(a.status).toBe("failed");
   });
 });
 

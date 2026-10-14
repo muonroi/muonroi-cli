@@ -198,3 +198,42 @@ describe("BashTool timeout must settle and reap the process tree", () => {
     expect(sizeOf()).toBe(settled); // stopped ticking => reaped, not orphaned
   }, 25_000);
 });
+
+// The Agents rail reads this to keep a background shell "running" until it
+// really ends — the start result alone says nothing about the outcome.
+describe("BashTool background process state", () => {
+  const waitFor = async (check: () => boolean) => {
+    for (let i = 0; i < 100 && !check(); i++) await new Promise((r) => setTimeout(r, 50));
+  };
+  const idOf = (output: string | undefined) => Number(/id: (\d+)/.exec(output ?? "")?.[1]);
+
+  it.skipIf(process.platform === "win32")("reports running, then exited or failed by exit code", async () => {
+    const bash = new BashTool(os.tmpdir(), { shellSettings: { kind: "bash" } });
+    try {
+      const ok = idOf((await bash.startBackground("sleep 0.3")).output);
+      const bad = idOf((await bash.startBackground("sleep 0.3; exit 3")).output);
+      expect(bash.getProcessState(ok)).toEqual({ command: "sleep 0.3", state: "running" });
+      await waitFor(
+        () => bash.getProcessState(ok)?.state !== "running" && bash.getProcessState(bad)?.state !== "running",
+      );
+      expect(bash.getProcessState(ok)?.state).toBe("exited");
+      expect(bash.getProcessState(bad)?.state).toBe("failed");
+      expect(Object.keys(bash.getProcessStates()).map(Number).sort()).toEqual([ok, bad].sort());
+      expect(bash.getProcessState(999_999)).toBeUndefined();
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("counts a process stopped on request as ended, not failed", async () => {
+    const bash = new BashTool(os.tmpdir(), { shellSettings: { kind: "bash" } });
+    try {
+      const id = idOf((await bash.startBackground("sleep 30")).output);
+      await bash.stopProcess(id);
+      await waitFor(() => bash.getProcessState(id)?.state !== "running");
+      expect(bash.getProcessState(id)?.state).toBe("exited");
+    } finally {
+      await bash.cleanup();
+    }
+  });
+});

@@ -91,7 +91,14 @@ export interface BackgroundProcess {
   logPath: string;
   alive: boolean;
   exitCode: number | null;
+  /** The child failed to spawn or crashed with a process-level error. */
+  errored?: boolean;
+  /** Stopped on request (process_stop) — a deliberate end, not a failure. */
+  stopped?: boolean;
 }
+
+/** Outcome of a background process, as far as this process can tell. */
+export type BackgroundProcessState = "running" | "exited" | "failed";
 
 interface BashToolOptions {
   /**
@@ -501,6 +508,7 @@ export class BashTool {
 
       child.on("error", () => {
         entry.alive = false;
+        entry.errored = true;
         logStream.end();
       });
 
@@ -575,6 +583,7 @@ export class BashTool {
     try {
       entry.child.kill("SIGTERM");
       entry.alive = false;
+      entry.stopped = true;
       return { success: true, output: `Process ${id} terminated.` };
     } catch (err: unknown) {
       return {
@@ -582,6 +591,29 @@ export class BashTool {
         output: `Failed to stop process ${id}: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
+  }
+
+  /**
+   * State of a background process this tool started, or undefined when the id
+   * is unknown. A non-zero exit is a failure unless the process was stopped on
+   * request (SIGTERM gives a null code, but a shell wrapper may report 143).
+   */
+  getProcessState(id: number): { command: string; state: BackgroundProcessState } | undefined {
+    const entry = this.bgProcesses.get(id);
+    if (!entry) return undefined;
+    if (entry.alive) return { command: entry.command, state: "running" };
+    const failed = entry.errored || (!entry.stopped && entry.exitCode !== null && entry.exitCode !== 0);
+    return { command: entry.command, state: failed ? "failed" : "exited" };
+  }
+
+  /** getProcessState for every background process this tool started. */
+  getProcessStates(): Record<number, { command: string; state: BackgroundProcessState }> {
+    const out: Record<number, { command: string; state: BackgroundProcessState }> = {};
+    for (const id of this.bgProcesses.keys()) {
+      const state = this.getProcessState(id);
+      if (state) out[id] = state;
+    }
+    return out;
   }
 
   listProcesses(): ToolResult {

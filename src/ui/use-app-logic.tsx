@@ -81,6 +81,7 @@ import type {
   CouncilQuestionOption,
   CouncilRoundRecord,
   CouncilStatusData,
+  DelegationStatus,
   Plan,
   PlanQuestion,
   ReasoningEffort,
@@ -4746,6 +4747,36 @@ export function useAppLogic(props: AppLogicProps) {
     },
     [],
   );
+  // Live state of background delegations for the rail's Agents block. The
+  // `delegate` tool returns the moment a job STARTS, so the transcript alone
+  // cannot say whether it is still running. `backgroundJobsKey` changes whenever
+  // any job (delegation or background shell) changes state, so the rail
+  // re-derives its rows; shells are read live from the agent at derive time.
+  const [delegationStatuses, setDelegationStatuses] = useState<Record<string, DelegationStatus>>({});
+  const [backgroundJobsKey, setBackgroundJobsKey] = useState("");
+  const backgroundJobsKeyRef = useRef("");
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      agent
+        .getDelegationStatuses()
+        .then((statuses) => {
+          if (!active) return;
+          const key = JSON.stringify([statuses, agent.getBackgroundProcessStates()]);
+          if (key === backgroundJobsKeyRef.current) return;
+          backgroundJobsKeyRef.current = key;
+          setDelegationStatuses(statuses);
+          setBackgroundJobsKey(key);
+        })
+        .catch(() => {});
+    };
+    refresh();
+    const id = setInterval(refresh, 2000);
+    return () => {
+      active = false;
+      clearInterval(id);
+    };
+  }, [agent]);
   useEffect(() => {
     let active = true;
     const id = setInterval(() => {
