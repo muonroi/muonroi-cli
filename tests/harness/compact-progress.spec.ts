@@ -49,7 +49,14 @@ describe("/compact progress card E2E", () => {
   });
 
   it("shows a live stage + percent while compaction runs, and retires the card when it ends", async () => {
-    ctx.driver.type("/compact keep the greeting");
+    // Press Enter only once the composer holds the whole command and the UI has
+    // settled: typed as a burst, the slash menu can still be filtering when Enter
+    // lands and take the key (CLAUDE.md caveat) — then /compact never runs and
+    // the card never mounts (CI: 20 s wait_for timeout on the first attempt).
+    const command = "/compact keep the greeting";
+    ctx.driver.type(command);
+    await ctx.driver.wait_for({ selector: `id=composer value="${command}"`, timeoutMs: 15_000 });
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 10_000 });
     ctx.driver.press("Enter");
 
     await ctx.driver.wait_for({ selector: "id=compact-progress", timeoutMs: 20_000 });
@@ -67,8 +74,12 @@ describe("/compact progress card E2E", () => {
     expect((card?.name ?? "").trim().length).toBeGreaterThan(0);
 
     // When the run ends the card must disappear rather than linger at its last
-    // percent, and the outcome line takes its place.
-    await ctx.driver.wait_for({ idle: true, timeoutMs: 60_000 });
+    // percent, and the outcome line takes its place. Wait on that outcome line —
+    // the run's real end — not on `idle`: idle only means the UI went quiet for
+    // a moment, and between two slow pipeline stages it fires while the card is
+    // still up (CI: card found at 5% right after idle).
+    await ctx.driver.wait_for({ selector: 'role=listitem name~="assistant:Compaction"', timeoutMs: 60_000 });
+    await ctx.driver.wait_for({ idle: true, timeoutMs: 10_000 });
     expect(ctx.driver.query("id=compact-progress")).toBeNull();
   }, 90_000);
 });
