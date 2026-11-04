@@ -222,7 +222,7 @@ describe("runPipeline()", () => {
     const timingNames = result.metrics?.layerTimings.map((t) => t.name) ?? [];
     expect(timingNames).toContain("layer2-personality");
     expect(timingNames).toContain("layer3-ee-injection");
-    expect(timingNames).toContain("layer4-gsd-structuring");
+    expect(timingNames).toContain("layer4-flow-structuring");
     expect(timingNames).toContain("layer5-context-enrichment");
     expect(timingNames).not.toContain("layer-personality-adaptation");
   });

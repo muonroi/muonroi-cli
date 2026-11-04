@@ -1,0 +1,257 @@
+{
+  "endpoint": "https://api.stepfun.ai/step_plan/v1",
+  "maxConcurrency": 1,
+  "retry": 0,
+  "results": [
+    {
+      "at": "2026-10-15T01:44:42.322Z",
+      "mode": "direct-json",
+      "model": "step-3.5-flash",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": false,
+        "maxTokens": 64,
+        "bytes": 113,
+        "keys": ["model", "messages", "max_tokens", "stream"]
+      },
+      "status": 429,
+      "headersMs": 908,
+      "headers": {
+        "x-trace-id": "96a4fe7cffc7edb970c54626ee96bc67"
+      },
+      "error": "{\"error\":{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}}",
+      "durationMs": 909
+    },
+    {
+      "at": "2026-10-15T01:44:53.246Z",
+      "mode": "direct-json",
+      "model": "step-5-preview",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": false,
+        "maxTokens": 64,
+        "bytes": 113,
+        "keys": ["model", "messages", "max_tokens", "stream"]
+      },
+      "status": 200,
+      "headersMs": 1589,
+      "headers": {
+        "x-trace-id": "283df5ed0ce04a117e8044fdb584350e"
+      },
+      "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 32,
+        "total_tokens": 47,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "durationMs": 1589
+    },
+    {
+      "at": "2026-10-15T01:45:04.836Z",
+      "mode": "direct-stream",
+      "model": "step-3.5-flash",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 152,
+        "keys": ["model", "messages", "max_tokens", "stream", "stream_options"]
+      },
+      "status": 429,
+      "headersMs": 282,
+      "headers": {
+        "x-trace-id": "78f49159761b75ef3ad95a9136afb722"
+      },
+      "error": "{\"error\":{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}}",
+      "durationMs": 282
+    },
+    {
+      "at": "2026-10-15T01:45:15.157Z",
+      "mode": "direct-stream",
+      "model": "step-5-preview",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 152,
+        "keys": ["model", "messages", "max_tokens", "stream", "stream_options"]
+      },
+      "status": 200,
+      "headersMs": 1172,
+      "headers": {
+        "x-trace-id": "6a4a710e7b0578328750dde2e0dc5a94"
+      },
+      "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 4,
+        "total_tokens": 19,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "durationMs": 1315
+    },
+    {
+      "at": "2026-10-15T01:45:26.503Z",
+      "mode": "sdk-stream",
+      "model": "step-3.5-flash",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 112,
+        "keys": ["model", "max_tokens", "messages", "stream"]
+      },
+      "status": 200,
+      "headersMs": 1684,
+      "headers": {
+        "x-trace-id": "ee39c473333c566869d4c3174ddacfe5"
+      },
+      "firstTextMs": 1947,
+      "usage": {
+        "inputTokens": 16,
+        "inputTokenDetails": {
+          "noCacheTokens": 16,
+          "cacheReadTokens": 0
+        },
+        "outputTokens": 38,
+        "outputTokenDetails": {
+          "textTokens": 38,
+          "reasoningTokens": 0
+        },
+        "totalTokens": 54,
+        "raw": {
+          "prompt_tokens": 16,
+          "completion_tokens": 38,
+          "total_tokens": 54,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "reasoningTokens": 0,
+        "cachedInputTokens": 0
+      },
+      "durationMs": 1964
+    },
+    {
+      "at": "2026-10-15T01:45:38.492Z",
+      "mode": "sdk-stream",
+      "model": "step-5-preview",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 112,
+        "keys": ["model", "max_tokens", "messages", "stream"]
+      },
+      "status": 200,
+      "headersMs": 2331,
+      "headers": {
+        "x-trace-id": "8c285b5b34c33a0415e7bcd9ed91cc1b"
+      },
+      "firstTextMs": 2596,
+      "usage": {
+        "inputTokens": 15,
+        "inputTokenDetails": {
+          "noCacheTokens": 15,
+          "cacheReadTokens": 0
+        },
+        "outputTokens": 25,
+        "outputTokenDetails": {
+          "textTokens": 25,
+          "reasoningTokens": 0
+        },
+        "totalTokens": 40,
+        "raw": {
+          "prompt_tokens": 15,
+          "completion_tokens": 25,
+          "total_tokens": 40,
+          "prompt_tokens_details": {
+            "cached_tokens": 0
+          },
+          "completion_tokens_details": {
+            "reasoning_tokens": 0
+          }
+        },
+        "reasoningTokens": 0,
+        "cachedInputTokens": 0
+      },
+      "durationMs": 2610
+    },
+    {
+      "at": "2026-10-15T01:45:51.107Z",
+      "mode": "direct-stream-repeat",
+      "model": "step-3.5-flash",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 152,
+        "keys": ["model", "messages", "max_tokens", "stream", "stream_options"]
+      },
+      "status": 429,
+      "headersMs": 274,
+      "headers": {
+        "x-trace-id": "550215c8a8de6e03ee27e811ae7da781"
+      },
+      "error": "{\"error\":{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}}",
+      "durationMs": 282
+    },
+    {
+      "at": "2026-10-15T01:46:01.415Z",
+      "mode": "direct-stream-repeat",
+      "model": "step-5-preview",
+      "maxOutputTokens": 64,
+      "prompt": "Reply only OK.",
+      "httpAttempts": 1,
+      "request": {
+        "stream": true,
+        "maxTokens": 64,
+        "bytes": 152,
+        "keys": ["model", "messages", "max_tokens", "stream", "stream_options"]
+      },
+      "status": 200,
+      "headersMs": 1515,
+      "headers": {
+        "x-trace-id": "ec54037cccdd80a1c99ebdd89a25b7b5"
+      },
+      "usage": {
+        "prompt_tokens": 15,
+        "completion_tokens": 31,
+        "total_tokens": 46,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "durationMs": 1898
+    }
+  ]
+}

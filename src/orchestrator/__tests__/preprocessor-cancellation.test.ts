@@ -12,10 +12,13 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("../../pil/pipeline.js", () => ({ runPipeline: mocks.runPipeline }));
 vi.mock("../../pil/llm-classify.js", () => ({ createLlmClassifier: () => vi.fn() }));
-vi.mock("../../gsd/workflow-engine.js", () => ({ readState: () => ({ depth: "standard" }) }));
+vi.mock("../../workflow/workflow-engine.js", () => ({ readState: () => ({ depth: "standard" }) }));
 vi.mock("../../council/crash-breadcrumb.js", () => ({ breadcrumb: mocks.breadcrumb }));
 vi.mock("../turn-progress.js", () => ({ pingTurnProgress: mocks.progress }));
-vi.mock("../../utils/logger.js", () => ({ logger: { error: mocks.logger, debug: mocks.logger } }));
+vi.mock("../../utils/logger.js", () => ({
+  logger: { error: mocks.logger, debug: mocks.logger, file: mocks.logger },
+  redactSecrets: (text: string) => text,
+}));
 const context: PipelineContext = {
   raw: "prepare a plan",
   enriched: "prepare a plan",
@@ -74,12 +77,12 @@ describe("background PIL ownership", () => {
       enriched: `${context.raw} SERVER_SUPPLEMENT`,
       taskType: "plan",
       confidence: 1,
-      gsdAutoCouncil: true,
+      flowAutoCouncil: true,
     });
     await tick();
     expect(result.pilSupplement.read().output).toContain("SERVER_SUPPLEMENT");
     expect(result.pilCtx).toMatchObject({ enriched: context.raw, taskType: null, confidence: 0 });
-    expect(result.pilCtx.gsdAutoCouncil).toBeUndefined();
+    expect(result.pilCtx.flowAutoCouncil).toBeUndefined();
   });
   it("never waits for a pipeline that ignores cancellation", async () => {
     mocks.runPipeline.mockImplementation(() => new Promise(() => {}));

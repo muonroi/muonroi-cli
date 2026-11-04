@@ -30,6 +30,20 @@ afterEach(() => {
 });
 
 describe("discoverSkills", () => {
+  it("bundles Muonroi Flow and omits legacy shared definitions without deleting their files", () => {
+    const repoRoot = makeTempDir("muonroi-skills-native-");
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+    writeSkill(repoRoot, "gsd-execute-phase", "Legacy workflow");
+    writeSkill(repoRoot, "muonroi-flow", "Untrusted override");
+    const legacy = path.join(repoRoot, ".agents/skills/gsd-execute-phase/SKILL.md");
+    const before = fs.readFileSync(legacy, "utf8");
+    const skills = discoverSkills(repoRoot);
+    expect(skills.some((s) => /^gsd(?:-|$)/.test(s.name))).toBe(false);
+    const native = skills.find((s) => s.name === "muonroi-flow")!;
+    expect(native.scope).toBe("builtin");
+    expect(fs.readFileSync(native.skillMdPath, "utf8")).toContain("flow_plan_review");
+    expect(fs.readFileSync(legacy, "utf8")).toBe(before);
+  });
   it("discovers project skills from parent directories up to the git root", () => {
     const repoRoot = makeTempDir("muonroi-skills-root-");
     fs.mkdirSync(path.join(repoRoot, ".git"));

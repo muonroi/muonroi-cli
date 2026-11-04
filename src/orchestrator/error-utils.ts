@@ -62,13 +62,14 @@ function routingSuffix(error: unknown, ctx: ApiErrorContext | undefined): string
   if (!ctx?.modelId) return "";
   const message = error instanceof Error ? error.message : String(error);
   let status = getStatusCode(error);
+  if (status === undefined && message.startsWith("Request context overflow:")) return "";
   // Some gateways surface a balance error without a clean statusCode.
   if (status === undefined && /insufficient balance|out of (balance|credit)/i.test(message)) {
     status = 402;
   }
   const rawMsg = (error instanceof Error ? error.message : String(error)).toLowerCase();
   const isConsoleGo = rawMsg.includes("console go") || ctx?.providerId === "opencode-go";
-  const isRateLimitMsg = /rate limit|rate-limited|429|too many requests/i.test(rawMsg);
+  const isRateLimitMsg = /rate limit|rate-limited|\b429\b|too many requests/i.test(rawMsg);
 
   // If we have model context and it's a routing error (by status or by message content)
   if (!ctx?.modelId) return "";

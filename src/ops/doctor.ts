@@ -2,7 +2,7 @@
  * src/ops/doctor.ts
  *
  * Health check runner for muonroi-cli doctor command.
- * Runs 10 named checks and returns pass/warn/fail results.
+ * Runs environment checks plus recorded integration diagnostics.
  *
  * Checks: bun_version, os, key_presence, ollama, dotnet, ee.health, ee.brain,
  *         qdrant, error_rate, council.mcp
@@ -17,6 +17,7 @@ import type { EEHealthResult } from "../ee/health.js";
 import { healthDetailed } from "../ee/health.js";
 import { listStoredProviders } from "../providers/keychain.js";
 import { getDatabase } from "../storage/db.js";
+import { integrationHealth } from "../utils/integration-health.js";
 import { loadMcpServers, loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
@@ -386,6 +387,37 @@ async function checkCouncilMcpNudge(): Promise<CheckResult> {
   }
 }
 
+/** Read-only journal evidence, not another network readiness probe. */
+export function checkRuntimeIntegrations(): CheckResult {
+  const snapshot = integrationHealth(24);
+  const issues = snapshot.checks.filter((check) => check.status !== "ready");
+  if (!snapshot.checks.length)
+    return {
+      name: "integrations.runtime",
+      status: "warn",
+      detail: "No recent integration observations; live readiness not checked.",
+    };
+  if (!issues.length)
+    return {
+      name: "integrations.runtime",
+      status: "pass",
+      detail: `Last recorded checks ready (${snapshot.observations} observations/24h); not a live probe or whole-system certification.`,
+    };
+  const detail = issues
+    .slice(0, 6)
+    .map((check) => {
+      const observed = new Date(check.ts ?? NaN);
+      const at = Number.isFinite(observed.getTime()) ? observed.toISOString() : "unknown";
+      return `${check.component}/${check.check}=${check.status} (${check.failures}/${check.observations}; last ${at}${check.phase ? `; phase ${check.phase}` : ""}${Number.isFinite(check.durationMs) ? `; ${check.durationMs}ms` : ""})`;
+    })
+    .join("; ");
+  return {
+    name: "integrations.runtime",
+    status: "warn",
+    detail: `Recent recorded issues/24h: ${detail}. No live probe. MCP authentication needs sign-in/configuration; optional PIL failures do not block unrelated work.`,
+  };
+}
+
 export async function runDoctor(): Promise<CheckResult[]> {
   return Promise.all([
     checkBunVersion(),
@@ -398,5 +430,6 @@ export async function runDoctor(): Promise<CheckResult[]> {
     checkQdrant(),
     checkRecentErrorRate(),
     checkCouncilMcpNudge(), // NEW — CQ-23
+    checkRuntimeIntegrations(),
   ]);
 }

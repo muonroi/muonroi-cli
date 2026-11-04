@@ -1,5 +1,5 @@
 import os from "node:os";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   __resetCouncilConveneForTests,
   consumeCouncilConvene,
@@ -53,5 +53,32 @@ describe("read_pil_context nonblocking tool", () => {
     });
     const tool = tools.read_pil_context as unknown as { execute: () => Promise<string> };
     expect(await tool.execute()).toContain(state);
+  });
+});
+
+describe("root council background receipts", () => {
+  it("returns a receipt without entering the synchronous restart queue", async () => {
+    const startCouncil = vi.fn(async () => ({ success: true, output: "Started jobId=council-job" }));
+    const tools = createBuiltinTools(new BashTool(os.tmpdir()), "agent", {
+      executionRole: "orchestrator",
+      councilConfigured: true,
+      startCouncil,
+    });
+    const brief = {
+      topic: "Architecture",
+      reason: "Tradeoff",
+      context: "Bounded facts",
+      outputContract: "Advice and limits",
+    };
+    const output = await tools.convene_council!.execute!(brief, { toolCallId: "council-receipt", messages: [] });
+    expect(String(output)).toContain("jobId=council-job");
+    expect(startCouncil).toHaveBeenCalledWith(brief);
+    expect(hasPendingCouncilConvene()).toBe(false);
+  });
+  it("cannot fall back to the blocking council queue for root", () => {
+    expect(
+      createBuiltinTools(new BashTool(os.tmpdir()), "agent", { executionRole: "orchestrator", councilConfigured: true })
+        .convene_council,
+    ).toBeUndefined();
   });
 });

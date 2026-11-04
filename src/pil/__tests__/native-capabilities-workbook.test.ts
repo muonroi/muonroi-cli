@@ -11,6 +11,15 @@ describe("buildNativeCapabilitiesSection", () => {
     expect(out).toContain("NATIVE CAPABILITIES");
     expect(out.endsWith("\n\n")).toBe(true);
   });
+  it("root capability guidance describes coordination while eligible workers keep source-tool reference", () => {
+    const root = buildNativeCapabilitiesSection({ mode: "agent", executionRole: "orchestrator" });
+    expect(root).toContain("main coordination");
+    expect(root).toContain("runtime-only");
+    expect(root).toContain("native read_file and grep");
+    expect(root).toContain("Read the selected SKILL.md directly");
+    for (const executionRole of ["worker", "infrastructure", undefined] as const)
+      expect(buildNativeCapabilitiesSection({ mode: "agent", executionRole })).toContain("read_file");
+  });
 
   it("names the load-bearing affordances the agent previously could not see", () => {
     // Regression: these are the capabilities the in-CLI agent reconstructed by

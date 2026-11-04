@@ -33,6 +33,20 @@ describe("logger utility", () => {
     clearTuiActive();
   });
 
+  it.each([false, true])("file-only logs preserve diagnostics without console output (TUI=%s)", (active) => {
+    setTuiActive(active);
+    const token = "fixture-bearer";
+    logger.file("warn", "mcp", `HTTP 401: Bearer ${token}`, { error: new Error("invalid_token"), apiKey: token });
+    expect(logSpy).not.toHaveBeenCalled();
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+    const [file, line] = vi.mocked(fs.appendFileSync).mock.calls[0];
+    expect(String(file)).toMatch(/[\\/]\.muonroi-cli[\\/]debug\.log$/);
+    expect(String(line)).toContain("[WARN] [MCP] HTTP 401");
+    expect(String(line)).toContain("invalid_token");
+    expect(String(line)).not.toContain(token);
+  });
+
   describe("redactSecrets", () => {
     it("redacts openai keys", () => {
       const msg = "sending request with key sk-proj12345678901234567890123456";

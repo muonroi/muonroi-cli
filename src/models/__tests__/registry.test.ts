@@ -203,8 +203,11 @@ describe("tier_routing catalog flag", () => {
   });
 
   test("StepFun routes text models by tier and leaves specialized media models explicit-only", () => {
-    expect(getModelByTier("fast", "stepfun")?.id).toBe("step-3.5-flash");
-    expect(getModelByTier("premium", "stepfun")?.id).toBe("step-3.7-flash");
+    expect(getModelByTier("fast", "stepfun")?.id).toBe("step-3.7-flash");
+    expect(getModelByTier("balanced", "stepfun")?.id).toBe("step-3.7-flash");
+    expect(getModelByTier("premium", "stepfun")?.id).toBe("step-5-preview");
+    expect(getModelInfo("step-3.5-flash")).toBeUndefined();
+    expect(getModelInfo("step-3.5-flash-2603")).toBeUndefined();
     expect(getModelInfo("stepaudio-2.5-tts")?.tierRouting).toBe(false);
     expect(getModelInfo("step-image-edit-2")?.tierRouting).toBe(false);
   });

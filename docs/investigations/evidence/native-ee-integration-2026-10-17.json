@@ -1,0 +1,545 @@
+{
+  "capturedAt": "2026-10-17T07:02:33.371Z",
+  "boundary": "Fresh local build; native real EE read controls; fixture-only write/feedback; no loaded-user-process claim",
+  "tests": {
+    "command": "bunx vitest run src/ee src/tools/native-ee-context.test.ts src/tools/registry-ee-query.test.ts src/tools/__tests__/native-tools.test.ts src/orchestrator/__tests__/task-context.test.ts src/orchestrator/__tests__/progressive-prompt.test.ts src/orchestrator/__tests__/delegation-compaction.test.ts src/orchestrator/__tests__/child-project-contract.test.ts src/tools/__tests__/context-load.test.ts --reporter=dot",
+    "files": 45,
+    "passed": 377,
+    "failed": 0,
+    "skipped": 2,
+    "durationSeconds": 27.46,
+    "exitCode": 0
+  },
+  "build": {
+    "command": "bun run build",
+    "exitCode": 0
+  },
+  "live": {
+    "startedAt": "2026-10-17T06:56:55.711Z",
+    "boundary": "Fresh compiled native tools, configured auth, real EE read controls; no lesson writes, verdict changes, settings changes or paid model requests",
+    "requests": [
+      {
+        "label": "unmapped-consumer",
+        "path": "/api/recall",
+        "startedAt": "2026-10-17T06:56:55.717Z",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "project": null,
+          "strict": true
+        },
+        "elapsedMs": 77,
+        "status": 400
+      },
+      {
+        "label": "select-target-cwd",
+        "path": "/api/recall",
+        "startedAt": "2026-10-17T06:56:55.800Z",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/muonroi-cli",
+          "project": null,
+          "strict": true
+        },
+        "elapsedMs": 147,
+        "status": 200,
+        "count": 7,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli"
+        }
+      },
+      {
+        "label": "query-only-reuse",
+        "path": "/api/recall",
+        "startedAt": "2026-10-17T06:56:55.949Z",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/muonroi-cli",
+          "project": "muonroi-cli",
+          "strict": true
+        },
+        "elapsedMs": 102,
+        "status": 200,
+        "count": 7,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli"
+        }
+      },
+      {
+        "label": "native-project-directory",
+        "path": "/api/projects",
+        "startedAt": "2026-10-17T06:56:56.054Z",
+        "elapsedMs": 185,
+        "status": 200
+      },
+      {
+        "label": "health-and-recall",
+        "path": "/health",
+        "startedAt": "2026-10-17T06:56:56.240Z",
+        "elapsedMs": 59,
+        "status": 200
+      },
+      {
+        "label": "reselect-for-reset",
+        "path": "/api/recall",
+        "startedAt": "2026-10-17T06:56:56.303Z",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/muonroi-cli",
+          "project": null,
+          "strict": true
+        },
+        "elapsedMs": 97,
+        "status": 200,
+        "count": 7,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli"
+        }
+      }
+    ],
+    "calls": [
+      {
+        "name": "unmapped-consumer",
+        "toolName": "ee_query",
+        "chars": 401,
+        "projectRequired": true,
+        "unavailable": false
+      },
+      {
+        "name": "select-target-cwd",
+        "toolName": "ee_query",
+        "chars": 1312,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "query-only-reuse",
+        "toolName": "ee_query",
+        "chars": 1312,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "native-project-directory",
+        "toolName": "ee_query",
+        "chars": 1492,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "health-and-recall",
+        "toolName": "ee_health",
+        "chars": 350,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "restored-scope",
+        "toolName": "ee_query",
+        "chars": 127,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "child-isolation",
+        "toolName": "ee_query",
+        "chars": 109,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "new-task-isolation",
+        "toolName": "ee_query",
+        "chars": 109,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "local-artifact",
+        "toolName": "ee_query",
+        "chars": 110,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "reselect-for-reset",
+        "toolName": "ee_query",
+        "chars": 872,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "reset-task-binding",
+        "toolName": "ee_query",
+        "chars": 178,
+        "projectRequired": false,
+        "unavailable": false
+      },
+      {
+        "name": "reset-scope",
+        "toolName": "ee_query",
+        "chars": 109,
+        "projectRequired": false,
+        "unavailable": false
+      }
+    ],
+    "checks": {
+      "unknownConsumerScopeIsExplicitRefusal": true,
+      "targetCwdNeedsNoModelSuppliedSlug": true,
+      "queryOnlyReusesVerifiedProject": true,
+      "nativeDirectoryWithoutAuthChore": true,
+      "healthSeparatesLastRecall": true,
+      "compiledContinuationAfterCompactionKeepsScope": true,
+      "childOwnerDoesNotInheritBinding": true,
+      "newTaskDoesNotInheritBinding": true,
+      "localArtifactWorksWithoutScopeOrNetwork": true,
+      "resetReturnsToShellScope": true
+    },
+    "directory": {
+      "count": 36,
+      "partial": false,
+      "truncated": false,
+      "next_offset": null
+    },
+    "health": {
+      "status": 200,
+      "recallReady": "not_checked",
+      "lastRecall": {
+        "state": "ok",
+        "checkedAt": "2026-10-17T06:56:56.052Z",
+        "cwd": "D:\\sources\\Core\\muonroi-cli",
+        "project": "muonroi-cli",
+        "count": 7
+      },
+      "scope": {
+        "cwd": "D:\\sources\\Core\\muonroi-cli",
+        "project": "muonroi-cli",
+        "source": "task"
+      }
+    },
+    "finishedAt": "2026-10-17T06:56:56.401Z"
+  },
+  "compiled": {
+    "checks": {
+      "settingsHomeIsIsolated": true,
+      "nativeFtsPreflight": true,
+      "completeProposalEnvelope": true,
+      "truncatedProposalRejected": true,
+      "ambiguousProposalRejected": true,
+      "lspStubHasRealPreviewGuidance": true,
+      "healthDoesNotClaimRecallReadiness": true,
+      "defaultProjectPinPreserved": true,
+      "routeStatusShowsPin": true,
+      "routeStatusDoesNotWrite": true,
+      "explicitSuggestKeepsBaselineSetting": true,
+      "autoUsesSameProviderCheaperTier": true,
+      "suggestKeepsBaselineAndReportsCandidate": true,
+      "cachedSuggestRechecksCap": true,
+      "liveTuiModeCommandAndStatus": true,
+      "nativeSelfverifyRebuiltMcpBootAndStatus": true
+    },
+    "tuiResults": [
+      {
+        "verdict": "pass",
+        "scenarioId": "route-suggest-live-tui",
+        "durationMs": 1582,
+        "checks": [
+          {
+            "expectation": {
+              "kind": "noErrorToast"
+            },
+            "passed": true,
+            "reason": "No error-level toasts observed"
+          },
+          {
+            "expectation": {
+              "kind": "selectorPresent",
+              "selector": "id=status value*=routing=suggest"
+            },
+            "passed": true,
+            "reason": "Selector 'id=status value*=routing=suggest' matched 1 node(s)"
+          }
+        ]
+      }
+    ],
+    "runId": "f43fca28-d484-4f08-a7d2-6269b1bd3889",
+    "harness": {
+      "scenarios": [
+        {
+          "id": "smoke-boot",
+          "description": "CLI boots and reaches idle within budget",
+          "derivedFrom": {
+            "files": ["src/ui/status-bar/index.tsx", "src/ui/slash/route.ts"],
+            "semanticIds": []
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "idle": true,
+              "timeoutMs": 60000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            {
+              "kind": "noErrorToast"
+            }
+          ],
+          "budgetMs": 90000
+        },
+        {
+          "id": "passive-status",
+          "description": "Verify passive surface 'status' renders without error",
+          "derivedFrom": {
+            "files": ["src/ui/status-bar/index.tsx", "src/ui/slash/route.ts"],
+            "semanticIds": ["status"]
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "selector": "role=textbox",
+              "timeoutMs": 60000,
+              "guard": true
+            },
+            {
+              "op": "wait_for",
+              "selector": "id=status",
+              "timeoutMs": 15000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "noErrorToast"
+            },
+            {
+              "kind": "selectorPresent",
+              "selector": "id=status"
+            }
+          ],
+          "budgetMs": 90000
+        }
+      ],
+      "runs": [
+        {
+          "scenario": {
+            "id": "smoke-boot",
+            "description": "CLI boots and reaches idle within budget",
+            "derivedFrom": {
+              "files": ["src/ui/status-bar/index.tsx", "src/ui/slash/route.ts"],
+              "semanticIds": []
+            },
+            "steps": [
+              {
+                "op": "wait_for",
+                "idle": true,
+                "timeoutMs": 60000
+              }
+            ],
+            "expectations": [
+              {
+                "kind": "idleReached",
+                "withinMs": 60000
+              },
+              {
+                "kind": "noErrorToast"
+              }
+            ],
+            "budgetMs": 90000
+          },
+          "events": [],
+          "finalFrame": {
+            "mode": "live",
+            "version": "0.4.0",
+            "seq": 0,
+            "ts": 1792220235600,
+            "nodes": []
+          },
+          "startedAt": 1792220234548,
+          "endedAt": 1792220235668,
+          "timedOut": false,
+          "crashed": false,
+          "idleObserved": 1,
+          "syncTimeouts": [],
+          "mounted": true,
+          "childAlive": true,
+          "stderrTail": "[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\dist\\src\\self-qa\\fixtures\\llm\\default.json (provider=mock, modelId=mock-model)\n"
+        },
+        {
+          "scenario": {
+            "id": "passive-status",
+            "description": "Verify passive surface 'status' renders without error",
+            "derivedFrom": {
+              "files": ["src/ui/status-bar/index.tsx", "src/ui/slash/route.ts"],
+              "semanticIds": ["status"]
+            },
+            "steps": [
+              {
+                "op": "wait_for",
+                "selector": "role=textbox",
+                "timeoutMs": 60000,
+                "guard": true
+              },
+              {
+                "op": "wait_for",
+                "selector": "id=status",
+                "timeoutMs": 15000
+              }
+            ],
+            "expectations": [
+              {
+                "kind": "noErrorToast"
+              },
+              {
+                "kind": "selectorPresent",
+                "selector": "id=status"
+              }
+            ],
+            "budgetMs": 90000
+          },
+          "events": [
+            {
+              "t": "event",
+              "kind": "input-ready",
+              "flushed": 0,
+              "dropped": 0,
+              "ts": 1792220238268
+            }
+          ],
+          "finalFrame": {
+            "mode": "live",
+            "version": "0.4.0",
+            "seq": 1,
+            "ts": 1792220238285,
+            "nodes": [
+              {
+                "id": "composer",
+                "role": "textbox",
+                "value": "",
+                "focus": true
+              },
+              {
+                "id": "status",
+                "role": "statusbar",
+                "value": "stepfun/step-3.7-flash OK"
+              }
+            ],
+            "focus": "composer"
+          },
+          "startedAt": 1792220235669,
+          "endedAt": 1792220238285,
+          "timedOut": false,
+          "crashed": false,
+          "idleObserved": 1,
+          "syncTimeouts": [],
+          "mounted": true,
+          "mountGuard": {
+            "label": "role=textbox",
+            "timeoutMs": 60000,
+            "waitedMs": 1526
+          },
+          "childAlive": true,
+          "stderrTail": "[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\dist\\src\\self-qa\\fixtures\\llm\\default.json (provider=mock, modelId=mock-model)\n"
+        }
+      ],
+      "results": [
+        {
+          "verdict": "pass",
+          "scenarioId": "smoke-boot",
+          "durationMs": 1120,
+          "checks": [
+            {
+              "expectation": {
+                "kind": "idleReached",
+                "withinMs": 60000
+              },
+              "passed": true,
+              "reason": "Idle reached in 1120ms after 1 idle sentinel(s) (budget 60000ms)"
+            },
+            {
+              "expectation": {
+                "kind": "noErrorToast"
+              },
+              "passed": true,
+              "reason": "No error-level toasts observed"
+            }
+          ]
+        },
+        {
+          "verdict": "pass",
+          "scenarioId": "passive-status",
+          "durationMs": 2616,
+          "checks": [
+            {
+              "expectation": {
+                "kind": "noErrorToast"
+              },
+              "passed": true,
+              "reason": "No error-level toasts observed"
+            },
+            {
+              "expectation": {
+                "kind": "selectorPresent",
+                "selector": "id=status"
+              },
+              "passed": true,
+              "reason": "Selector 'id=status' matched 1 node(s)"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "total": 2,
+        "passed": 2,
+        "failed": 0,
+        "inconclusive": 0,
+        "passRate": 1
+      },
+      "skipped": [],
+      "emittedSpecs": [],
+      "durationMs": 3740
+    },
+    "startedAt": "2026-10-17T06:57:11.119Z",
+    "finishedAt": "2026-10-17T06:57:18.514Z"
+  },
+  "hashes": {
+    "src/ee/native-context.ts": "41254ddd7a713401895b59a45bc08c39433f10accf7364839034d73ddd98b226",
+    "src/ee/search.ts": "aa8b45d576452f5bb329637fdb1569d85f3bae383d20cb7dfb52cd974ce89b66",
+    "src/ee/client.ts": "46967500e55596aa79d81f4040dac4f4636138bb71e25c988fcc0e1aac55b76a",
+    "src/ee/auth.ts": "305bc4fce5b1eb668449e9cbb3b0cf877acb375254dcd306c9fbff1aa514d163",
+    "src/ee/types.ts": "97cf9362c0b82db730158be1fdf9673c50644a97c8bb5868eae8a7593f23bab9",
+    "src/ee/auth.test.ts": "3a954e93d3aebc8df6598bf6f3115feb36cb730e8d33c176eead34d120864bf1",
+    "src/ee/recall-scope.test.ts": "cff15c1db081bbaa9629304a4d54609a8f817088c72f01b4954ed42c5d32deb4",
+    "src/tools/native-ee-context.test.ts": "e09897b17bee733fa6f0ab47e26816f091c46a275e7b842e0e59f3bb3c8d7f0a",
+    "src/tools/native-tools.ts": "8364a60efc140bbc78f6b3252ce3f2afb249b16a7a1eac40fbb5bfedb6523d72",
+    "src/tools/registry.ts": "20c5e7237aa02ee3c5d7f8f36d7d1bf7f95db31b7e41b9569ca8c27ecf3dfeaa",
+    "src/orchestrator/task-context.ts": "3d6e6f820eb414b5ac36c5f70f9d01b27cefd158a071e136b055481788e1236b",
+    "src/orchestrator/subagent-compactor.ts": "22836d5731fac3543b516b355516a4e687087e4ba2bc7395f44562559d76dc51",
+    "src/pil/context-modules.ts": "a3a8c37d3dfd21720089a73fa13bffd80f3f5c6d63019af3b2a75b7f84c5ad6c",
+    "src/pil/native-capabilities-workbook.ts": "294ba42cdcb1e113dc3641b3026d6206f69872355f0832ea9d8798734eeeec6b",
+    "dist/src/ee/native-context.js": "9612bd690e7bf3402559d4d6bc2789df564ad2d567c662b1bf41c9a697ac3308",
+    "dist/src/ee/search.js": "561a535e9789b6f3a6160e914e0de56c53aff5b2b00af85ea5868305de809b5d",
+    "dist/src/ee/client.js": "f642b2e4cbe7ba5ac17b6dffc14d8774990ee779d20845da9cf824e22d392439",
+    "dist/src/ee/auth.js": "8b1151224dea2b90371c06d44249ff2baa3a42d4bfa35a75d10ed7e2ea0bf8d4",
+    "dist/src/tools/native-tools.js": "ef11b8c5d2c08323f313a31eeb78882d4f8da480b84d9dfb14a1fbc0e6df22ea",
+    "dist/src/tools/registry.js": "67f9b6e4fcb97aee21ea672c79a0c3bfca8ef03472e0813b1ccc5b017336aab6",
+    "dist/src/orchestrator/task-context.js": "a2917eb12af94873bd8a1ac24eea2d59542e1c88ef9b6f86fccc3dbec9bbc452",
+    "dist/src/orchestrator/subagent-compactor.js": "0bc840a2ee13a480fedf54674ab2a2e6a12e8200a9d2f3bb0367db97905a08fb",
+    ".scratch/session-81-ee-recall/native-context-red.log": "2851334ef94c3a813be2967cd16db99353ec379b86158bf78bd150dd64c7168f",
+    ".scratch/session-81-ee-recall/home-scope-red.log": "4faebf8041743eadf7ef3f3fd22afb54764fa27b6b6f1297708dd4a5e36b89b0",
+    ".scratch/session-81-ee-recall/native-context-tests-final.log": "f91b885e4d8bfb92783d1e6bdbcd33853fbcf0a936ed29b8618133288100f6d2",
+    ".scratch/session-81-ee-recall/native-context-build-accepted.log": "8c0841be7a674f51718a5f12292b078eb313ae5193f6987e7fc1d97b28ed1f3c",
+    ".scratch/native-ee-integration/live-native.mjs": "d6feb803bdea79b2c67026f52825439fd721c91cd7d5ed8bce8eef0944e229fa",
+    ".scratch/native-ee-integration/live-native.json": "b5f13c1c17bf7f02a2fa0c62c031cc0b304eb3b8f4ed8f8c22ea13cc99719f72",
+    ".scratch/native-ee-integration/compiled-controls.mjs": "cafe5a312955c161d92b7087cdeb959cb01d00d13e1b776598a6e369d554dcd0",
+    ".scratch/native-ee-integration/compiled-controls.json": "bec868de0338e9b47a60ea9d8f301b8c771b128c80d251f4adc1c9f52181ae60",
+    "docs/investigations/native-ee-integration-2026-10-17.md": "9fff55914ac2513b5da23b3d38505a653cea4e707eea64676a85e46ba3b3a7e0"
+  }
+}

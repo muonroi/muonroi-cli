@@ -1,7 +1,12 @@
 /**
  * Bước 2 metered gate — meter-only skeleton unit tests.
  */
+
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { noteProviderRateLimited, settleLedgerWrites } from "./rate-ledger.js";
 
 const mockLog = vi.fn();
 vi.mock("../storage/interaction-log.js", () => ({ logInteraction: mockLog }));
@@ -294,6 +299,52 @@ function streamModel(inner = vi.fn(async () => ({ stream: new ReadableStream({ s
 
 describe("wrapModelWithGate request pacing", () => {
   const PACED = { concurrency: 5, requestsPerMinute: 2 };
+
+  it.each([
+    "stream",
+    "generate",
+  ])("does not call transport or retain a local slot after shared-wait cancellation (%s)", async (mode) => {
+    const previousHome = process.env.MUONROI_CLI_HOME;
+    const previousLedger = process.env.MUONROI_RATE_LEDGER;
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-gate-abort-"));
+    process.env.MUONROI_CLI_HOME = home;
+    process.env.MUONROI_RATE_LEDGER = "1";
+    const controller = new AbortController();
+    const reason = new Error("shared cooldown cancelled");
+    const provider = "cancelled-gate-fixture";
+    try {
+      await noteProviderRateLimited(provider, { proposedMs: 60000, hintMs: 60000 });
+      (globalThis as Record<string, unknown>).__muonroiAgentRuntime = {
+        emitEvent: (event: { kind?: string; limitKind?: string }) => {
+          if (event.kind === "rate-limit-wait" && event.limitKind === "provider-cooldown") controller.abort(reason);
+        },
+      };
+      const { model, inner } = streamModel();
+      const wrapped = wrapModelWithGate(model, {
+        stage: "pil",
+        modelId: "m1",
+        providerId: provider,
+        rateLimits: { concurrency: 1 },
+        providerBackpressure: true,
+      });
+      const request = mode === "stream" ? wrapped.doStream.bind(wrapped) : wrapped.doGenerate.bind(wrapped);
+      await expect(request({ prompt: [], abortSignal: controller.signal })).rejects.toBe(reason);
+      expect(inner).not.toHaveBeenCalled();
+      expect(model.doGenerate).not.toHaveBeenCalled();
+      const { __rateLimiterStateForTests } = await import("./rate-limiter.js");
+      expect(__rateLimiterStateForTests(provider)?.inFlight).toBe(0);
+      process.env.MUONROI_RATE_LEDGER = "0";
+      await wrapped.doStream({ prompt: [] });
+      expect(inner).toHaveBeenCalledTimes(1);
+    } finally {
+      await settleLedgerWrites();
+      if (previousHome === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = previousHome;
+      if (previousLedger === undefined) delete process.env.MUONROI_RATE_LEDGER;
+      else process.env.MUONROI_RATE_LEDGER = previousLedger;
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
 
   afterEach(() => {
     __resetRateLimiterForTests();

@@ -9,12 +9,16 @@
 import { randomUUID } from "node:crypto";
 import type { AgenticReport } from "../self-qa/agentic-loop.js";
 import type { SelfVerifyReport } from "../self-qa/index.js";
+import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
 
 export type JobKind = "tier1" | "agentic";
 export type JobStatus = "running" | "done" | "error" | "cancelled";
 
 export interface StartTier1Opts {
   kind: "tier1";
+  cwd?: string;
+  files?: string[];
+  mockLlmDir?: string;
   since?: string;
   max?: number;
   emit?: boolean;
@@ -23,6 +27,7 @@ export interface StartTier1Opts {
 
 export interface StartAgenticOpts {
   kind: "agentic";
+  cwd?: string;
   goal: string;
   llm: string;
   turns?: number;
@@ -62,6 +67,8 @@ export class JobManager {
   constructor(private readonly runner: Runner) {}
 
   start(opts: StartOpts): string {
+    const invalid = validateSelfVerifyRequest(opts);
+    if (invalid) throw new Error(invalid);
     const runId = randomUUID();
     const ctrl = new AbortController();
     const job: Job = {

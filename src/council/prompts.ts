@@ -263,8 +263,15 @@ export function buildLanguageRule(lang?: string): string {
  *   preamble no longer falsely claims the debate ran in English.
  * pinned locale → force all prose into that language instead of detecting it.
  */
-export function buildSynthesisLanguageRule(lang?: string): string {
+export function buildSynthesisLanguageRule(lang?: string, callerOwnsFormat = false): string {
   const pinned = lang && lang !== "english" && lang !== "auto" ? lang : undefined;
+  if (callerOwnsFormat) {
+    return (
+      `## Language Rule\nUse ${pinned ?? "the user's language from the Problem Statement"} for free-text prose. ` +
+      `Preserve the caller's literal keys, enum values, code and citation tags. ` +
+      `The caller's output contract controls the entire answer format.\n\n`
+    );
+  }
   const debatePreamble =
     !lang || lang === "english"
       ? `The debate above is entirely in English (debate language is forced). `
@@ -1012,55 +1019,53 @@ export function buildSynthesisPrompt(ctx: {
     `unless the output shape explicitly asks for actionItems/plan. ` +
     `Stay grounded in what was actually said in the debate: you may sharpen and arbitrate, but never invent facts ` +
     `the specialists did not raise, and mark unverified claims explicitly.\n\n` +
-    buildSynthesisLanguageRule(ctx.language) +
-    `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
-    `**Part 1: JSON** — a single JSON object:\n` +
-    `{\n` +
-    `  "type": "${finalShape.kind}",\n` +
-    `  "summary": "1-2 sentence executive summary in the user's native language",\n` +
-    sectionLines +
-    "\n" +
-    `  "nextActions": [ /* 2-4 items, see the Next Actions rule below */ ]\n` +
-    `}\n\n` +
-    `## Next Actions (mandatory — YOU decide, do not default)\n` +
-    `After reading this outcome, what should the user be offered to do NEXT? This depends ` +
-    `entirely on WHY this debate happened — a bug investigation, an evaluation, a plan, and a ` +
-    `decision each warrant DIFFERENT follow-ups. A fixed "accept / research / apply" menu is wrong. ` +
-    `Choose 2-4 actions from this fixed vocabulary, ordered best-first (index 0 = your recommended ` +
-    `default), writing each label/reason in the user's native language:\n` +
-    `  - "implement" → the conclusion is ready to BUILD. Offer this whenever acting on the outcome ` +
-    `means changing code — INCLUDING a decision to refactor / remove / add. The conclusion itself is ` +
-    `the spec (no separate plan artifact needed); picking it loads that spec and carries it out ` +
-    `through the normal workflow (plan → change → verify). Make it the recommended default (index 0) ` +
-    `when the debate converged on a concrete, buildable decision. Label it with the ACTION (e.g. ` +
-    `"Triển khai …" / "Implement …"), never "continue".\n` +
-    `  - "continue_session" → return to the composer WITHOUT building. The user keeps DISCUSSING with ` +
-    `this debate as context (their next message inherits the conclusion automatically). The right ` +
-    `default for a pure evaluation / discussion whose deliverable is the analysis itself, or when the ` +
-    `user should weigh in before any code change. This ALSO covers "ask a follow-up" — do NOT emit a ` +
-    `separate follow-up action.\n` +
-    `  - "save_exit" → the analysis IS the deliverable; save it and stop here.\n` +
-    `Rules: choose from {"implement","continue_session","save_exit"}. Offer "implement" whenever the ` +
-    `outcome is actionable in code (a build decision, an implementation_plan, or a bug investigation ` +
-    `ready to fix) and make it index 0; otherwise lead with "continue_session". NEVER attach an ` +
-    `implementation-flavoured label ("triển khai", "build", "fix now") to "continue_session" — if you ` +
-    `mean build, the action MUST be "implement". Always include an escape ("save_exit" or ` +
-    `"continue_session"). Emit each as ` +
-    `{"action":"<id>","label":"<short button text>","reason":"<one line: why this fits THIS debate>"}.\n\n` +
-    `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
-    headingLines +
-    `\n\nBe decisive but evidence-grounded — a verdict without evidence is noise; evidence without a verdict is homework handed back to the user.`;
+    `A digest or claim supplied in the brief is not independent verification. ` +
+    `Only claim an executed check when an actual tool result supports it; completion and acknowledgement do not establish correctness.\n\n` +
+    buildSynthesisLanguageRule(ctx.language, !!ctx.synthesisOutputContract?.trim()) +
+    (ctx.synthesisOutputContract?.trim()
+      ? `## Caller-required final output\nFollow ONLY the following output contract. ` +
+        `Do not add a default outcome envelope, action menu, or a second readable version.\n` +
+        ctx.synthesisOutputContract
+      : `Output TWO parts separated by the exact line \`---READABLE---\`:\n\n` +
+        `**Part 1: JSON** — a single JSON object:\n` +
+        `{\n` +
+        `  "type": "${finalShape.kind}",\n` +
+        `  "summary": "1-2 sentence executive summary in the user's native language",\n` +
+        sectionLines +
+        "\n" +
+        `  "nextActions": [ /* 2-4 items, see the Next Actions rule below */ ]\n` +
+        `}\n\n` +
+        `## Next Actions (mandatory — YOU decide, do not default)\n` +
+        `After reading this outcome, what should the user be offered to do NEXT? This depends ` +
+        `entirely on WHY this debate happened — a bug investigation, an evaluation, a plan, and a ` +
+        `decision each warrant DIFFERENT follow-ups. A fixed "accept / research / apply" menu is wrong. ` +
+        `Choose 2-4 actions from this fixed vocabulary, ordered best-first (index 0 = your recommended ` +
+        `default), writing each label/reason in the user's native language:\n` +
+        `  - "implement" → the conclusion is ready to BUILD. Offer this whenever acting on the outcome ` +
+        `means changing code — INCLUDING a decision to refactor / remove / add. The conclusion itself is ` +
+        `the spec (no separate plan artifact needed); picking it loads that spec and carries it out ` +
+        `through the normal workflow (plan → change → verify). Make it the recommended default (index 0) ` +
+        `when the debate converged on a concrete, buildable decision. Label it with the ACTION (e.g. ` +
+        `"Triển khai …" / "Implement …"), never "continue".\n` +
+        `  - "continue_session" → return to the composer WITHOUT building. The user keeps DISCUSSING with ` +
+        `this debate as context (their next message inherits the conclusion automatically). The right ` +
+        `default for a pure evaluation / discussion whose deliverable is the analysis itself, or when the ` +
+        `user should weigh in before any code change. This ALSO covers "ask a follow-up" — do NOT emit a ` +
+        `separate follow-up action.\n` +
+        `  - "save_exit" → the analysis IS the deliverable; save it and stop here.\n` +
+        `Rules: choose from {"implement","continue_session","save_exit"}. Offer "implement" whenever the ` +
+        `outcome is actionable in code (a build decision, an implementation_plan, or a bug investigation ` +
+        `ready to fix) and make it index 0; otherwise lead with "continue_session". NEVER attach an ` +
+        `implementation-flavoured label ("triển khai", "build", "fix now") to "continue_session" — if you ` +
+        `mean build, the action MUST be "implement". Always include an escape ("save_exit" or ` +
+        `"continue_session"). Emit each as ` +
+        `{"action":"<id>","label":"<short button text>","reason":"<one line: why this fits THIS debate>"}.\n\n` +
+        `**Part 2: Human-readable** — after \`---READABLE---\`, write in markdown with these headings (in this order):\n` +
+        headingLines +
+        `\n\nBe decisive but evidence-grounded — a verdict without evidence is noise; evidence without a verdict is homework handed back to the user.`);
 
   if (styleDirective) {
     system = `${styleDirective}\n\n${system}`;
-  }
-
-  if (ctx.synthesisOutputContract) {
-    system +=
-      `\n\n## Caller-required final output\n` +
-      `Preserve the outcome JSON and readable synthesis above. Additionally emit the following ` +
-      `decision block in your final answer; prose alone does not satisfy the caller.\n` +
-      ctx.synthesisOutputContract;
   }
 
   let extraContext = "";
@@ -1070,7 +1075,7 @@ export function buildSynthesisPrompt(ctx: {
 ${ctx.refineContext}
 `;
   }
-  if (ctx.planEmphasis) {
+  if (ctx.planEmphasis && !ctx.synthesisOutputContract?.trim()) {
     extraContext += `
 ## Additional Instruction
 The user has requested a concrete action plan with executable steps. Each action item MUST be an object with these fields:

@@ -48,6 +48,10 @@ describe("bashCommandLines", () => {
 });
 
 describe("writeOutcomeLine", () => {
+  it("labels a preview as unapplied rather than an edit", () => {
+    expect(writeOutcomeLine("edit_file", diff(), true)).toContain("not applied");
+    expect(writeOutcomeLine("edit_file", diff(), true)).toMatch(/^Preview /);
+  });
   it("states the write in prose", () => {
     expect(writeOutcomeLine("write_file", diff())).toBe("Wrote 161 lines to tests/a.test.js");
   });

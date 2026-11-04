@@ -3,7 +3,7 @@
  *
  * P1 Item 3 client wrapper for the EE /api/phase-outcome endpoint.
  *
- * Translates a GSD phase boundary into a phase-grain reinforcement call so
+ * Translates a FLOW phase boundary into a phase-grain reinforcement call so
  * the brain can credit-assign all principles that fired during the phase
  * with a single high-SNR verdict (verifier pass/fail/abandoned) instead of
  * relying on per-tool noise.

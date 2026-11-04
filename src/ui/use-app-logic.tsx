@@ -28,6 +28,7 @@ import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
 import os from "os";
+import { recordInternalExperience } from "./utils/internal-activity.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { COUNCIL_ANSWER_DISMISSED } from "../council/types.js";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
@@ -56,6 +57,7 @@ import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../produc
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { saveProviderCredentials, workspaceIdError } from "../providers/credential-setup.js";
 import type { ApiKeyPromptState } from "./modals/model-picker-modal.js";
+import { pageWorkerApprovalPreview } from "./modals/wallet-picker-modal.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
@@ -103,6 +105,7 @@ import {
   isBackgroundAutoWakeEnabled,
 } from "../utils/background-jobs.js";
 import { logger } from "../utils/logger.js";
+import { signInMcpOAuth } from "../mcp/oauth-signin.js";
 import {
   type CustomSubagentConfig,
   getApiKey,
@@ -220,6 +223,7 @@ import {
   VISIBLE_SLASH_MENU_ITEMS,
 } from "./slash/menu-items.js";
 import { dispatchSlash } from "./slash/registry.js";
+import { handlePermissionsSlash } from "./slash/permissions.js";
 import { StatusBar } from "./status-bar/index.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark } from "./theme";
@@ -259,7 +263,7 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
-import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../gsd/flags.js";
+import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../workflow/flags.js";
 import { stripCouncilNoise } from "./council-preamble.js";
 import {
   getCatalogProviderIds,
@@ -733,10 +737,19 @@ export function useAppLogic(props: AppLogicProps) {
     statusBarStore.setState({
       provider: agent.getProviderId(),
       model: agent.getModel(),
+      permission_mode: agent.effectivePermissionMode,
     });
-  }, [agent.getModel, agent.getProviderId]);
+  }, [agent.getModel, agent.getProviderId, agent.effectivePermissionMode]);
   // Wire status bar subscriptions once at boot (Plan 06)
-  useEffect(() => wireStatusBar(), []);
+  useEffect(
+    () =>
+      wireStatusBar(
+        agent.getExecutionRole() === "orchestrator"
+          ? () => ({ provider: agent.getProviderId(), model: agent.getModel() })
+          : undefined,
+      ),
+    [agent],
+  );
 
   // Agent-mode: wire addPostProcessFn so each renderer pass triggers a registry
   // snapshot → LiveFrame diff → JSONL write on fd 3.
@@ -761,7 +774,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   // ─── Phase 21 / Plan 02 — Toast subscriber ────────────────────────────────
   // Hook into the same agentRuntime.emitEvent sink used by `logEeFailure` so
-  // EE failures (and any explicit `kind: "toast"` event) surface visually.
+  // EE diagnostics remain file-only; explicit actionable toast events stay visual.
   //
   // Implementation: monkey-patch `agentRuntime.emitEvent` once on mount to tee
   // events into a local React state setter. When agentRuntime is absent (no
@@ -796,12 +809,16 @@ export function useAppLogic(props: AppLogicProps) {
     setActiveToast({ level, text, id: toastIdRef.current });
   }, []);
 
-  // Route visible-retry progress ("[retry] rate-limited (429) — waiting Xs …")
-  // through the toast surface. Without this it falls back to a raw
-  // process.stderr.write, which under OpenTUI's raw-mode alt-screen paints over
-  // the composer input frame (user-reported bad UX).
+  // Keep automatic rate-limit retries in diagnostics; other retry notices use
+  // the toast surface so raw stderr cannot paint over the composer.
   useEffect(() => {
-    setRetryReporter((message, level) => pushToast(level === "warn" ? "warn" : "info", message));
+    setRetryReporter((message, level, options) => {
+      if (options?.kind === "rate-limit") {
+        logger.warn("ui", message);
+        return;
+      }
+      pushToast(level === "warn" ? "warn" : "info", message);
+    });
     return () => setRetryReporter(null);
   }, [pushToast]);
 
@@ -836,7 +853,7 @@ export function useAppLogic(props: AppLogicProps) {
           const text = source.startsWith("bb-retrieval")
             ? "running without BB context (EE slow or down)"
             : `EE ${kind}: ${source}`;
-          pushToast("warn", text);
+          logger.file("debug", "ui", text);
         }
       }
     },
@@ -995,8 +1012,8 @@ export function useAppLogic(props: AppLogicProps) {
   const [apiKeyPrompt, setApiKeyPrompt] = useState<ApiKeyPromptState | null>(null);
 
   // ── OAuth subscription login (browser-based) for openai / xai ───────────
-  // One auth mode per provider: a successful OAuth login clears any stored API
-  // key for that provider (exclusivity). Runs the registry login() flow, which
+  // A successful OAuth login keeps any stored API key as a backup.
+  // Runs the registry login() flow, which
   // opens the browser and resolves when the loopback callback completes.
   const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
@@ -1033,13 +1050,12 @@ export function useAppLogic(props: AppLogicProps) {
     setOAuthLogin(null);
   }, []);
 
-  // Sync React model state with status bar store so chat input reflects
-  // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
+  // Report the actual main model. Worker selection does not replace main.
   useEffect(() => {
     return statusBarStore.subscribe((s) => {
-      if (s.model) setModel(s.model);
+      if (s.model) setModel(agent.getModel());
     });
-  }, [setModel]);
+  }, [agent, setModel]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => groupToolEntries(agent.getChatEntries()));
@@ -1081,8 +1097,15 @@ export function useAppLogic(props: AppLogicProps) {
     network: string;
     asset: string;
     approvalId?: string;
+    workerApproval?: import("../orchestrator/worker-approval.js").WorkerApprovalView;
     selected: number;
   } | null>(null);
+  const workerApprovalDecisionsRef = useRef(new Set<string>());
+  const workerApprovalScrollRef = useRef<ScrollBoxRenderable>(null);
+  useEffect(() => {
+    agent.setWorkerApprovalController(true);
+    return () => agent.setWorkerApprovalController(false);
+  }, [agent]);
   const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
   const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
   const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
@@ -1564,15 +1587,11 @@ export function useAppLogic(props: AppLogicProps) {
   // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
   // (decided in app.tsx where terminal width is known).
   const [railVisible, setRailVisible] = useState(true);
-  // True when the user is pinned to (or near) the bottom. Mirrors OpenTUI's
-  // private `_hasManualScroll`: once the user scrolls up, sticky-bottom stops
-  // and this returns false, so our explicit scrolls back off. Falls back to a
-  // geometric at-bottom check if the private field is ever absent.
+  // The pill follows visible scroll geometry. The private manual-scroll flag
+  // can remain set after reaching the tail or after a layout change.
   const isPinnedToBottom = useCallback((): boolean => {
     const sb = scrollRef.current;
     if (!sb) return true;
-    const manual = (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll;
-    if (typeof manual === "boolean") return !manual;
     const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
     return sb.scrollTop + vpH >= sb.scrollHeight - 2;
   }, []);
@@ -1645,7 +1664,9 @@ export function useAppLogic(props: AppLogicProps) {
   const hasApiKeyRef = useRef(initialHasApiKey);
   const showApiKeyModalRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
-  const processMessageRef = useRef<(text: string, displayText?: string) => Promise<void> | void>(() => {});
+  const processMessageRef = useRef<
+    (text: string, displayText?: string, internalActivity?: boolean) => Promise<void> | void
+  >(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const modeInfoRef = useRef<(typeof MODES)[number]>(MODES[0]);
   const activeRunIdRef = useRef(0);
@@ -2261,8 +2282,8 @@ export function useAppLogic(props: AppLogicProps) {
       setDefaultProvider(provider);
       setDefaultProviderState(provider);
       agent.setModel(modelId);
-      setModel(modelId);
-      statusBarStore.setState({ model: modelId, provider });
+      setModel(agent.getModel());
+      statusBarStore.setState({ model: agent.getModel(), provider });
       saveProjectSettings({ model: modelId });
       saveUserSettings({ defaultModel: modelId, defaultProvider: provider });
     },
@@ -2304,10 +2325,14 @@ export function useAppLogic(props: AppLogicProps) {
     }
     setApiKeyPrompt({ ...apiKeyPrompt, saving: true, error: null });
     try {
-      const ok = await saveProviderCredentials(apiKeyPrompt.provider, {
-        apiKey: key,
-        ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
-      });
+      const ok = await saveProviderCredentials(
+        apiKeyPrompt.provider,
+        {
+          apiKey: key,
+          ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
+        },
+        agent,
+      );
       if (!ok) {
         setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: "Could not store credentials. Please retry setup." });
         return;
@@ -2326,7 +2351,7 @@ export function useAppLogic(props: AppLogicProps) {
       console.error(`[providers] ${apiKeyPrompt.provider} credential setup failed: ${(e as Error).message}`);
       setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: (e as Error).message });
     }
-  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider]);
+  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider, agent]);
 
   const startProviderOAuth = useCallback(
     async (provider: ProviderId, activateAfterLogin = false) => {
@@ -2352,24 +2377,14 @@ export function useAppLogic(props: AppLogicProps) {
         if (attempt.signal.aborted || oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
         await saveTokens(provider, tokens);
-        // Exclusivity: OAuth login clears any stored API key for this provider.
-        try {
-          const { clearEnvVar } = await import("../providers/env-store.js");
-          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
-          clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch (err) {
-          console.error(
-            `[providers] could not clear the stored ${provider} key after OAuth login: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
+        // Keep the configured API key as a subscription fallback.
         // The factory bakes in the auth it saw when it was built, so the tokens
         // we just saved reach nothing until it is rebuilt — that is why signing
         // in only took effect after restarting the session.
         try {
           const { rewarmProviderFactory } = await import("../providers/warm.js");
           await rewarmProviderFactory(provider);
+          if (agent.getProviderId() === provider) await agent.refreshAuthentication();
         } catch (err) {
           console.error(
             `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
@@ -2598,6 +2613,28 @@ export function useAppLogic(props: AppLogicProps) {
     void agent
       .getBackgroundJobSnapshot()
       .then((snap) => {
+        // Human approvals must progress even while main is awaiting a worker.
+        // Snapshot polling is independent of model notification consumption.
+        setPendingPaymentApproval((current) => {
+          if (current && !current.workerApproval) return current;
+          const pending = snap.workerApprovals ?? [];
+          if (current?.workerApproval && pending.some((r) => r.id === current.workerApproval!.id)) return current;
+          const request = pending.find((r) => !workerApprovalDecisionsRef.current.has(r.id));
+          return request
+            ? {
+                url: `${request.jobId}: ${request.toolName}`,
+                description: `${request.preview}\ncall=${request.toolCallId}\nsha256=${request.inputDigest}\ndeadline=${request.deadlineAt}`,
+                security: "",
+                securityLabel: "",
+                securityUrl: "",
+                amount: "",
+                network: "",
+                asset: "",
+                selected: 0,
+                workerApproval: request,
+              }
+            : null;
+        });
         // Polled every tick — only a real change may re-render the rail.
         const key = JSON.stringify(snap);
         if (key === backgroundSnapshotKeyRef.current) return;
@@ -3949,8 +3986,12 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [openApiKeyModal, startTelegramBridge]);
 
+  // Raw, stdin and semantic key listeners share this owner snapshot. Keep it
+  // stable for the key that dismisses a modal, even when its state refs close.
+  const modalKeyboardOwnerRef = useRef<ModalSurfaceId | null>(null);
   const interruptActiveRun = useCallback(
     (key?: KeyEvent) => {
+      if (modalKeyboardOwnerRef.current || showSlashMenuRef.current) return false;
       // S5 — steer mode owns Escape: backing out of a steering instruction must
       // not abort the debate you were about to steer. Guarded HERE as well as in
       // the key reducer because this runs from a separate `_internalKeyInput`
@@ -4129,7 +4170,12 @@ export function useAppLogic(props: AppLogicProps) {
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array — adding them would cause unnecessary re-creation of processMessage on every render
   const processMessage = useCallback(
-    async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
+    async (
+      text: string,
+      displayText?: string,
+      images?: Array<{ path: string; mediaType: string; base64: string }>,
+      internalActivity = false,
+    ) => {
       if (!text.trim() || isProcessingRef.current) return;
       if (taskListClearTimerRef.current) {
         clearTimeout(taskListClearTimerRef.current);
@@ -4147,14 +4193,11 @@ export function useAppLogic(props: AppLogicProps) {
         const diffMs = Date.now() - lastUpdated;
         const diffMins = Math.floor(diffMs / (60 * 1000));
         if (diffMins >= 10) {
-          pushToast(
-            "warn",
-            `⚠️ Lần tương tác cuối cách đây ${diffMins} phút. Cache của DeepSeek có thể đã bị giải phóng (Cache Miss).`,
-          );
+          pushToast("info", `Đang tiếp tục phiên sau ${diffMins} phút không hoạt động.`);
         }
       }
 
-      if (!sessionTitle)
+      if (!sessionTitle && !internalActivity)
         agent
           .generateTitle((displayText ?? text).trim())
           .then(setSessionTitle)
@@ -4162,24 +4205,18 @@ export function useAppLogic(props: AppLogicProps) {
       await coordinatorRef.current.run(async () => {
         const color = modeInfoRef.current.color;
         beginLiveTurn({ kind: "local", agent, modeColor: color });
-        setMessages((prev) => [...prev, buildUserEntry((displayText ?? text).trim(), { modeColor: color })]);
+        setMessages((prev) => [
+          ...prev,
+          buildUserEntry((displayText ?? text).trim(), { modeColor: color, internal: internalActivity }),
+        ]);
         setTimeout(scrollToBottom, 50);
         await new Promise((r) => setTimeout(r, 0));
         let turnHadError = false;
         let turnHadAuthError = false;
         try {
-          // Register EE sink BEFORE the stream loop so experience_warning/injected chunks
-          // reach the TUI render path. Deregistered in finally to prevent stale closure.
-          setActiveEeYield((eeChunk) => {
-            if (eeChunk.type === "experience_warning") {
-              applyLocalAssistantDelta(
-                `\n⚠ [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
-              );
-            } else if (eeChunk.type === "experience_injected") {
-              applyLocalAssistantDelta(formatExperienceInjectedBlock(eeChunk.experienceInjected ?? {}));
-            }
-          });
-          for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
+          // Main retains the full EE guidance; UI decoration is file-only.
+          setActiveEeYield(recordInternalExperience);
+          for await (const chunk of agent.processMessage(text.trim(), undefined, images, { internalActivity })) {
             // A council spliced into a NORMAL agent turn (convene_council /
             // auto-council route through tool-engine's runCouncilV2, not through
             // the /council or /ideal slash loops) delivers its chunks here. This
@@ -4475,12 +4512,8 @@ export function useAppLogic(props: AppLogicProps) {
                 });
                 break;
               case "experience_warning":
-                applyLocalAssistantDelta(
-                  `\n⚠ [Experience] ${chunk.experienceWarning?.message ?? chunk.content ?? ""}\nWhy: ${chunk.experienceWarning?.why ?? ""}\n`,
-                );
-                break;
               case "experience_injected":
-                applyLocalAssistantDelta(formatExperienceInjectedBlock(chunk.experienceInjected ?? {}));
+                recordInternalExperience(chunk);
                 break;
               case "halt":
                 if (chunk.haltChunk) {
@@ -4659,7 +4692,8 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [hasApiKey, initialMessage, processMessage]);
   useEffect(() => {
-    processMessageRef.current = processMessage;
+    processMessageRef.current = (text, displayText, internalActivity) =>
+      processMessage(text, displayText, undefined, internalActivity);
   }, [processMessage]);
 
   // Scaffold-checkpoint integration — wraps initNewProject() so a single helper
@@ -4827,6 +4861,7 @@ export function useAppLogic(props: AppLogicProps) {
             ...notifications.map((message) => ({
               type: "assistant" as const,
               content: message,
+              internal: true,
               timestamp: new Date(),
             })),
           ]);
@@ -4836,7 +4871,8 @@ export function useAppLogic(props: AppLogicProps) {
           if (isBackgroundAutoWakeEnabled() && !isProcessingRef.current) {
             void processMessageRef.current(
               buildBackgroundWakePrompt(notifications),
-              backgroundWakeLabel(notifications.length),
+              backgroundWakeLabel(notifications),
+              true,
             );
           }
         })
@@ -5043,6 +5079,8 @@ export function useAppLogic(props: AppLogicProps) {
           sessionId: agent.getSessionId() ?? undefined,
           getLiveEntries: () => messages,
           argsText,
+          getPermissionMode: () => agent.effectivePermissionMode,
+          setPermissionMode: (mode) => agent.setPermissionModeFromUser(mode),
         })
           .then(async (result) => {
             if (result === null) {
@@ -5442,35 +5480,8 @@ export function useAppLogic(props: AppLogicProps) {
                       return { ...d, criteriaHistory, costHistory };
                     });
                   }
-                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                    });
-                  }
-                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                    });
+                  if (chunk.type === "experience_warning" || chunk.type === "experience_injected") {
+                    recordInternalExperience(chunk);
                   }
                   if (chunk.type === "halt" && chunk.haltChunk) {
                     // Surface the structured recovery card. The /ideal product-loop
@@ -5578,17 +5589,7 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                // C2 (2026-08-06) — a human just typed this command, so NEITHER
-                // suppression applies: the S1 launch card asks what the run is
-                // for, and the post-debate surface (which holds the only two
-                // consumers of that intent lock — resolveRunKind and the
-                // planner/plan-review/post-plan-card path) must actually run.
-                // The old `convenePath: true, allowLaunchCard: true` showed the
-                // intent card and then skipped everything downstream of it, so
-                // picking "Implement — plan it, review it, then build" produced
-                // no planner, no PLAN.md, no review and no phase loop.
-                // Passing NO options is deliberate, not an omission — it is the
-                // same shape auto-council uses (src/orchestrator/tool-engine.ts).
+                // Main starts a durable council and yields its receipt immediately.
                 const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
@@ -5771,35 +5772,8 @@ export function useAppLogic(props: AppLogicProps) {
                       /* best-effort */
                     }
                   }
-                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                    });
-                  }
-                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                    });
+                  if (chunk.type === "experience_warning" || chunk.type === "experience_injected") {
+                    recordInternalExperience(chunk);
                   }
                   if (chunk.type === "done") break;
                   // C (latency UX): re-arm the inter-chunk heartbeat so the long
@@ -5994,6 +5968,8 @@ export function useAppLogic(props: AppLogicProps) {
           // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
+            getPermissionMode: () => agent.effectivePermissionMode,
+            setPermissionMode: (mode) => agent.setPermissionModeFromUser(mode),
             tenantId: "local",
             defaultProvider: agent.getProviderId(),
             defaultModel: model,
@@ -6253,6 +6229,8 @@ export function useAppLogic(props: AppLogicProps) {
     showTelegramPairModal,
   ]);
 
+  modalKeyboardOwnerRef.current = modalKeyboardOwner;
+
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
   const isSinglePlan = planQuestions.length === 1 && planQuestions[0]?.type !== "multiselect";
@@ -6500,7 +6478,7 @@ export function useAppLogic(props: AppLogicProps) {
       // when the prompt input is empty, so End/PageUp/PageDown still edit text
       // while composing. End re-pins to the live tail; PageUp/PageDown page the
       // transcript by one viewport without disturbing the composer.
-      if (isScrollLockEnabled() && !key.ctrl && !key.meta) {
+      if (!pendingPaymentApproval?.workerApproval && isScrollLockEnabled() && !key.ctrl && !key.meta) {
         const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
         if (composerEmpty && (key.name === "pageup" || key.name === "pagedown" || key.name === "end")) {
           const sb = scrollRef.current;
@@ -6575,6 +6553,18 @@ export function useAppLogic(props: AppLogicProps) {
       });
       reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
       const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
+      if (
+        pendingPaymentApproval?.workerApproval &&
+        modalOwnsKeyboard(modalOwnerNow, "payment-approval") &&
+        !key.ctrl &&
+        !key.meta &&
+        pageWorkerApprovalPreview(key, workerApprovalScrollRef.current)
+      )
+        return;
+      if (modalOwnerNow && isEscapeKey(key)) {
+        key.preventDefault();
+        key.stopPropagation();
+      }
 
       // Point-to-existing form intercepts all input while it owns the keyboard.
       if (pointToExistingForm && modalOwnsKeyboard(modalOwnerNow, "point-to-existing-form")) {
@@ -7525,6 +7515,12 @@ export function useAppLogic(props: AppLogicProps) {
           editSavedMcp(row.server);
           return;
         }
+        if (key.name === "o" && key.ctrl && row?.kind === "server") {
+          signInMcpOAuth(row.server).catch((err) => {
+            logger.error("mcp", `oauth sign-in failed: ${err?.message}`, { serverId: row.server.id });
+          });
+          return;
+        }
         if (key.name === "x" && key.ctrl && row?.kind === "server") {
           deleteSavedMcp(row.server);
           return;
@@ -8094,8 +8090,52 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       if (pendingPaymentApproval && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
+        if (
+          pendingPaymentApproval.workerApproval &&
+          !key.ctrl &&
+          !key.meta &&
+          ["a", "y"].includes(key.name.toLowerCase())
+        ) {
+          const mode = key.name.toLowerCase() === "a" ? "auto" : "yolo";
+          void Promise.resolve(
+            handlePermissionsSlash([mode], {
+              cwd: agent.getCwd(),
+              tenantId: "local",
+              defaultProvider: agent.getProviderId(),
+              defaultModel: model,
+              getPermissionMode: () => agent.effectivePermissionMode,
+              setPermissionMode: (next) => agent.setPermissionModeFromUser(next),
+            }),
+          )
+            .then((message) => {
+              pushToast("info", message);
+              refreshBackgroundSnapshot();
+            })
+            .catch((error) => {
+              logger.file("warn", "ui", "User permission change failed", { error: String(error) });
+              pushToast("error", String(error));
+            });
+          return;
+        }
         if (isEscapeKey(key)) {
+          const request = pendingPaymentApproval.workerApproval;
           setPendingPaymentApproval(null);
+          if (request) {
+            workerApprovalDecisionsRef.current.add(request.id);
+            void agent
+              .respondToWorkerApproval(request, false)
+              .catch((err: unknown) => {
+                logger.file("warn", "ui", "Worker approval denial failed", {
+                  requestId: request.id,
+                  error: String(err),
+                });
+                pushToast("warn", err instanceof Error ? err.message : String(err));
+              })
+              .finally(() => {
+                workerApprovalDecisionsRef.current.delete(request.id);
+                refreshBackgroundSnapshot();
+              });
+          }
           return;
         }
         if (key.name === "up" || key.name === "down") {
@@ -8105,8 +8145,24 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.name === "return") {
           const approved = pendingPaymentApproval.selected === 0;
           const aid = pendingPaymentApproval.approvalId;
+          const request = pendingPaymentApproval.workerApproval;
           setPendingPaymentApproval(null);
-          if (aid) {
+          if (request) {
+            workerApprovalDecisionsRef.current.add(request.id);
+            void agent
+              .respondToWorkerApproval(request, approved)
+              .catch((err: unknown) => {
+                logger.file("warn", "ui", "Worker approval decision failed", {
+                  requestId: request.id,
+                  error: String(err),
+                });
+                pushToast("warn", err instanceof Error ? err.message : String(err));
+              })
+              .finally(() => {
+                workerApprovalDecisionsRef.current.delete(request.id);
+                refreshBackgroundSnapshot();
+              });
+          } else if (aid) {
             agent.respondToToolApproval(aid, approved);
             if (approved) {
               processMessage("[Payment approved]");
@@ -8822,6 +8878,8 @@ export function useAppLogic(props: AppLogicProps) {
     const displayedModel = modelRef.current;
     if (displayedModel && displayedModel !== agent.getModel()) {
       agent.setModel(displayedModel);
+      setModel(agent.getModel());
+      statusBarStore.setState({ model: agent.getModel() });
     }
     // Submitting a fresh prompt is an explicit "engage the live tail" action —
     // re-pin even if the user had scrolled up to read history (scroll-lock).
@@ -8843,6 +8901,7 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilCardStateSync,
     setShowModelPicker,
     setModelPickerIndex,
+    setModel,
   ]);
 
   // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
@@ -8979,6 +9038,7 @@ export function useAppLogic(props: AppLogicProps) {
     pendingCouncilPreflight,
     pendingCouncilQuestion,
     pendingPaymentApproval,
+    workerApprovalScrollRef,
     planQuestions,
     pointToExistingForm,
     pqs,

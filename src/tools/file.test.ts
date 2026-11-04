@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { editFile, readFiles, writeFile } from "./file";
+import { FileTracker } from "./file-tracker.js";
 
 interface MockDiagnostic {
   message: string;
@@ -67,6 +68,25 @@ afterEach(async () => {
 });
 
 describe("file tool LSP integration", () => {
+  it("previews the real diff without writes, ledger changes or LSP and still enforces fresh reads", async () => {
+    const cwd = await createTempDir();
+    const file = path.join(cwd, "preview.txt");
+    const before = "alpha\r\nbeta\r\n";
+    await writeFsFile(file, before);
+    const tracker = new FileTracker();
+    expect((await editFile("preview.txt", "alpha", "changed", cwd, tracker, true)).success).toBe(false);
+    readFiles(["preview.txt"], cwd, tracker);
+    const preview = await editFile("preview.txt", "alpha\nbeta", "changed\nbeta", cwd, tracker, true);
+    expect(preview).toMatchObject({ success: true, preview: true });
+    expect(preview.diff!.patch).toContain("+changed");
+    expect(await readFile(file, "utf8")).toBe(before);
+    expect(tracker.writtenPaths()).toEqual([]);
+    expect(syncFileWithLspMock).not.toHaveBeenCalled();
+    await writeFsFile(file, "external\n");
+    expect((await editFile("preview.txt", "external", "changed", cwd, tracker, true)).output).toContain(
+      "changed on disk",
+    );
+  });
   it("includes diagnostics metadata when writing a file", async () => {
     const cwd = await createTempDir();
     const result = await writeFile("demo.ts", "const answer = 42;\n", cwd);
@@ -203,6 +223,48 @@ describe("editFile line-ending normalization", () => {
 });
 
 describe("readFiles (O1 multi-path batch read)", () => {
+  it("returns an explicit continuation range when a read budget omits lines", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(
+      path.join(cwd, "large.txt"),
+      Array.from({ length: 500 }, (_, i) => `line ${i + 1}: ${"x".repeat(60)}`).join("\n"),
+    );
+    const result = readFiles([{ file_path: "large.txt", start_line: 40, end_line: 200 }], cwd, undefined, 1000);
+    expect(result.success).toBe(true);
+    expect(result.output).toContain("Unreturned lines");
+    expect(result.output).toContain("-200");
+    expect(result.output).not.toContain("full output in transcript");
+    expect(result.output.length).toBeLessThan(1256);
+    const next = Number(result.output.match(/Unreturned lines (\d+)-/)![1]);
+    const continuation = readFiles([{ file_path: "large.txt", start_line: next, end_line: next }], cwd);
+    expect(continuation.output).toContain(`${next} | line ${next}:`);
+  });
+  it("reads independent inclusive ranges in mixed legacy/object batches", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(path.join(cwd, "a.ts"), "alpha\nbeta\ngamma\ndelta", "utf8");
+    await writeFsFile(path.join(cwd, "b.ts"), "one\ntwo\nthree", "utf8");
+    const result = readFiles(
+      [
+        { file_path: "a.ts", start_line: 2, end_line: 3 },
+        { file_path: "b.ts", start_line: 3, end_line: 3 },
+      ],
+      cwd,
+    );
+    expect(result.output).toContain("[a.ts: lines 2-3 of 4]\n2 | beta\n3 | gamma");
+    expect(result.output).toContain("[b.ts: lines 3-3 of 3]\n3 | three");
+    expect(result.output).not.toContain("alpha");
+    expect(result.output).not.toContain("delta");
+    expect(readFiles([{ file_path: "a.ts", start_line: 3, end_line: 1 }], cwd).success).toBe(false);
+  });
+
+  it("identifies exact unreturned lines instead of cutting the last visible line in half", async () => {
+    const cwd = await createTempDir();
+    await writeFsFile(path.join(cwd, "a.ts"), "x".repeat(5000) + "\ntail", "utf8");
+    const result = readFiles([{ file_path: "a.ts", start_line: 1, end_line: 2 }], cwd, undefined, 100);
+    expect(result.output).toContain("Unreturned lines 1-2");
+    expect(result.output).not.toContain("1 | x");
+  });
+
   it("reads multiple files in one call, each with its own header", async () => {
     const cwd = await createTempDir();
     await writeFsFile(path.join(cwd, "a.ts"), "export const a = 1;\n", "utf8");
@@ -226,7 +288,7 @@ describe("readFiles (O1 multi-path batch read)", () => {
     const result = readFiles(["big.ts", "small.ts"], cwd, undefined, 4_000);
     expect(result.success).toBe(true);
     // big.ts is truncated with an explicit, self-describing marker (not silent).
-    expect(result.output).toContain("chars of big.ts truncated in this batch read");
+    expect(result.output).toContain("chars of big.ts truncated in this read");
     // The SECOND file survives in full — the regression vector the cap must avoid.
     expect(result.output).toContain("export const kept = true;");
   });

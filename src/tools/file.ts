@@ -5,6 +5,7 @@ import { LSP_DETAIL_MAX_ACK } from "../lsp/manager";
 import { describeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
 import type { FileTracker } from "./file-tracker.js";
+import type { WorkerWriteScope } from "./worker-write-scope.js";
 import { blockWriteIfOutOfScope, normalizeMsysDrivePath } from "./write-scope.js";
 
 export interface FileDiff {
@@ -16,10 +17,12 @@ export interface FileDiff {
 }
 
 export interface FileResult {
+  writeScopeVersion?: number;
   success: boolean;
   output: string;
   diff?: FileDiff;
   lspDiagnostics?: LspDiagnosticFile[];
+  preview?: boolean;
 }
 
 /**
@@ -110,19 +113,45 @@ export function readFile(
  * concatenated total stays under the registry cap, making the outer
  * `truncateOutput` a no-op — every requested file is represented.
  */
-export function readFiles(filePaths: string[], cwd: string, tracker?: FileTracker, perFileCap?: number): FileResult {
+export type FileReadRequest = string | { file_path: string; start_line?: number; end_line?: number };
+
+export function readFiles(
+  filePaths: FileReadRequest[],
+  cwd: string,
+  tracker?: FileTracker,
+  perFileCap?: number,
+): FileResult {
   if (filePaths.length === 0) {
     return { success: false, output: "read_file: no paths provided (file_path or file_paths required)" };
   }
   const parts: string[] = [];
-  for (const filePath of filePaths) {
-    const r = readFile(filePath, cwd, undefined, undefined, tracker);
+  for (const request of filePaths) {
+    if (!request || (typeof request !== "string" && typeof request.file_path !== "string"))
+      return {
+        success: false,
+        output: "Invalid file request: supply a path string or {file_path,start_line,end_line}.",
+      };
+    const filePath = typeof request === "string" ? request : request.file_path;
+    const start = typeof request === "string" ? undefined : request.start_line;
+    const end = typeof request === "string" ? undefined : request.end_line;
+    if (
+      !filePath ||
+      (start !== undefined && (!Number.isInteger(start) || start < 1)) ||
+      (end !== undefined && (!Number.isInteger(end) || end < (start ?? 1)))
+    ) {
+      return { success: false, output: "Invalid file range: use a path and positive inclusive start_line/end_line." };
+    }
+    const r = readFile(filePath, cwd, start, end, tracker);
     let out = r.output;
     if (perFileCap && perFileCap > 0 && out.length > perFileCap) {
       // Head-truncate this ONE file with an explicit, self-describing marker.
       // Never silently elide: the model is told this file was cut and how to
       // get the rest (single read + line range).
-      out = `${out.slice(0, perFileCap)}\n... [${out.length - perFileCap} chars of ${filePath} truncated in this batch read — read it singly with start_line/end_line for the rest] ...`;
+      const cut = Math.max(0, out.lastIndexOf("\n", perFileCap));
+      const kept = out.slice(0, cut);
+      const range = out.match(/lines (\d+)-(\d+) of/);
+      const nextLine = Number(range?.[1] ?? start ?? 1) + Math.max(0, kept.split("\n").length - 1);
+      out = `${kept}\n... [${out.length - cut} chars of ${filePath} truncated in this read; Unreturned lines ${nextLine}-${range?.[2] ?? end ?? "end"}. Read that range to continue; use grep for excerpts if one line exceeds the budget.] ...`;
     }
     parts.push(out);
   }
@@ -134,9 +163,12 @@ export async function writeFile(
   content: string,
   cwd: string,
   tracker?: FileTracker,
+  workerScope?: WorkerWriteScope,
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    const workerBlock = workerScope?.refusal(filePath, cwd);
+    if (workerBlock) return { success: false, output: workerBlock };
     // Containment BEFORE anything is created: `full` is the post-resolution
     // target, so this one check covers both a relative path riding a drifted
     // tool cwd and an absolute path that bypassed the cwd entirely.
@@ -164,7 +196,9 @@ export async function writeFile(
 
     const diff = computeDiff(filePath, before, content);
     const verb = before === "" ? "Created" : "Updated";
-    const lspDiagnostics = await syncFileWithLsp(cwd, full, content, true, true).catch(() => [] as LspDiagnosticFile[]);
+    const lspDiagnostics = workerScope
+      ? []
+      : await syncFileWithLsp(cwd, full, content, true, true).catch(() => [] as LspDiagnosticFile[]);
     // Name the diagnostics, don't just count them: the measured blind-edit loop
     // (/ideal run muc2joffe506) STARTED at an edit ack that said only
     // "6 LSP issues · 6 errors". Errors sort first, warnings are labelled.
@@ -187,9 +221,13 @@ export async function editFile(
   newString: string,
   cwd: string,
   tracker?: FileTracker,
+  dryRun = false,
+  workerScope?: WorkerWriteScope,
 ): Promise<FileResult> {
   try {
     const full = resolvePath(filePath, cwd);
+    const workerBlock = workerScope?.refusal(filePath, cwd);
+    if (workerBlock) return { success: false, output: workerBlock };
     // Containment first — refuse before disclosing whether the out-of-scope file
     // exists, and before any write. Covers relative-path cwd drift and absolute
     // paths alike (both have already collapsed into `full`).
@@ -245,14 +283,23 @@ export async function editFile(
     }
 
     const after = before.replace(searchString, replaceString);
+    const diff = computeDiff(filePath, before, after);
+    if (dryRun)
+      return {
+        success: true,
+        preview: true,
+        diff,
+        output: `Preview only: ${filePath} (+${diff.additions} -${diff.removals}); no file was changed. Revalidated when applied.`,
+      };
     writeFileSync(full, after, "utf-8");
 
     // Refresh tracker so back-to-back edits keep working.
     tracker?.markRead(full, after, mtimeMsOf(full));
     tracker?.markWritten(full);
 
-    const diff = computeDiff(filePath, before, after);
-    const lspDiagnostics = await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
+    const lspDiagnostics = workerScope
+      ? []
+      : await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
     const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
     return {
       success: true,

@@ -51,7 +51,7 @@ it("initializes OAuth before an isolated background task uses the real provider 
     );
   });
   const modelId = getTestModelForProvider("openai", "fast");
-  const agent = new Agent("oauth", undefined, modelId, 1, { persistSession: false });
+  const agent = new Agent("oauth", undefined, modelId, 1, { persistSession: false, permissionMode: "yolo" });
   try {
     const result = await agent.runTaskRequest({
       agent: "explore",

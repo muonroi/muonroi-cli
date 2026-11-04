@@ -17,40 +17,47 @@
     },
     "./protocol": {
       "types": "./src/protocol.ts",
+      "node": "./dist/node/protocol.js",
       "default": "./src/protocol.ts"
     },
     "./argv-contract": {
       "types": "./src/argv-contract.ts",
+      "node": "./dist/node/argv-contract.js",
       "default": "./src/argv-contract.ts"
     },
     "./selector": {
       "types": "./src/selector.ts",
+      "node": "./dist/node/selector.js",
       "default": "./src/selector.ts"
     },
     "./predicate": {
       "types": "./src/predicate.ts",
+      "node": "./dist/node/predicate.js",
       "default": "./src/predicate.ts"
     },
     "./driver": {
       "types": "./src/driver.ts",
+      "node": "./dist/node/driver.js",
       "default": "./src/driver.ts"
     },
     "./idle": {
       "types": "./src/idle.ts",
+      "node": "./dist/node/idle.js",
       "default": "./src/idle.ts"
     },
     "./registry": {
       "types": "./src/registry.ts",
+      "node": "./dist/node/registry.js",
       "default": "./src/registry.ts"
     },
     "./mock-llm": {
       "types": "./src/mock-llm.ts",
-      "node": "./src/mock-llm.ts",
+      "node": "./dist/node/mock-llm.js",
       "default": "./src/mock-llm.ts"
     },
     "./spec-helpers": {
       "types": "./src/spec-helpers.ts",
-      "node": "./src/spec-helpers.ts",
+      "node": "./dist/node/spec-helpers.js",
       "default": "./src/spec-helpers.ts"
     },
     "./transports/sidechannel": {
@@ -76,14 +83,17 @@
     },
     "./notification-bridge": {
       "types": "./src/notification-bridge.ts",
+      "node": "./dist/node/notification-bridge.js",
       "default": "./src/notification-bridge.ts"
     },
     "./event-filter": {
       "types": "./src/event-filter.ts",
+      "node": "./dist/node/event-filter.js",
       "default": "./src/event-filter.ts"
     },
     "./event-redact": {
       "types": "./src/event-redact.ts",
+      "node": "./dist/node/event-redact.js",
       "default": "./src/event-redact.ts"
     }
   },

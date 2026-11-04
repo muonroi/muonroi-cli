@@ -39,7 +39,7 @@ function relativizePath(p: string): string {
   let normalized = p.replace(/\\/g, "/");
   const home = os.homedir().replace(/\\/g, "/");
   const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
-  if (normalized.startsWith(normalizedHome)) {
+  if (normalized === normalizedHome || normalized.startsWith(normalizedHome + "/")) {
     normalized = "~" + normalized.slice(normalizedHome.length);
   }
   return normalized;
@@ -677,6 +677,9 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
       const body: Record<string, unknown> = { query };
       if (opts.cwd) body.cwd = relativizePath(opts.cwd);
       if (opts.project) body.project_slug = opts.project;
+      if (opts.repository)
+        body.repository = { root: relativizePath(opts.repository.root), project: opts.repository.project };
+      if (opts.strictProject) body.strict_project = true;
       if (opts.sourceSession) body.sourceSession = opts.sourceSession;
       // Per-stance recall weighting (item 3): forward the council stance/role so
       // the server weights recall collections toward what this stance cares about.
@@ -703,10 +706,29 @@ export function createEEClient(opts: CreateEEClientOpts = {}): EEClient {
           // timeout produces is what made the 2026-07-17 incident unfalsifiable
           // from the client: "is the server rate-limiting us?" could not be
           // answered without reading the server's source.
+          let errorBody: unknown;
+          try {
+            errorBody = await resp.json();
+          } catch (error) {
+            logEeFailure("client.recall.errorBody", "error", error, { status: resp.status });
+          }
+          const serverError =
+            errorBody && typeof errorBody === "object" ? (errorBody as { error?: unknown }).error : undefined;
+          const projectRequired =
+            resp.status === 400 &&
+            typeof serverError === "string" &&
+            serverError.startsWith("Cannot resolve a concrete project for strict recall");
+          const redactedErrorBody = redactor.redact(JSON.stringify(errorBody) ?? "");
           logEeFailure("client.recall", "error", new Error(`HTTP ${resp.status}`), {
             status: resp.status,
+            projectRequired,
             elapsedMs: Date.now() - startedAt,
+            responseBody: (authToken ? redactedErrorBody.split(authToken).join("[REDACTED]") : redactedErrorBody).slice(
+              0,
+              2000,
+            ),
           });
+          opts.onHttpError?.({ status: resp.status, projectRequired });
           return null;
         }
         return (await resp.json()) as import("./types.js").EERecallResponse;

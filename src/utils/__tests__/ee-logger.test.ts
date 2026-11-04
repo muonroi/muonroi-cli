@@ -3,7 +3,7 @@
  *
  * The logger is the foundation of Phase 21 observability — every silent EE
  * catch site routes through it. These tests pin down the four guarantees:
- *   1. Warn line has stable `[ee.<source>.<kind>]` prefix shape.
+ *   1. File-only warn line has stable `[ee.<source>.<kind>]` prefix shape.
  *   2. `ee-timeout` / `ee-error` events fire when the agent runtime is wired.
  *   3. No-op event path when the runtime is absent (composer-only sessions).
  *   4. Never throws on `null` / `undefined` / non-Error `err` arguments.
@@ -11,6 +11,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { classifyEeError, logEeFailure, withEeTimeout } from "../ee-logger.js";
+import { logger } from "../logger.js";
 
 type RuntimeStub = { emitEvent: ReturnType<typeof vi.fn> };
 
@@ -28,7 +29,7 @@ describe("ee-logger", () => {
   let warnSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
-    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    warnSpy = vi.spyOn(logger, "file").mockImplementation(() => undefined);
     removeRuntime();
   });
 
@@ -38,15 +39,14 @@ describe("ee-logger", () => {
   });
 
   describe("logEeFailure", () => {
-    it("emits warn with [ee.<source>.<kind>] prefix and structured error", () => {
+    it("writes file-only warn with [ee.<source>.<kind>] prefix and structured error", () => {
       const err = new Error("connection refused");
       logEeFailure("bridge.classifyViaBrain", "error", err, { elapsedMs: 12 });
 
       expect(warnSpy).toHaveBeenCalledTimes(1);
       const args = warnSpy.mock.calls[0]!;
-      expect(args[0]).toBe("[ee.bridge.classifyViaBrain.error]");
-      expect(args[1]).toEqual({ name: "Error", message: "connection refused" });
-      expect(args[2]).toEqual({ elapsedMs: 12 });
+      expect(args.slice(0, 3)).toEqual(["warn", "ee", "[ee.bridge.classifyViaBrain.error]"]);
+      expect(args[3]).toEqual({ name: "Error", message: "connection refused", elapsedMs: 12 });
     });
 
     it("emits ee-timeout event when runtime is present and kind=timeout", () => {
@@ -95,21 +95,21 @@ describe("ee-logger", () => {
       expect(() => logEeFailure("pil.pipeline.logInteraction", "error", null)).not.toThrow();
       expect(warnSpy).toHaveBeenCalledOnce();
       const args = warnSpy.mock.calls[0]!;
-      expect((args[1] as { name: string }).name).toBe("Null");
+      expect((args[3] as { name: string }).name).toBe("Null");
     });
 
     it("never throws on undefined err", () => {
       installRuntime();
       expect(() => logEeFailure("phase-outcome.recordCouncilOutcome", "error", undefined)).not.toThrow();
       const args = warnSpy.mock.calls[0]!;
-      expect((args[1] as { name: string }).name).toBe("Undefined");
+      expect((args[3] as { name: string }).name).toBe("Undefined");
     });
 
     it("never throws on string err and uses the string as message", () => {
       installRuntime();
       expect(() => logEeFailure("client.feedback", "error", "boom")).not.toThrow();
       const args = warnSpy.mock.calls[0]!;
-      expect(args[1]).toEqual({ name: "String", message: "boom" });
+      expect(args[3]).toEqual({ name: "String", message: "boom" });
     });
 
     it("never throws on object-with-name err", () => {
@@ -117,7 +117,7 @@ describe("ee-logger", () => {
       const errLike = { name: "AbortError", message: "request aborted" };
       expect(() => logEeFailure("bridge.routeTask", "timeout", errLike)).not.toThrow();
       const args = warnSpy.mock.calls[0]!;
-      expect(args[1]).toEqual({ name: "AbortError", message: "request aborted" });
+      expect(args[3]).toEqual({ name: "AbortError", message: "request aborted" });
     });
 
     it("does not propagate emitEvent exceptions", () => {

@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { activeToolGroupHeader, categoryForTool, doneToolGroupSummary } from "../tool-summary.js";
 
 describe("categoryForTool", () => {
+  it("keeps preview outcomes separate from mutations", () => {
+    expect(doneToolGroupSummary(["edit_file_preview"])).toBe("Previewed 1 file");
+  });
   it("separates write from edit (both are 'Editing' to verbForTool)", () => {
     expect(categoryForTool("write_file")).toBe("write");
     expect(categoryForTool("edit_file")).toBe("edit");

@@ -8,11 +8,15 @@
  * other RouteDecision goes through; only the free model CHOICE (role/PIL/
  * hot/warm/cold classification) is skipped.
  */
+
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { getTestModels, getTestProviders } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
 import { midstreamPolicy } from "../../usage/midstream.js";
-import { type DecideOpts, decide } from "../decide.js";
+import { clearRouteCache, type DecideOpts, decide } from "../decide.js";
 
 describe("decide() — forcedModel (project model pin) keeps cap checks", () => {
   let BASE_OPTS: DecideOpts;
@@ -30,6 +34,7 @@ describe("decide() — forcedModel (project model pin) keeps cap checks", () => 
   });
 
   afterEach(() => {
+    clearRouteCache();
     midstreamPolicy.clear();
   });
 
@@ -38,6 +43,40 @@ describe("decide() — forcedModel (project model pin) keeps cap checks", () => 
     expect(dec.model).toBe("glm-4.7");
     expect(dec.reason).toBe("project-model-pin");
     expect(dec.model).not.toBe("HALT");
+  });
+  it("refuses an explicitly selected orchestrator at a zero cap instead of traversing the downgrade chain", async () => {
+    const home = mkdtempSync(join(tmpdir(), "orchestrator-cap-"));
+    writeFileSync(join(home, "config.json"), JSON.stringify({ cap: { monthly_usd: 0 } }));
+    try {
+      const decision = await decide("Coordinate assigned work", {
+        ...BASE_OPTS,
+        forcedModel: BASE_OPTS.defaultModel,
+        refuseModelSubstitution: true,
+        homeOverride: home,
+      });
+      expect(decision.model).toBe("HALT");
+      expect(decision.reason).toContain("requested-model-cap-refusal");
+      expect(decision.reason).not.toContain("downgrade");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["fixed", "suggest", "auto"] as const)("%s still respects a cap halt", async (routingMode) => {
+    midstreamPolicy.forceRefuseNext();
+    const dec = await decide("check weather", { ...BASE_OPTS, routingMode });
+    expect(dec.model).toBe("HALT");
+    expect(dec.cap_overridden).toBe(true);
+  });
+
+  it.each([
+    "auto",
+    "suggest",
+  ] as const)("%s rechecks budget safety when replaying a cached decision", async (routingMode) => {
+    const opts: DecideOpts = { ...BASE_OPTS, routingMode, pil: { taskType: "documentation", confidence: 0.9 } };
+    expect((await decide("write docs", opts)).model).not.toBe("HALT");
+    midstreamPolicy.forceRefuseNext();
+    expect((await decide("write docs", opts)).model).toBe("HALT");
   });
 
   it("BUG FIX: a cap breach (midstream refuse-next already tripped) still HALTs a pinned turn", async () => {

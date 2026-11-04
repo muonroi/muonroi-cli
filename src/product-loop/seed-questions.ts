@@ -1,4 +1,4 @@
-import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
+import type { GrayAreaQuestion } from "../workflow/gray-areas.js";
 
 /**
  * The 6 hardcoded dimensions for the Product Ideal Loop's Gather stage.

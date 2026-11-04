@@ -31,23 +31,21 @@ import type { ShellKind } from "../utils/shell.js";
  */
 export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before invoking any tool; these override defaults that follow]
 
-1. Bash output is AUTOMATICALLY cached. Every \`bash\` call returns a \`run_id\`
-   (e.g. \`bash-1\`) you can re-query via \`bash_output_get(run_id, mode=tail|head|grep|lines)\`.
-   - When you want only the last N lines: do NOT pipe \`| tail -N\`. Run the
-     bare command, then call \`bash_output_get(run_id, mode=tail, lines=N)\`.
-   - Same for \`| head\`, \`| grep PATTERN\`, \`> file\`. Pipes/redirects HIDE
-     the full output from the cache; \`bash_output_get\` reads from the cache
-     without re-running.
-   - This applies to EVERY bash call, not just retries.
+1. Bash output is cached with a \`run_id\` (e.g. \`bash-1\`). Read slices via
+   \`bash_output_get(run_id, mode=tail|head|grep|lines)\`.
+   - Use returned output directly when sufficient. Retrieve missing slices
+     when needed; do not re-run a command for slicing.
+   - Keep full build/test/failure output: run unfiltered and inspect the cache.
+     Focused read-only pipes are allowed for intended filtered output;
+     only emitted output is cached. Preserve failure exit codes.
    - To VIEW a file use \`read_file\` (start_line/end_line) — never sed/cat a
      file. \`bash_output_get\` is for COMMAND output, not files.
 
-2. Before reading more than 3 files to understand a topic, delegate to
-   \`task(agent="explore")\`. The sub-agent returns a compressed summary;
-   you save reading tokens.
+2. Use \`task(agent="explore")\` for useful independent broad research.
+   Read known files directly; delegation adds its own requests and is optional.
 
-3. Use the \`grep\` tool (ripgrep) for content search — NOT \`bash\` with
-   \`grep\` / \`find\` piped.
+3. Prefer the \`grep\` tool (ripgrep) for source/config/log text search; no LSP
+   call is required first. Use LSP for symbols, references and semantic impact.
 
 4. When a tool returns \`ERROR: ...\`, do NOT retry the identical call.
    Pick a different tool, change inputs meaningfully, or stop and report.

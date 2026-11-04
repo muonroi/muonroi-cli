@@ -1,0 +1,111 @@
+{
+  "capturedAt": "2026-10-17T07:20:20.665Z",
+  "before": {
+    "capturedAt": "2026-10-17T07:08:17.817Z",
+    "boundary": "Fresh compiled FileIndex with caller cwd; child stdout/stderr captured, no settings changes",
+    "cases": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "exit": 0,
+        "result": "{\"gitRoot\":null,\"size\":0}",
+        "stderr": "'head' is not recognized as an internal or external command,\r\noperable program or batch file."
+      },
+      {
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "exit": 0,
+        "result": "{\"gitRoot\":\"D:\\\\sources\\\\Core\\\\muonroi-cli\",\"size\":2539}",
+        "stderr": ""
+      }
+    ]
+  },
+  "after": {
+    "capturedAt": "2026-10-17T07:12:18.896Z",
+    "boundary": "Fresh compiled FileIndex with caller cwd; child stdout/stderr captured, no settings changes",
+    "cases": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "exit": 0,
+        "result": "{\"gitRoot\":null,\"size\":69}",
+        "stderr": ""
+      },
+      {
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "exit": 0,
+        "result": "{\"gitRoot\":\"D:\\\\sources\\\\Core\\\\muonroi-cli\",\"size\":2541}",
+        "stderr": ""
+      }
+    ]
+  },
+  "tests": {
+    "passed": 34,
+    "failed": 0,
+    "files": 2,
+    "exitCode": 0
+  },
+  "build": {
+    "exitCode": 0
+  },
+  "compiledChecks": {
+    "settingsHomeIsIsolated": true,
+    "nativeFtsPreflight": true,
+    "completeProposalEnvelope": true,
+    "truncatedProposalRejected": true,
+    "ambiguousProposalRejected": true,
+    "lspStubHasRealPreviewGuidance": true,
+    "healthDoesNotClaimRecallReadiness": true,
+    "defaultProjectPinPreserved": true,
+    "routeStatusShowsPin": true,
+    "routeStatusDoesNotWrite": true,
+    "explicitSuggestKeepsBaselineSetting": true,
+    "autoUsesSameProviderCheaperTier": true,
+    "suggestKeepsBaselineAndReportsCandidate": true,
+    "cachedSuggestRechecksCap": true,
+    "liveTuiModeCommandAndStatus": true,
+    "nativeSelfverifyRebuiltMcpBootAndStatus": true
+  },
+  "tuiResults": [
+    {
+      "verdict": "pass",
+      "scenarioId": "route-suggest-live-tui",
+      "durationMs": 1523,
+      "checks": [
+        {
+          "expectation": {
+            "kind": "noErrorToast"
+          },
+          "passed": true,
+          "reason": "No error-level toasts observed"
+        },
+        {
+          "expectation": {
+            "kind": "selectorPresent",
+            "selector": "id=status value*=routing=suggest"
+          },
+          "passed": true,
+          "reason": "Selector 'id=status value*=routing=suggest' matched 1 node(s)"
+        }
+      ]
+    }
+  ],
+  "selfverify": {
+    "runId": "1b73f8d8-5210-42fe-a07d-143af01475ca",
+    "summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "hashes": {
+    "src/utils/file-index.ts": "ec7c7bce7e7b869b000b544210bfd31a421a13213ba0d802b52d5e277280e4b8",
+    "src/utils/__tests__/file-index.test.ts": "4fff1f8eef1470706932259b99d3dbc1e9d4a161a8631a63c309fa20721b23de",
+    "dist/src/utils/file-index.js": "16c2d4f379896f3ff2b657aaf9d212852abaf268e3a79b8b72049fd55a5e694e",
+    ".scratch/file-index-windows/before.json": "8e3183a6691812aa82dc4ca829ebb91bffc00144d9559e4e4b556721aa685541",
+    ".scratch/file-index-windows/after.json": "00cc95a4bf8a32f6efc994f18b96acdfa4d79dd0314e56fcf639d1111f6e749c",
+    ".scratch/file-index-windows/tests-accepted.log": "b135b125258ab9fd321186388f277c46c3dcb0cca6caf5cd3e9ba529ce461b22",
+    ".scratch/file-index-windows/build-accepted.log": "7744c1c0d837405c6d9e7aa8c45847cf6ac5f2ace17674588109ed318ba1cd7b",
+    ".scratch/file-index-windows/compiled-controls.json": "31c83796df217d5f1ec68e362fc4c6e0974af589e748479b8b24ed219124b9ad",
+    "docs/investigations/file-index-windows-stderr-2026-10-17.md": "569fbffff8d6aec7e7fef2e55f8884633dbe68d9d30305262b95566f85f8739f"
+  }
+}

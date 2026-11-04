@@ -7,12 +7,18 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { isIdealToolEntryEnabled } from "../gsd/flags.js";
-import { registerGsdWorkflowTools } from "../gsd/workflow-tools.js";
+import { displayedRecallEntries } from "../ee/native-context.js";
 import { MCP_FULL_INPUT_SCHEMA } from "../mcp/full-schema.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
+import {
+  type ExecutionRole,
+  filterExecutionTools,
+  workerModelInventory,
+} from "../orchestrator/orchestration-policy.js";
+import { carriesElidedArgsMarker } from "../orchestrator/subagent-compactor.js";
+import { TaskContext } from "../orchestrator/task-context.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { isUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import {
@@ -24,14 +30,21 @@ import {
 } from "../providers/mcp-vision-bridge.js";
 import { needsVisionProxy } from "../providers/vision-proxy.js";
 import { mostRecentVisionSessionId } from "../providers/vision-session.js";
+import { listToolEvidence } from "../storage/tool-evidence-index.js";
 import type { AgentMode, TaskRequest, ToolResult } from "../types/index.js";
 import { longestSleepSeconds, SLEEP_POLL_THRESHOLD_SECONDS, sleepPollRefusal } from "../utils/background-jobs.js";
+import { isTuiActive, logger } from "../utils/logger.js";
 import { loadMcpServers } from "../utils/settings.js";
+import { isIdealToolEntryEnabled } from "../workflow/flags.js";
+import type { PlanReviewBudget } from "../workflow/review-budget.js";
+import { registerFlowWorkflowTools } from "../workflow/workflow-tools.js";
 import { installArgGuards } from "./arg-guard.js";
 import type { BashTool } from "./bash.js";
 import { type BashSliceMode, bashOutputNotFoundMessage, getBashRun, sliceBashOutput } from "./bash-output-cache.js";
 import { countUncommittedChanges, emptyLedgerRefusalMessage } from "./commit-ledger-refusal.js";
-import { editFile, readFile, readFiles, writeFile } from "./file.js";
+import { registerContextLoader } from "./context-load.js";
+import type { FileResult } from "./file.js";
+import { editFile, readFiles, writeFile } from "./file.js";
 import { FileTracker } from "./file-tracker.js";
 import { beginGitEffectGuard, effectViolationMessage } from "./git-effect-guard.js";
 import {
@@ -49,15 +62,54 @@ import { executeGrep } from "./grep.js";
 import { registerNativeMuonroiTools } from "./native-tools.js";
 import { registerNativeResearchTools } from "./research.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
+import { workerProcessRefusal } from "./worker-process-boundary.js";
+import { filterScopedWorkerTools, WORKER_ISOLATION_CAPABILITIES, WorkerWriteScope } from "./worker-write-scope.js";
 
 interface ToolRegistryOpts {
+  writeScope?: string[];
+  boundWriteScope?: WorkerWriteScope;
+  runScopedWrite?: (operation: (scope: WorkerWriteScope) => Promise<FileResult>) => Promise<FileResult>;
+  /** Final permitted set for this child; never borrow the parent's global inventory. */
+  getToolSet?: () => ToolSet;
+  executionRole?: ExecutionRole;
+  credentialedProvider?: import("../providers/types.js").ProviderId;
+  taskContext?: TaskContext;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
-  readDelegation?: (id: string) => Promise<ToolResult>;
+  readDelegation?: (
+    id: string,
+    artifact?: import("../types/index.js").DelegationArtifactReadInput,
+  ) => Promise<ToolResult>;
+  sendDelegation?: (
+    id: string,
+    message: string,
+    replyTo: string | undefined,
+    toolCallId: string,
+    signal?: AbortSignal,
+    writeScope?: string[],
+  ) => Promise<ToolResult>;
+  workerMessage?: (
+    kind: "progress" | "question",
+    message: string,
+    toolCallId: string,
+    waitForReply: boolean,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ) => Promise<ToolResult>;
+  acknowledgeDelegation?: (id: string, resultVersion: string) => Promise<ToolResult>;
+  acceptDelegation?: (input: import("../types/index.js").DelegationAcceptanceInput) => Promise<ToolResult>;
+  startCouncil?: (input: {
+    topic: string;
+    reason: string;
+    context: string;
+    outputContract: string;
+  }) => Promise<ToolResult>;
+  startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
+  readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
-  /** L1 model depth tier — gates gsd_plan_review registration. */
+  /** L1 model depth tier — gates flow_plan_review registration. */
   depthTier?: "quick" | "standard" | "heavy";
   consultParentSession?: (question: string) => Promise<string>;
   /**
@@ -75,6 +127,7 @@ interface ToolRegistryOpts {
    * isolated state (legacy per-closure behaviour).
    */
   sessionId?: string;
+  planReviewBudget?: PlanReviewBudget;
   runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
   /**
    * When true, the `convene_council` tool is registered so the agent can
@@ -259,9 +312,45 @@ export function setLiveToolSet(next: ToolSet | null): void {
 }
 
 export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolRegistryOpts): ToolSet {
+  const boundWriteScope =
+    opts?.boundWriteScope ??
+    (opts?.writeScope !== undefined ? new WorkerWriteScope(bash.getCwd(), opts.writeScope) : undefined);
   const tools: ToolSet = {};
+  if (opts?.workerMessage) {
+    tools.worker_message = dynamicTool({
+      description:
+        "Send progress or a question to your owning main. A question waits for an exact correlated reply by default; progress returns immediately. No recipient or permission changes. This does not accept or verify work.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["progress", "question"] },
+          message: { type: "string", minLength: 1, maxLength: 8000 },
+          waitForReply: {
+            type: "boolean",
+            description: "Questions only; default true. Host waits with a finite deadline, without model polling.",
+          },
+          timeoutMs: { type: "integer", minimum: 1, maximum: 300000 },
+        },
+        required: ["kind", "message"],
+        additionalProperties: false,
+      }),
+      execute: async (input: any, context: any) =>
+        formatResult(
+          await opts.workerMessage!(
+            input.kind,
+            input.message,
+            context?.toolCallId ?? "",
+            input.waitForReply !== false,
+            input.timeoutMs ?? 300000,
+            context?.abortSignal,
+          ),
+        ),
+    });
+  }
+  const taskContext = opts?.taskContext ?? new TaskContext(opts?.sessionId ?? crypto.randomUUID(), bash.getCwd());
+  registerContextLoader(tools, taskContext, () => bash.getCwd(), opts?.executionRole);
   // One tracker per tool registry instance — shared across read/write/edit
-  // calls in the same session. Enforces "must read before edit/overwrite".
+  // calls in this tool run. A rebuilt registry starts a fresh read/write ledger.
   const fileTracker = new FileTracker();
 
   // Native research tools (fetch_url, web_search) — always available.
@@ -271,35 +360,64 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // read_file
   tools.read_file = dynamicTool({
     description:
-      "Read file contents. To read SEVERAL files, pass them ALL in one call via file_paths (array) — STRONGLY PREFERRED over issuing separate read_file calls: each extra call re-sends the whole conversation as input, so N single reads cost O(N²) tokens while one batched read costs O(N). For a large SINGLE file, use start_line/end_line to extract only the needed section (start_line/end_line apply to file_path only; file_paths reads whole files). Use grep or lsp first to find line numbers.",
+      "Read requested file sections. Reuse sufficient current evidence; retrieve_tool_result by toolCallId for elided evidence before rereading. Use file_paths with path strings or {file_path,start_line,end_line} objects for inclusive ranges in one call. max_chars bounds returned excerpts; omissions name unreturned lines. Re-read current content when the edit guard requests it. Never infer omitted content.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
         file_path: { type: "string", description: "Path to a single file to read (supports start_line/end_line)." },
         file_paths: {
           type: "array",
-          items: { type: "string" },
+          maxItems: 20,
+          items: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  file_path: { type: "string" },
+                  start_line: { type: "integer", minimum: 1 },
+                  end_line: { type: "integer", minimum: 1 },
+                },
+                required: ["file_path"],
+                additionalProperties: false,
+              },
+            ],
+          },
           description:
             "Read MULTIPLE files in ONE call (preferred when you need 2+ files). Each is returned with its own header; each is capped independently so none is dropped. Best for small-to-medium files; for a large file use file_path + line range.",
         },
         start_line: { type: "number", description: "First line to read (1-based). Applies to file_path only." },
         end_line: { type: "number", description: "Last line to read (1-based). Applies to file_path only." },
+        max_chars: {
+          type: "integer",
+          minimum: 256,
+          maximum: MAX_TOOL_OUTPUT_CHARS,
+          description: "Total excerpt budget; split fairly across batch paths. Defaults to the normal tool output cap.",
+        },
       },
     }),
     execute: async (input: any) => {
-      const batch: string[] =
-        Array.isArray(input.file_paths) && input.file_paths.length > 0
-          ? input.file_paths.filter((p: unknown): p is string => typeof p === "string" && p.trim() !== "")
-          : [];
-      if (batch.length > 1) {
+      const batch = Array.isArray(input.file_paths) && input.file_paths.length > 0 ? input.file_paths : [];
+      if (batch.length > 20) return "ERROR: At most 20 files per read; split this request into explicit batches.";
+      const budget = input.max_chars ?? MAX_TOOL_OUTPUT_CHARS;
+      if (!Number.isSafeInteger(budget) || budget < 256 || budget > MAX_TOOL_OUTPUT_CHARS)
+        return `ERROR: max_chars must be an integer from 256 to ${MAX_TOOL_OUTPUT_CHARS}.`;
+      if (batch.length > 1 || (batch.length === 1 && typeof batch[0] === "object")) {
         // Per-file fair-share of the output cap so the concatenated result
         // stays under MAX_TOOL_OUTPUT_CHARS and every file survives (no silent
         // head/tail drop of whole files). Floor keeps each file legible.
-        const perFileCap = Math.max(4_000, Math.floor(MAX_TOOL_OUTPUT_CHARS / batch.length));
+        if (budget < batch.length * 512)
+          return "ERROR: max_chars must allow at least 512 characters per batch file; narrow the batch or increase the budget.";
+        const perFileCap = Math.max(256, Math.floor(budget / batch.length) - 256);
         return formatResult(readFiles(batch, bash.getCwd(), fileTracker, perFileCap));
       }
       const single = batch.length === 1 ? batch[0] : input.file_path;
-      const result = readFile(single, bash.getCwd(), input.start_line, input.end_line, fileTracker);
+      const result = readFiles(
+        [{ file_path: single, start_line: input.start_line, end_line: input.end_line }],
+        bash.getCwd(),
+        fileTracker,
+        Math.max(1, budget - 256),
+      );
       return formatResult(result);
     },
   });
@@ -337,7 +455,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // counterpart to the reactive tool-limit auto-recover.
   tools.compact = dynamicTool({
     description:
-      "Proactively compress THIS turn's accumulated tool/conversation history to free context and reset tool-call bloat, then CONTINUE the task automatically. Call it after a read-heavy stretch (many read_file/grep/bash results) when context feels heavy and BEFORE you approach a tool-round limit — it prevents the 'reached tool limit' interruption entirely. The compaction runs before your next step; older tool results are summarized (a decisions/facts snapshot is kept) and remain rehydratable via ee_query \"tool-artifact id=…\". Do NOT stop after calling it — keep working toward the goal.",
+      "Compress this turn's older history, preserve its decisions and continue the task. Retrieve elided tool evidence with retrieve_tool_result using the original tool_call_id. Report unavailable evidence explicitly; do not invent missing results.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -352,7 +470,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       return formatResult({
         success: true,
         output:
-          'Context compaction scheduled — older tool history will be compressed before your next step; continue the task afterward. High-value results stay rehydratable via ee_query "tool-artifact id=…".',
+          'Context compaction scheduled. Continue the task; retrieve elided evidence with retrieve_tool_result and the complete original tool_call_id (never shorten it). If the ID is unknown, call retrieve_tool_result({view:"index",query:"relevant path, tool name or ID fragment"}) to discover local references. An exact-ID miss is not proof of cache loss. EE is not required. Report evidence still unavailable after local discovery explicitly.',
       });
     },
   });
@@ -374,7 +492,24 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       execute: async () => formatResult(opts.readPilContext!()),
     });
   }
-  if (opts?.councilConfigured) {
+  if (opts?.councilConfigured && opts.startCouncil) {
+    tools.convene_council = dynamicTool({
+      description:
+        "Launch a durable background council on demand. Supply topic, reason, bounded context and outputContract explicitly. Returns a job receipt immediately; consume completion with delegation_read/ACK. Advice is not implementation verification. End the turn while only jobs are pending; do not poll.",
+      inputSchema: jsonSchema({
+        type: "object",
+        properties: {
+          topic: { type: "string" },
+          reason: { type: "string" },
+          context: { type: "string" },
+          outputContract: { type: "string" },
+        },
+        required: ["topic", "reason", "context", "outputContract"],
+        additionalProperties: false,
+      }),
+      execute: async (input: any) => formatResult(await opts.startCouncil!(input)),
+    });
+  } else if (opts?.councilConfigured && opts.executionRole !== "orchestrator") {
     tools.convene_council = dynamicTool({
       description:
         "Convene the multi-model council to debate THIS request. Use ONLY when the task has genuinely conflicting design tradeoffs, needs a cross-provider/second-opinion review, or is a high-stakes architecture/analysis decision where a single model's view is insufficient. It runs a real multi-role debate across several models and returns a synthesized conclusion AS THIS TOOL'S RESULT. Do NOT use it for routine or low-ambiguity work — it is expensive. After calling, read the returned conclusion and continue; nothing is auto-decided for you.",
@@ -517,8 +652,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     description:
       "Execute a shell command. Output is automatically cached — every call returns a " +
       "run_id you can re-query via bash_output_get(run_id, mode=tail|head|grep|lines). " +
-      "Do NOT pipe `| tail`, `| head`, `| grep`, or `> file` — that hides output from " +
-      "the cache. Run unpiped and slice via bash_output_get instead. For collecting system info (OS, versions, cwd layout, git, disk, processes) batch with ; or && in ONE call, e.g. 'uname -a; node -v; bun --version; ls -la | head -15; git status --short; df -h .; ps aux | head -5'. Set background=true for long-running processes (dev servers, watchers). " +
+      "Use returned output directly when sufficient; retrieve missing slices only when needed. " +
+      "Keep full build/test/failure output by running unfiltered and inspecting the cache. Focused read-only pipes are allowed when the filtered output is the intended result; the cache retains only what the command emits. Preserve failure exit codes. Batch known independent checks; sequence dependent actions. Set background=true for long-running processes (dev servers, watchers). " +
       'Avoid nesting double-quotes inline for database queries/scripts (e.g. executing raw SQL via `sqlite3 db "SELECT..."`) since they can fail parsing in shell environments; write query scripts to a temporary file first and run them.',
     inputSchema: jsonSchema({
       type: "object",
@@ -579,6 +714,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       _emptyBashStreak.delete(gitSafetyKey ?? "no-session");
 
       const cmd = typeof input.command === "string" ? input.command : "";
+
+      // Ownership restrictions are not safety approvals; enforce before overrides.
+      const workerRefusal = opts?.executionRole === "worker" ? workerProcessRefusal(cmd) : undefined;
+      if (workerRefusal) return workerRefusal;
 
       // Safety override check: approval is granted after a blocked call, but
       // the model's retry receives a new toolCallId. Match by id first, then
@@ -817,11 +956,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // process_stop
   tools.process_stop = dynamicTool({
-    description: "Stop a background process by ID.",
+    description:
+      "Stop a background process owned by this tool instance. Use its native ID from process_list, not an OS PID.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        id: { type: "number", description: "Background process ID to stop" },
+        id: { type: "number", description: "Owned native background ID from process_list (not an OS PID)" },
       },
       required: ["id"],
     }),
@@ -845,14 +985,14 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   });
 
   // Agent mode gets write/edit/task/delegate tools
-  if (mode === "agent") {
+  if (mode === "agent" || opts?.executionRole === "orchestrator") {
     // Capture delegation functions for auto-routing logic below
     const runTaskFn = opts?.runTask;
     const runDelegationFn = opts?.runDelegation;
     // write_file
     tools.write_file = dynamicTool({
       description:
-        "Create a new file or overwrite an existing file with full content. SAFETY: overwriting an existing file requires you to call read_file on it first in the same session. New-file creation does not.",
+        "Create a new file or overwrite an existing file with full content. SAFETY: overwriting requires read_file on the current content in this tool run. Earlier-turn reads may not be retained after the tool run restarts; read again if requested. New-file creation does not require a prior read.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
@@ -870,12 +1010,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               'Example: {"file_path":"src/foo.ts","content":"export const x = 1;\\n"}',
           };
         }
-        const result = await writeFile(input.file_path, input.content, bash.getCwd(), fileTracker);
+        const scope = boundWriteScope;
+        const apply = (current = scope) =>
+          writeFile(input.file_path, input.content, bash.getCwd(), fileTracker, current);
+        const result = opts?.runScopedWrite ? await opts.runScopedWrite(apply) : await apply();
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),
           diff: result.diff,
           lspDiagnostics: result.lspDiagnostics,
+          ...(result.writeScopeVersion !== undefined ? { writeScopeVersion: result.writeScopeVersion } : {}),
         };
       },
     });
@@ -883,13 +1027,17 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     // edit_file
     tools.edit_file = dynamicTool({
       description:
-        "Replace a unique string in a file with new content. The old_string must appear exactly once. MANDATORY: call read_file on the same file_path EARLIER in this session before edit_file — the edit WILL fail with 'File must be read first' otherwise. Batch reads when editing multiple files (parallel tool calls), then issue edits. If the file changed on disk after your read, re-read it first.",
+        "Replace a unique string in a file with new content. Set dry_run=true to preview the validated diff without writing or updating the commit ledger; applying revalidates the same guards. The old_string must appear exactly once. MANDATORY: read_file must load current content in this tool run. Earlier-turn reads may require refreshing. Batch reads when editing multiple files. Re-read if the file changed on disk.",
       inputSchema: jsonSchema({
         type: "object",
         properties: {
           file_path: { type: "string", description: "Path to the file to edit" },
           old_string: { type: "string", description: "The exact string to find (must be unique)" },
           new_string: { type: "string", description: "The replacement string" },
+          dry_run: {
+            type: "boolean",
+            description: "Preview only; no file write, commit-ledger update or LSP synchronization.",
+          },
         },
         required: ["file_path", "old_string", "new_string"],
       }),
@@ -908,12 +1056,27 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               'Example: {"file_path":"src/foo.ts","old_string":"a","new_string":"b"}',
           };
         }
-        const result = await editFile(input.file_path, input.old_string, input.new_string, bash.getCwd(), fileTracker);
+        if (input.dry_run !== undefined && typeof input.dry_run !== "boolean")
+          return { success: false, output: "dry_run must be a boolean." };
+        const scope = boundWriteScope;
+        const apply = (current = scope) =>
+          editFile(
+            input.file_path,
+            input.old_string,
+            input.new_string,
+            bash.getCwd(),
+            fileTracker,
+            input.dry_run === true,
+            current,
+          );
+        const result = opts?.runScopedWrite ? await opts.runScopedWrite(apply) : await apply();
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),
           diff: result.diff,
           lspDiagnostics: result.lspDiagnostics,
+          ...(result.preview ? { preview: true } : {}),
+          ...(result.writeScopeVersion !== undefined ? { writeScopeVersion: result.writeScopeVersion } : {}),
         };
       },
     });
@@ -925,7 +1088,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         "cohesive, working chunk the moment it is finished — and after EACH step of a multi-step plan — instead of " +
         "leaving everything for one commit at the end. message: a clear conventional subject describing WHAT changed " +
         "(e.g. 'feat(auth): add token refresh'), optionally followed by a body — NOT a restatement of the request. " +
-        "Only files you wrote via write_file/edit_file are staged (secrets + CLI artifacts are excluded, and the " +
+        "Only files you wrote via write_file/edit_file in this tool run are staged (excluded sensitive paths and CLI artifacts are omitted, and the " +
         "'Coding by - Muonroi-CLI' attribution line is appended automatically). No-op if none of your written files " +
         "have uncommitted changes.",
       inputSchema: jsonSchema({
@@ -956,6 +1119,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           const { commitSpecificPaths } = await import("../orchestrator/auto-commit.js");
           const result = await commitSpecificPaths(bash.getCwd(), written, message);
           if (!result.committed) {
+            if (result.reason === "not-a-repo") {
+              return {
+                success: false,
+                committed: false,
+                skipped: true,
+                reason: result.reason,
+                output:
+                  "No commit was created: the current directory is not a Git worktree (not-a-repo). " +
+                  "Continue the task without a commit. Do not retry git_commit until the Git workspace changes; " +
+                  "do not initialize a repository unless the user asks.",
+              };
+            }
             // G1: when the LSP quality gate blocked the commit, surface the
             // per-file errors so the agent can fix them and call git_commit again.
             // Tell the agent to FIX the errors — do NOT advertise the bypass
@@ -983,10 +1158,11 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     if (opts?.runTask) {
       tools.task = dynamicTool({
         description:
-          "Delegate a FOCUSED, SHORT foreground task to a sub-agent that blocks the current turn until complete. " +
-          "Use ONLY for quick edit/execute/verify work (default max ~12 rounds). " +
-          "For long research, exploration, or anything that may take many steps (explore agent), you MUST use the 'delegate' tool instead — it runs in true background and does not block. " +
-          "Using task for long work will cause stalls and timeouts.",
+          "Launch a focused native sub-agent for edit/execute/verify work. In the interactive TUI it runs in the background by default, " +
+          "so the main session can accept new messages. The launch receipt is not the completed result; completion arrives via notifications or delegation_read. " +
+          "Do not poll or sleep while waiting. Set background=false to wait; an interim correlated worker question can return before completion when main input is required. " +
+          "Headless callers retain foreground execution by default. Use delegate for read-only research/exploration. " +
+          "Choose an explicit modelId from worker_models. Supply seven brief fields in prompt: role, scope/workspace, ground/input, question, exclusions, budget, return evidence.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -996,20 +1172,68 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             },
             description: { type: "string", description: "Short description of the task" },
             prompt: { type: "string", description: "Detailed instructions for the sub-agent" },
+            modelId: {
+              type: "string",
+              description: "Exact catalog model chosen by main from worker_models; no silent tier substitution.",
+            },
+            reasoningEffort: {
+              type: "string",
+              enum: ["low", "medium", "high", "xhigh"],
+              description: "Optional supported reasoning effort; omitted uses the worker model default.",
+            },
+            reviewOf: {
+              type: "object",
+              properties: { jobId: { type: "string" }, resultVersion: { type: "string" } },
+              required: ["jobId", "resultVersion"],
+              additionalProperties: false,
+              description:
+                "Fresh independent verification of this exact successful saved implementation result. Forces verify role, read/test-only tools and durable job.",
+            },
+            allowedMcpTools: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Exact optional MCP grants from worker_capabilities for an agent-mode worker. Not supported by explore, verify-detect or reviewOf; use task/general for MCP work. Dispatch/council/workflow tools cannot be granted.",
+            },
+            cwd: {
+              type: "string",
+              description:
+                "Execution workspace; set explicitly for work in another repository. Defaults to the current shell directory.",
+            },
+            writeScope: {
+              type: "array",
+              maxItems: 64,
+              items: { type: "string" },
+              description:
+                "Host-enforced task write paths relative to cwd: exact files or recursive directories ending in '/'. [] allows no workspace writes. Scoped workers use native file tools only; shell/MCP/LSP are not granted. Set for every bounded editing task. Omitted means legacy shared execution, not isolation.",
+            },
+            background: {
+              type: "boolean",
+              description:
+                "Run independently and return a job receipt. Defaults true in the interactive TUI, false headless. False explicitly waits for completion.",
+            },
             maxToolRounds: {
               type: "number",
               description:
                 "Optional maximum tool execution rounds. For research/explore use delegate + higher values (default 60); low values (≤20) only for task.",
             },
           },
-          required: ["agent", "description", "prompt"],
+          required: ["agent", "description", "prompt", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
         }),
         execute: async (input: any) => {
-          // Background workers accept only read-only explore. A round budget
-          // does not change an editing/verification task into research.
+          if (mode !== "agent" && input.agent !== "explore") {
+            return "worker_role_refused: ask/plan mode permits read-only explore workers only. Switch to agent mode for implementation.";
+          }
+          // Research retains the read-only delegate route. Native task workers
+          // use their own launch contract rather than widening delegate access.
           const isLongResearch = input.agent === "explore";
 
-          const executor = isLongResearch && runDelegationFn ? runDelegationFn : runTaskFn;
+          const useBackgroundResearch =
+            input.background !== false &&
+            isLongResearch &&
+            runDelegationFn &&
+            (opts?.executionRole !== "orchestrator" || isTuiActive() || input.background === true);
+          const executor = useBackgroundResearch ? runDelegationFn : runTaskFn;
 
           if (!executor) {
             return { success: false, output: "No delegation executor available." };
@@ -1019,7 +1243,18 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             agent: input.agent,
             description: input.description,
             prompt: input.prompt,
+            reviewOf: input.reviewOf,
+            modelId: input.modelId,
+            reasoningEffort: input.reasoningEffort,
+            allowedMcpTools: input.allowedMcpTools,
+            ...(input.writeScope !== undefined ? { writeScope: input.writeScope } : {}),
+            ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
             maxToolRounds: input.maxToolRounds,
+            ...(input.background !== undefined
+              ? { background: input.background }
+              : isTuiActive()
+                ? { background: true }
+                : {}),
           });
           return formatResult(result);
         },
@@ -1055,7 +1290,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       tools.delegate = dynamicTool({
         description:
           "Launch a read-only BACKGROUND research agent (usually 'explore') that runs independently in a separate process. " +
-          "Use this for ANY long-running research, codebase exploration, analysis, or tasks with high maxToolRounds. " +
+          "Main decides whether independent background research will help. Give a concrete scope, exclusions and verification; avoid duplicating an active worker's assignment unless independent review is intentional. " +
           "Main session continues working immediately. Results are delivered later via notifications or delegation_read. " +
           "This is the PREFERRED tool over 'task' for explore/research to avoid blocking and timeouts.",
         inputSchema: jsonSchema({
@@ -1064,19 +1299,32 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             agent: { type: "string", description: "Sub-agent type (usually 'explore')" },
             description: { type: "string", description: "Short description of the research task" },
             prompt: { type: "string", description: "Detailed research instructions" },
+            cwd: { type: "string", description: "Explicit worker workspace; never inferred from query text." },
+            modelId: { type: "string", description: "Exact enabled authenticated catalog model from worker_models." },
+            reasoningEffort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
+            allowedMcpTools: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Unsupported for read-only explore: nonempty grants are refused. For MCP work use task with agent=general and exact grants.",
+            },
             maxToolRounds: {
               type: "number",
               description:
                 "Optional maximum tool execution rounds (high values like 60+ expected for background research; do not use task for high values).",
             },
           },
-          required: ["agent", "description", "prompt"],
+          required: ["agent", "description", "prompt", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
         }),
         execute: async (input: any) => {
           const result = await runDelegation({
             agent: input.agent,
             description: input.description,
             prompt: input.prompt,
+            cwd: input.cwd,
+            modelId: input.modelId,
+            reasoningEffort: input.reasoningEffort,
+            allowedMcpTools: input.allowedMcpTools,
             maxToolRounds: input.maxToolRounds,
           });
           return formatResult(result);
@@ -1085,21 +1333,117 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     }
 
     // delegation_read
+    if (opts?.sendDelegation) {
+      tools.delegation_send = dynamicTool({
+        description:
+          "Send a proactive instruction to an owned running worker: omit replyTo; no prior question is required. Include writeScope to atomically narrow/widen file permissions before the next write, including when replying to the exact pending worker question messageId. Scope decisions do not undo previous writes or change workspace/model/role/tool grants/approvals. Message text arrives at the next safe model step; headless correlated replies host-wait the next question or terminal result. Blank replyTo means instruction. No polling, ACK or acceptance.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            id: { type: "string" },
+            message: { type: "string", minLength: 1, maxLength: 8000 },
+            writeScope: {
+              type: "array",
+              maxItems: 64,
+              items: { type: "string" },
+              description:
+                "Optional explicit owner scope decision for an already file-scoped worker: replaces current paths, [] revokes writes. Applies before the next write, including with a correlated reply. Does not change workspace/tools/approvals or undo earlier writes.",
+            },
+            replyTo: {
+              type: "string",
+              description:
+                "Omit for proactive instructions. Only a reply uses the exact pending worker question messageId; do not invent correlation.",
+            },
+          },
+          required: ["id", "message"],
+          additionalProperties: false,
+        }),
+        execute: async (input: any, context: any) =>
+          formatResult(
+            await opts.sendDelegation!(
+              input.id,
+              input.message,
+              input.replyTo,
+              context?.toolCallId ?? "",
+              context?.abortSignal,
+              ...(input.writeScope !== undefined ? [input.writeScope] : []),
+            ),
+          ),
+      });
+    }
     if (opts?.readDelegation) {
       const readDelegation = opts.readDelegation;
       tools.delegation_read = dynamicTool({
-        description: "Retrieve a completed background delegation result by ID.",
+        description:
+          "Retrieve a completed background delegation result by ID, with execution/delivery/acknowledgement states. Main must call delegation_ack with the returned jobId and resultVersion AFTER processing the evidence; reading alone does not ACK or verify it. Helpers forward the reference to main.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
             id: { type: "string", description: "Delegation ID to read" },
+            toolCallId: {
+              type: "string",
+              description:
+                "Owned raw toolCallId, or report:<file> from the council dossier selectors (start with report:findings.json, then participants/evidence/reproduction). Version checked and paginated; no arbitrary paths.",
+            },
+            resultVersion: {
+              type: "string",
+              description: "Expected current saved result version for tool artifact retrieval.",
+            },
+            offset: { type: "integer", minimum: 0 },
+            maxChars: { type: "integer", minimum: 256, maximum: 24000 },
           },
           required: ["id"],
         }),
         execute: async (input: any) => {
-          const result = await readDelegation(input.id);
+          const result = await readDelegation(
+            input.id,
+            input.toolCallId
+              ? {
+                  toolCallId: input.toolCallId,
+                  resultVersion: input.resultVersion,
+                  offset: input.offset,
+                  maxChars: input.maxChars,
+                }
+              : undefined,
+          );
           return formatResult(result);
         },
+      });
+    }
+
+    if (opts?.acknowledgeDelegation) {
+      const acknowledge = opts.acknowledgeDelegation;
+      tools.delegation_ack = dynamicTool({
+        description:
+          "Acknowledge a delivered background result AFTER you have processed it. Supply its jobId and resultVersion from delegation_read or its completion notice. This records handling, not a claim that verification passed. A stale version is rejected.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            jobId: { type: "string" },
+            resultVersion: { type: "string" },
+          },
+          required: ["jobId", "resultVersion"],
+        }),
+        execute: async (input: any) => formatResult(await acknowledge(input.jobId, input.resultVersion)),
+      });
+    }
+
+    if (opts?.acceptDelegation) {
+      tools.delegation_accept = dynamicTool({
+        description:
+          "Accept a saved worker deliverable after a distinct current delivered reviewOf with strict JSON pass, matching host evidence and unchanged source. Documents may use successful read_file/grep inspection (static); runnable tests establish executed review. Any failed verification_run blocks acceptance. ACK and council advice do not accept work.",
+        inputSchema: jsonSchema({
+          type: "object",
+          properties: {
+            jobId: { type: "string" },
+            resultVersion: { type: "string" },
+            reviewJobId: { type: "string" },
+            reviewResultVersion: { type: "string" },
+          },
+          required: ["jobId", "resultVersion", "reviewJobId", "reviewResultVersion"],
+          additionalProperties: false,
+        }),
+        execute: async (input: any) => formatResult(await opts.acceptDelegation!(input)),
       });
     }
 
@@ -1107,7 +1451,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     if (opts?.listDelegations) {
       const listDelegations = opts.listDelegations;
       tools.delegation_list = dynamicTool({
-        description: "List running and completed background delegations.",
+        description:
+          "List background delegations with separately labelled execution, delivery and acknowledgement states. Complete execution can still have pending delivery or ACK; it does not mean a worker is running.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {},
@@ -1137,172 +1482,240 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         },
       });
     }
+  }
 
-    // ee_query — semantic recall over the Experience Engine brain. This is the
-    // in-CLI counterpart of the MCP `ee.query` tool (src/mcp/ee-tools.ts):
-    // without it, the Agent Operating Contract + checkpoint reminders instruct
-    // the agent to "Use ee_query tool with 'tool-artifact id=XXX'" to rehydrate
-    // compaction-elided tool outputs, but the in-CLI agent had no such tool in
-    // its loop (session d95113d3be09: the anti-mù rehydrate path was a dead
-    // reference). Elided outputs are persisted to EE (message-processor.ts,
-    // source="tool-artifact"); this tool retrieves them. Degrades gracefully:
-    // returns an ee_unavailable note when EE is down/unconfigured.
-    tools.ee_query = dynamicTool({
-      description:
-        "Active recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
-        "compaction-elided tool outputs for this codebase). General queries run the recallMode pipeline " +
-        "(/api/recall — same path as exp-recall.js) and return a formatted index whose entries carry " +
-        '`[id col]` handles. Anti-mù rehydration: query="tool-artifact id=<id from a [... elided ...] stub>" ' +
-        'or "full tool result id=<id>" does an exact lookup. Also: query="recent compaction checkpoint ' +
-        'Progress DONE" to confirm finished work after a compaction. Returns hits, or an ee_unavailable note ' +
-        "when EE is down/unconfigured.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          query: { type: "string", description: "Natural-language recall query (or 'tool-artifact id=<id>')" },
-          project: { type: "string", description: "Optional project slug to scope the recall (general queries only)" },
-          collections: {
-            type: "array",
-            items: { type: "string" },
-            description: "Optional EE collections to scope an artifact lookup (e.g. ['experience-behavioral'])",
-          },
-          limit: { type: "number", description: "Max hits for an artifact lookup (1-50, default server-side)" },
-          maxChars: {
-            type: "number",
-            description: "Max chars of the recall index to return (500-20000, default 6000; general queries only)",
-          },
+  // Read-only modes also need recall and retrieval for their own compacted evidence.
+  // ee_query — semantic recall over the Experience Engine brain. This is the
+  // in-CLI counterpart of the MCP `ee.query` tool (src/mcp/ee-tools.ts):
+  // without it, the Agent Operating Contract + checkpoint reminders instruct
+  // the agent to "Use ee_query tool with 'tool-artifact id=XXX'" to rehydrate
+  // compaction-elided tool outputs, but the in-CLI agent had no such tool in
+  // its loop (session d95113d3be09: the anti-mù rehydrate path was a dead
+  // reference). Exact artifact recovery is local only; semantic remote recall
+  // cannot prove that a lesson is the requested tool result.
+  tools.ee_query = dynamicTool({
+    description:
+      "Active recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
+      "compaction-elided tool outputs for this codebase). General queries run the recallMode pipeline " +
+      "(/api/recall — same path as exp-recall.js) and return a formatted index whose entries carry " +
+      '`[id col]` handles. Anti-mù rehydration: query="tool-artifact id=<id from a [... elided ...] stub>" ' +
+      'or "full tool result id=<id>" does an exact local lookup. Worker evidence uses delegation_read with its host jobId/toolCallId/resultVersion. Semantic lessons never substitute for missing exact output. Also: query="recent compaction checkpoint ' +
+      'Progress DONE" to confirm finished work after a compaction. Returns hits, or an ee_unavailable note ' +
+      "when EE is down/unconfigured. Native scope defaults to shell cwd. For another repository pass cwd (absolute path) or project once; strict success remembers it for this task. action=scope inspects, projects lists known slugs without HTTP/auth chores, reset clears the task binding. Query text never sets scope; HTTP rejections are distinct from downtime.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        action: {
+          type: "string",
+          enum: ["recall", "scope", "projects", "reset"],
+          description: "Default recall; scope/projects/reset need no query",
         },
-        required: ["query"],
-      }),
-      execute: async (input: any) => {
-        const query = typeof input?.query === "string" ? input.query.trim() : "";
-        if (!query) {
-          return 'ERROR: ee_query requires a non-empty "query" string (e.g. {"query":"tool-artifact id=abc123"}).';
-        }
-        try {
-          if (isToolArtifactQuery(query)) {
-            // Local-first (anti-mù durability): the compactor records each elided
-            // output in-process by toolCallId. For an exact "tool-artifact id=X"
-            // lookup this is the authoritative full content for THIS session and
-            // works even when EE is down — the failure window long sessions hit.
-            const { findArtifactByQuery, findArtifactByHint, findArtifactOnDisk } = await import(
-              "../ee/artifact-cache.js"
+        query: { type: "string", description: "Natural-language recall query (or 'tool-artifact id=<id>')" },
+        project: {
+          type: "string",
+          description: "Explicit concrete project slug for general recall; remembered only after strict verification",
+        },
+        cwd: {
+          type: "string",
+          description:
+            "Absolute target repository path (or ~/path); no slug needed when the server resolves it. Does not change the shell cwd.",
+        },
+        offset: { type: "integer", minimum: 0, description: "Project directory page offset; 50 slugs per page" },
+        collections: {
+          type: "array",
+          items: { type: "string" },
+          description: "Optional EE collections to scope an artifact lookup (e.g. ['experience-behavioral'])",
+        },
+        limit: { type: "number", description: "Max hits for an artifact lookup (1-50, default server-side)" },
+        maxChars: {
+          type: "number",
+          description: "Max chars of the recall index to return (500-20000, default 6000; general queries only)",
+        },
+      },
+    }),
+    execute: async (input: any) => {
+      taskContext.alignCwd(bash.getCwd());
+      const action = input?.action ?? "recall";
+      if (action === "scope")
+        return JSON.stringify({ scope: taskContext.ee.scope(), lastRecall: taskContext.ee.lastRecall });
+      if (action === "reset") {
+        taskContext.ee.reset();
+        return taskContext.ee.receipt();
+      }
+      if (action === "projects") {
+        const { listEEProjects } = await import("../ee/search.js");
+        return JSON.stringify(await listEEProjects(input?.offset));
+      }
+      if (action !== "recall") return "ERROR: action must be recall, scope, projects or reset";
+      const query = typeof input?.query === "string" ? input.query.trim() : "";
+      if (!query) {
+        return 'ERROR: ee_query requires a non-empty "query" string (e.g. {"query":"tool-artifact id=abc123"}).';
+      }
+      try {
+        if (isToolArtifactQuery(query)) {
+          // Local-first (anti-mù durability): the compactor records each elided
+          // output in-process by toolCallId. For an exact "tool-artifact id=X"
+          // lookup this is the authoritative full content for THIS session and
+          // works even when EE is down — the failure window long sessions hit.
+          const { findArtifactByQuery, findArtifactByHint, findArtifactOnDisk } = await import(
+            "../ee/artifact-cache.js"
+          );
+          // Lived-experience telemetry: record where the rehydrate came from so
+          // a "cảm nhận trong CLI" question (and the measure-first instrumentation)
+          // sees cache vs disk vs ee vs needed-but-unavailable.
+          const { recordRehydration } = await import("../orchestrator/session-experience.js");
+          const mem = findArtifactByQuery(query);
+          const local = mem ?? (await findArtifactOnDisk(query));
+          if (local) {
+            const src = mem ? "in-session cache" : "local disk cache";
+            recordRehydration(mem ? "cache" : "disk");
+            return truncateOutput(
+              `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
             );
-            // Lived-experience telemetry: record where the rehydrate came from so
-            // a "cảm nhận trong CLI" question (and the measure-first instrumentation)
-            // sees cache vs disk vs ee vs needed-but-unavailable.
-            const { recordRehydration } = await import("../orchestrator/session-experience.js");
-            const mem = findArtifactByQuery(query);
-            const local = mem ?? (await findArtifactOnDisk(query));
-            if (local) {
-              const src = mem ? "in-session cache" : "local disk cache";
-              recordRehydration(mem ? "cache" : "disk");
-              return truncateOutput(
-                `[tool-artifact id=${local.toolCallId} tool=${local.toolName} — rehydrated from ${src}]\n${local.content}`,
-              );
-            }
-            // B (cheap-model anti-mù) — the exact id missed locally. Cheap models
-            // often pass FILE PATHS instead of the opaque toolCallId, which
-            // extractArtifactId can't parse. Try a path match against the local
-            // cache before the EE round-trip so a botched id still recovers.
-            const fuzzy = findArtifactByHint(query);
-            if (fuzzy) {
-              recordRehydration("cache");
-              return truncateOutput(
-                `[tool-artifact id=${fuzzy.toolCallId} tool=${fuzzy.toolName} — rehydrated by path match; your id was malformed (pass the exact id from the "[… elided id=X …]" stub next time)]\n${fuzzy.content}`,
-              );
-            }
-            // EE fallback (cross-session / post-restart) → raw /api/search exact lookup.
-            const { searchEE } = await import("../ee/search.js");
-            const resp = await searchEE(query, {
-              ...(Array.isArray(input?.collections) ? { collections: input.collections } : {}),
-              ...(typeof input?.limit === "number" ? { limit: input.limit } : {}),
-            });
-            if (resp === null) {
-              recordRehydration("unavailable");
-              return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured) and the artifact is not in this session's local cache. Proceed without EE recall — re-read the source directly if you need the elided content.";
-            }
-            recordRehydration("ee");
-            const points = resp.points ?? [];
-            const bestHit = points[0];
-            if (bestHit) {
-              const matchedId = query.match(/(?:id\s*=\s*|id\s*\b)([a-zA-Z0-9_:-]+)/i)?.[1] ?? "unknown";
-              return truncateOutput(
-                `[tool-artifact id=${matchedId} — rehydrated from Experience Engine]\n${bestHit.text}`,
-              );
-            }
-            return `[tool-artifact — not found in Experience Engine]`;
           }
-          // General recall → /api/recall (recallMode, [id col] index + surface).
-          const { recallEE, formatRecallForAgent } = await import("../ee/search.js");
-          const resp = await recallEE(query, {
-            ...(typeof input?.project === "string" ? { project: input.project } : {}),
+          // B (cheap-model anti-mù) — the exact id missed locally. Cheap models
+          // often pass FILE PATHS instead of the opaque toolCallId, which
+          // extractArtifactId can't parse. Try a path match against the local
+          // cache before the EE round-trip so a botched id still recovers.
+          const fuzzy = findArtifactByHint(query);
+          if (fuzzy) {
+            recordRehydration("cache");
+            return truncateOutput(
+              `[tool-artifact id=${fuzzy.toolCallId} tool=${fuzzy.toolName} — rehydrated by path match; your id was malformed (pass the exact id from the "[… elided id=X …]" stub next time)]\n${fuzzy.content}`,
+            );
+          }
+          // Semantic lesson search cannot establish an exact artifact identity.
+          recordRehydration("unavailable");
+          return "[tool-artifact — not found in local evidence] For a worker result use delegation_read({id: jobId, toolCallId, resultVersion}). A resultVersion or digest is not a toolCallId. Semantic EE lessons are not substitutes for tool results.";
+        }
+        // General recall → /api/recall (recallMode, [id col] index + surface).
+        const { recallEE, formatRecallForAgent } = await import("../ee/search.js");
+        let request: ReturnType<TaskContext["ee"]["request"]>;
+        try {
+          request = taskContext.ee.request(input ?? {});
+        } catch (error) {
+          logger.file("warn", "ee", "Invalid native recall scope", {
+            error: error instanceof Error ? error.message : String(error),
           });
-          if (resp === null) {
-            return "[ee_unavailable] Experience Engine returned no response (server down, timeout, circuit open, or unconfigured). Proceed without EE recall — re-read the source directly if you need the elided content.";
-          }
-          // Record recalled entries as pending feedback debt in the same in-process
-          // ledger the native ee_feedback builtin clears, so an in-CLI active recall
-          // accrues a verdict obligation exactly like the external MCP ee.query does
-          // (mcp/ee-tools.ts). Layer 3 surfaces this debt as a reminder on the next
-          // enriched turn; without it the in-CLI recall arm was write-only and
-          // ee_feedback.clear() was a no-op.
-          try {
-            const { sessionRecallLedger, isRecallLedgerEnabled } = await import("../ee/recall-ledger.js");
-            if (isRecallLedgerEnabled()) sessionRecallLedger.record(resp.entries, query);
-          } catch (err) {
-            console.error(`[tools:ee_query] recall-ledger record failed: ${(err as Error)?.message}`);
-          }
-          // Compact ranked `[id col]` index, not a JSON dump — the recallMode text
-          // is ~30k (wide net), so JSON.stringify wasted the budget on escaping.
-          return truncateOutput(
-            formatRecallForAgent(resp, {
-              query,
-              ...(typeof input?.maxChars === "number" ? { maxChars: input.maxChars } : {}),
-            }),
+          return `ERROR invalid_scope: ${error instanceof Error ? error.message : String(error)}`;
+        }
+        const resp = await recallEE(query, {
+          cwd: request.cwd,
+          strictProject: true,
+          sourceSession: opts?.sessionId,
+          project: request.project,
+        });
+        if (resp === null) {
+          taskContext.ee.complete(request, null, []);
+          return "[ee_unavailable] The configured EE recall request returned no usable response. See file diagnostics for transport/timeout/configuration details. Continue using repository evidence; local tool artifacts remain available.";
+        }
+        const formatted = truncateOutput(
+          formatRecallForAgent(resp, {
+            query,
+            ...(typeof input?.maxChars === "number" ? { maxChars: input.maxChars } : {}),
+          }),
+        );
+        const visibleEntries = displayedRecallEntries(resp.entries, formatted);
+        const receipt = taskContext.ee.complete(request, resp, visibleEntries);
+        // Record recalled entries as pending feedback debt in the same in-process
+        // ledger the native ee_feedback builtin clears, so an in-CLI active recall
+        // accrues a verdict obligation exactly like the external MCP ee.query does
+        // (mcp/ee-tools.ts). Layer 3 surfaces this debt as a reminder on the next
+        // enriched turn; without it the in-CLI recall arm was write-only and
+        // ee_feedback.clear() was a no-op.
+        try {
+          const { sessionRecallLedger, isRecallLedgerEnabled } = await import("../ee/recall-ledger.js");
+          if (isRecallLedgerEnabled()) sessionRecallLedger.record(visibleEntries, query);
+        } catch (err) {
+          console.error(`[tools:ee_query] recall-ledger record failed: ${(err as Error)?.message}`);
+        }
+        // Compact ranked `[id col]` index, not a JSON dump — the recallMode text
+        // is ~30k (wide net), so JSON.stringify wasted the budget on escaping.
+        return receipt ? `${receipt}\n${formatted}` : formatted;
+      } catch (err) {
+        console.error(`[tools:ee_query] EE recall failed: ${(err as Error)?.message}`, {
+          query: query.slice(0, 120),
+          stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+        });
+        return `[ee_unavailable] EE recall threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
+      }
+    },
+  });
+
+  tools.retrieve_tool_result = dynamicTool({
+    description:
+      "Retrieve the full output of a previous tool call by its tool_call_id. " +
+      "Searches exact local cache, disk cache and database history in the current session family; never substitutes semantic EE lessons. " +
+      "If the ID was lost or shortened after compaction, use view=index without tool_call_id to discover bounded local references; query is a literal tool-name, ID or input-path filter. Page with chunk_index. Copy the complete returned ID for the next exact read; metadata candidates are not evidence contents. A miss is not proof of cache loss, and EE is not required. " +
+      "For another worker use delegation_read({id: jobId, toolCallId, resultVersion}) from its host manifest, not its filesystem path. A resultVersion/digest is not a tool_call_id. Set view=arguments to read captured original arguments from the current session family only; this never executes them. Arguments default to 4000-character pages. Optional max_chars and chunk_index allow paginated retrieval.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        tool_call_id: {
+          type: "string",
+          description: "The complete, unshortened tool call ID. Required for result/arguments; omit for view=index.",
+        },
+        view: {
+          type: "string",
+          enum: ["result", "arguments", "index"],
+          description:
+            "Default result; arguments reads captured original parameters; index discovers local evidence references in the current session family without reading their content.",
+        },
+        query: {
+          type: "string",
+          maxLength: 256,
+          description:
+            "Optional literal tool-name, ID or captured input-path filter for view=index. Empty lists recent references.",
+        },
+        max_chars: {
+          type: "number",
+          description: "Optional character limit for the returned chunk (useful for very large outputs).",
+        },
+        chunk_index: {
+          type: "number",
+          description: "Optional chunk index if splitting the output by max_chars (0-based, default 0).",
+        },
+      },
+      anyOf: [{ required: ["tool_call_id"] }, { properties: { view: { const: "index" } }, required: ["view"] }],
+    }),
+    execute: async (input: any) => {
+      if (input.view === "index") {
+        if (input.chunk_index !== undefined && (!Number.isSafeInteger(input.chunk_index) || input.chunk_index < 0))
+          return "ERROR: chunk_index must be a non-negative integer.";
+        try {
+          return JSON.stringify(
+            await listToolEvidence(opts?.sessionId, { query: input.query, chunkIndex: input.chunk_index }),
           );
         } catch (err) {
-          console.error(`[tools:ee_query] EE recall failed: ${(err as Error)?.message}`, {
-            query: query.slice(0, 120),
-            stack: (err as Error)?.stack?.split("\n").slice(0, 3),
+          logger.file("warn", "storage", "Local evidence index unavailable", {
+            error: err instanceof Error ? err.message : String(err),
           });
-          return `[ee_unavailable] EE recall threw: ${(err as Error)?.message ?? String(err)}. Proceed without EE recall.`;
+          return `ERROR: Local evidence index unavailable: ${err instanceof Error ? err.message : String(err)}. This does not establish that evidence was deleted.`;
         }
-      },
-    });
+      }
+      const toolCallId = typeof input.tool_call_id === "string" ? input.tool_call_id.trim() : "";
+      if (!toolCallId) {
+        return "ERROR: tool_call_id is required.";
+      }
+      const view = input.view ?? "result";
+      if (view !== "result" && view !== "arguments") return "ERROR: view must be result or arguments.";
+      const requestedMax = typeof input.max_chars === "number" ? input.max_chars : undefined;
+      if (
+        view === "arguments" &&
+        requestedMax !== undefined &&
+        (!Number.isSafeInteger(requestedMax) || requestedMax <= 0)
+      )
+        return "ERROR: max_chars must be a positive integer.";
+      const maxChars = view === "arguments" ? Math.min(requestedMax ?? 4000, MAX_TOOL_OUTPUT_CHARS) : requestedMax;
+      const chunkIndex = typeof input.chunk_index === "number" ? input.chunk_index : 0;
+      if (view === "arguments" && (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0))
+        return "ERROR: chunk_index must be a non-negative integer.";
 
-    tools.retrieve_tool_result = dynamicTool({
-      description:
-        "Retrieve the full output of a previous tool call by its tool_call_id. " +
-        "Searches local cache, disk cache, database history (including parent sessions), and remote Experience Engine. " +
-        "Use this to rehydrate elided tool outputs. Optional max_chars and chunk_index allow paginated retrieval.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          tool_call_id: { type: "string", description: "The unique ID of the tool call (e.g. 'call_123')." },
-          max_chars: {
-            type: "number",
-            description: "Optional character limit for the returned chunk (useful for very large outputs).",
-          },
-          chunk_index: {
-            type: "number",
-            description: "Optional chunk index if splitting the output by max_chars (0-based, default 0).",
-          },
-        },
-        required: ["tool_call_id"],
-      }),
-      execute: async (input: any) => {
-        const toolCallId = typeof input.tool_call_id === "string" ? input.tool_call_id.trim() : "";
-        if (!toolCallId) {
-          return "ERROR: tool_call_id is required.";
-        }
-        const maxChars = typeof input.max_chars === "number" ? input.max_chars : undefined;
-        const chunkIndex = typeof input.chunk_index === "number" ? input.chunk_index : 0;
+      let content: string | null = null;
+      let source = "";
 
-        let content: string | null = null;
-        let source = "";
-
-        // Tier 1: LRU cache
+      // Tier 1: LRU cache
+      if (view === "result") {
         try {
           const { getArtifact } = await import("../ee/artifact-cache.js");
           const tier1 = getArtifact(toolCallId);
@@ -1313,205 +1726,266 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         } catch (err) {
           console.error(`[tools:retrieve_tool_result] Tier 1 LRU check failed: ${(err as Error).message}`);
         }
+      }
 
-        // Tier 2: Disk cache
-        if (!content) {
-          try {
-            const { findArtifactOnDisk } = await import("../ee/artifact-cache.js");
-            const tier2 = await findArtifactOnDisk(`id=${toolCallId}`);
-            if (tier2) {
-              content = tier2.content;
-              source = "Tier 2 disk cache";
-            }
-          } catch (err) {
-            console.error(`[tools:retrieve_tool_result] Tier 2 disk check failed: ${(err as Error).message}`);
+      // Tier 2: Disk cache
+      if (view === "result" && !content) {
+        try {
+          const { findArtifactOnDisk } = await import("../ee/artifact-cache.js");
+          const tier2 = await findArtifactOnDisk(`id=${toolCallId}`);
+          if (tier2) {
+            content = tier2.content;
+            source = "Tier 2 disk cache";
           }
+        } catch (err) {
+          console.error(`[tools:retrieve_tool_result] Tier 2 disk check failed: ${(err as Error).message}`);
         }
+      }
 
-        // Tier 3: SQLite database
-        if (!content && opts?.sessionId) {
-          try {
-            const { getSessionChain } = await import("../storage/index.js");
-            const { getDatabase } = await import("../storage/db.js");
-            const chain = getSessionChain(opts.sessionId);
-            const db = getDatabase();
-            for (let i = chain.length - 1; i >= 0; i--) {
-              const row = db
-                .prepare(`
+      // Tier 3: SQLite database
+      if (!content && opts?.sessionId) {
+        try {
+          const { getSessionChain } = await import("../storage/index.js");
+          const { getDatabase } = await import("../storage/db.js");
+          const chain = getSessionChain(opts.sessionId);
+          const db = getDatabase();
+          for (let i = chain.length - 1; i >= 0; i--) {
+            const row = db
+              .prepare(
+                view === "arguments"
+                  ? `
+                SELECT args_json AS output_json FROM tool_calls
+                WHERE tool_call_id = ? AND session_id = ? LIMIT 1
+              `
+                  : `
                 SELECT tr.output_json
                 FROM tool_results tr
                 JOIN tool_calls tc ON tc.id = tr.tool_call_row_id
                 WHERE tc.tool_call_id = ? AND tc.session_id = ?
                 LIMIT 1
-              `)
-                .get(toolCallId, chain[i]) as { output_json: string } | undefined;
+              `,
+              )
+              .get(toolCallId, chain[i]) as { output_json: string } | undefined;
 
-              if (row?.output_json) {
-                const parsed = JSON.parse(row.output_json);
-                if (parsed && typeof parsed === "object") {
-                  if ("output" in parsed && typeof parsed.output === "string") {
-                    content = parsed.output;
-                  } else if ("error" in parsed && typeof parsed.error === "string") {
-                    content = `ERROR: ${parsed.error}`;
-                  } else {
-                    content = JSON.stringify(parsed);
-                  }
+            if (row?.output_json) {
+              const parsed = JSON.parse(row.output_json);
+              if (parsed && typeof parsed === "object") {
+                if (view === "arguments") {
+                  if (carriesElidedArgsMarker(parsed))
+                    return "ERROR: original arguments were not retained; the stored evidence contains only an elision marker. Do not replay it.";
+                  content = JSON.stringify(parsed);
+                } else if ("output" in parsed && typeof parsed.output === "string") {
+                  content = parsed.output;
+                } else if ("error" in parsed && typeof parsed.error === "string") {
+                  content = `ERROR: ${parsed.error}`;
                 } else {
-                  content = String(parsed);
+                  content = JSON.stringify(parsed);
                 }
-                source = `Tier 3 SQLite database (session ${chain[i]})`;
-                break;
+              } else {
+                content = String(parsed);
               }
+              source = `Tier 3 SQLite database (session ${chain[i]})`;
+              break;
             }
-          } catch (err) {
-            console.error(`[tools:retrieve_tool_result] Tier 3 DB check failed: ${(err as Error).message}`);
           }
+        } catch (err) {
+          logger.file("warn", "storage", "Tool evidence lookup failed", { toolCallId, view, error: err });
         }
+      }
 
-        // Tier 4: Remote EE (behavioral collection only)
-        if (!content) {
+      if (content === null) {
+        if (opts?.sessionId) {
           try {
-            const { searchEE } = await import("../ee/search.js");
-            const resp = await searchEE(`tool-artifact id=${toolCallId}`, {
-              collections: ["experience-behavioral"],
-              limit: 1,
-            });
-            const bestHit = resp?.points?.[0];
-            if (bestHit?.text) {
-              content = bestHit.text;
-              source = "Tier 4 remote EE (behavioral collection)";
-            }
+            const candidates = await listToolEvidence(opts.sessionId, { prefix: toolCallId });
+            const matches = candidates.entries.filter(
+              (e) =>
+                e.tool_call_id !== toolCallId && (view === "arguments" ? e.arguments_available : e.result_available),
+            );
+            if (matches.length)
+              return `ERROR: Exact tool result/arguments not found for tool_call_id: ${toolCallId}. Matching local references still exist; do not infer cache loss. Copy a complete ID and retry the exact read; no candidate content was retrieved.\n${JSON.stringify({ ...candidates, entries: matches.map((e) => ({ ...e, retrieve: { ...e.retrieve, ...(view === "arguments" ? { view } : {}) } })) })}`;
           } catch (err) {
-            console.error(`[tools:retrieve_tool_result] Tier 4 EE check failed: ${(err as Error).message}`);
+            logger.file("warn", "storage", "Missing tool evidence reference discovery failed", {
+              error: err instanceof Error ? err.message : String(err),
+            });
           }
         }
+        if (view === "arguments")
+          return `ERROR: Original arguments not found for tool_call_id: ${toolCallId} in the current session family. No cache or remote fallback was used.`;
+        return `ERROR: Tool result not found for tool_call_id: ${toolCallId} in local evidence. Discover complete local IDs with retrieve_tool_result({view:"index",query:"relevant path or tool name"}) before inferring lost evidence. For worker artifacts use delegation_read({id: jobId, toolCallId, resultVersion}) with the exact host manifest IDs. A resultVersion/digest is not a toolCallId. No semantic EE fallback was used.`;
+      }
 
-        if (content === null) {
-          return `ERROR: Tool result not found for tool_call_id: ${toolCallId} in any tier.`;
+      const totalLength = content.length;
+      if (maxChars !== undefined && maxChars > 0) {
+        const totalChunks = Math.ceil(totalLength / maxChars);
+        const start = chunkIndex * maxChars;
+        const end = Math.min(start + maxChars, totalLength);
+        if (start >= totalLength) {
+          return `ERROR: chunk_index ${chunkIndex} is out of bounds. Total chunks available: ${totalChunks} (max_chars: ${maxChars}, total length: ${totalLength}).`;
         }
-
-        const totalLength = content.length;
-        if (maxChars !== undefined && maxChars > 0) {
-          const totalChunks = Math.ceil(totalLength / maxChars);
-          const start = chunkIndex * maxChars;
-          const end = Math.min(start + maxChars, totalLength);
-          if (start >= totalLength) {
-            return `ERROR: chunk_index ${chunkIndex} is out of bounds. Total chunks available: ${totalChunks} (max_chars: ${maxChars}, total length: ${totalLength}).`;
-          }
-          const chunk = content.slice(start, end);
-          return JSON.stringify(
-            {
-              tool_call_id: toolCallId,
-              source,
-              chunk_index: chunkIndex,
-              total_chunks: totalChunks,
-              chunk_length: chunk.length,
-              total_length: totalLength,
-              content: chunk,
-            },
-            null,
-            2,
-          );
-        }
-
+        const chunk = content.slice(start, end);
         return JSON.stringify(
           {
             tool_call_id: toolCallId,
+            ...(view === "arguments" ? { view } : {}),
             source,
+            chunk_index: chunkIndex,
+            total_chunks: totalChunks,
+            chunk_length: chunk.length,
             total_length: totalLength,
-            content,
+            content: chunk,
           },
           null,
           2,
         );
-      },
-    });
+      }
 
-    tools.search_session_history = dynamicTool({
-      description:
-        "Search the full message history across all sessions using an FTS5 MATCH expression. " +
-        "Useful to locate past questions, answers, and context across the session lineage.",
-      inputSchema: jsonSchema({
-        type: "object",
-        properties: {
-          query: {
-            type: "string",
-            description: "FTS5 MATCH expression query (e.g. 'compaction AND error' or 'content:Vitest').",
-          },
+      return JSON.stringify(
+        {
+          tool_call_id: toolCallId,
+          source,
+          total_length: totalLength,
+          content,
         },
-        required: ["query"],
-      }),
-      execute: async (input: any) => {
-        const query = typeof input.query === "string" ? input.query.trim() : "";
-        if (!query) {
-          return "ERROR: query MATCH expression is required.";
-        }
-        try {
-          const { getDatabase } = await import("../storage/db.js");
-          const db = getDatabase();
-          // Wrap FTS search query execution in try-catch to prevent malformed FTS syntax crashes (fixing GAP-03)
-          const rows = db
-            .prepare(`
+        null,
+        2,
+      );
+    },
+  });
+
+  tools.search_session_history = dynamicTool({
+    description:
+      'Search the full message history across all sessions. Default query_mode=fts accepts SQLite FTS5 MATCH grammar: term* is a prefix search; bare * is invalid and never means browse all. Use query_mode=literal for a quoted phrase containing punctuation such as auto-edit; literal punctuation is not a match-all. In FTS expressions quote punctuated terms, e.g. "auto-edit" OR approval. ' +
+      "Returns bounded excerpts with session/sequence references, not full transcripts. " +
+      "Narrow the query for omitted field content; use next_offset to page through remaining matches.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "FTS5 MATCH expression query (e.g. 'compaction AND error' or 'content:Vitest').",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description: "Match offset, starting at 0. Use next_offset for the next page.",
+        },
+        query_mode: {
+          type: "string",
+          enum: ["fts", "literal"],
+          description:
+            "fts (default) preserves MATCH operators; literal treats the entire query as a quoted phrase, not an operator expression.",
+        },
+      },
+      required: ["query"],
+    }),
+    execute: async (input: any) => {
+      const query = typeof input.query === "string" ? input.query.trim() : "";
+      if (!query) {
+        return "ERROR: query MATCH expression is required.";
+      }
+      const offset = input.offset ?? 0;
+      if (!Number.isSafeInteger(offset) || offset < 0) return "ERROR: offset must be a non-negative integer.";
+      const queryMode = input.query_mode ?? "fts";
+      if (queryMode !== "fts" && queryMode !== "literal") return "ERROR: query_mode must be fts or literal.";
+      if (queryMode === "fts" && /^\*+$/.test(query))
+        return "ERROR unsupported_fts_wildcard: bare * is not a valid SQLite FTS5 query and does not mean browse all sessions. Supply a word or term* prefix; use query_mode=literal for text containing punctuation. No search was executed.";
+      const matchQuery = queryMode === "literal" ? `"${query.replace(/"/g, '""')}"` : query;
+      try {
+        const { getDatabase } = await import("../storage/db.js");
+        const db = getDatabase();
+        // Wrap FTS search query execution in try-catch to prevent malformed FTS syntax crashes (fixing GAP-03)
+        const rows = db
+          .prepare(`
             SELECT session_id, seq, role, tool_name, content, tool_args, tool_output
             FROM session_history_fts
             WHERE session_history_fts MATCH ?
             ORDER BY rank
-            LIMIT 50
+            LIMIT 50 OFFSET ?
           `)
-            .all(query) as Array<{
-            session_id: string;
-            seq: number;
-            role: string;
-            tool_name: string | null;
-            content: string | null;
-            tool_args: string | null;
-            tool_output: string | null;
-          }>;
+          .all(matchQuery, offset) as Array<{
+          session_id: string;
+          seq: number;
+          role: string;
+          tool_name: string | null;
+          content: string | null;
+          tool_args: string | null;
+          tool_output: string | null;
+        }>;
 
-          if (rows.length === 0) {
-            return `No session history matched the query: "${query}"`;
-          }
+        if (rows.length === 0) {
+          return `No session history matched the query: "${query.slice(0, 512)}${query.length > 512 ? "… [query truncated]" : ""}"`;
+        }
 
-          const results = rows.map((row) => ({
+        const results = rows.map((row) => {
+          const truncatedFields: Record<string, number> = {};
+          const excerpt = (field: string, value: string | null) => {
+            if (value == null) return undefined;
+            const fieldLimit = Math.min(512, Math.floor(MAX_TOOL_OUTPUT_CHARS / 64));
+            if (value.length <= fieldLimit) return value;
+            truncatedFields[field] = value.length;
+            const head = Math.floor(fieldLimit * 0.75);
+            return `${value.slice(0, head)}\n[excerpt; ${value.length} total characters]\n${value.slice(-(fieldLimit - head))}`;
+          };
+          return {
             session_id: row.session_id,
             seq: row.seq,
             role: row.role,
-            tool_name: row.tool_name ?? undefined,
-            content: row.content ?? undefined,
-            tool_args: row.tool_args ?? undefined,
-            tool_output: row.tool_output ?? undefined,
-          }));
-
-          return JSON.stringify(
+            tool_name: excerpt("tool_name", row.tool_name),
+            content: excerpt("content", row.content),
+            tool_args: excerpt("tool_args", row.tool_args),
+            tool_output: excerpt("tool_output", row.tool_output),
+            truncated_fields: truncatedFields,
+          };
+        });
+        const serialize = () =>
+          JSON.stringify(
             {
-              query,
-              match_count: results.length,
+              query: query.slice(0, 512),
+              query_truncated: query.length > 512,
+              query_mode: queryMode,
+              match_count: rows.length,
+              returned_count: results.length,
+              truncated:
+                results.length < rows.length || results.some((r) => Object.keys(r.truncated_fields).length > 0),
+              next_offset: results.length < rows.length || rows.length === 50 ? offset + results.length : null,
               results,
             },
             null,
             2,
           );
-        } catch (err) {
-          return `ERROR: FTS MATCH query failed. The FTS syntax might be malformed: ${(err as Error).message}`;
+        let output = serialize();
+        while (output.length > MAX_TOOL_OUTPUT_CHARS && results.length > 0) {
+          results.pop();
+          output = serialize();
         }
-      },
-    });
+        return output;
+      } catch (err) {
+        logger.file("warn", "storage", "Session history search failed", { error: err });
+        return `ERROR: FTS MATCH query failed: ${(err as Error).message}. Quote punctuated terms (e.g. "auto-edit") in FTS expressions, or use query_mode="literal" for a literal phrase.`;
+      }
+    },
+  });
 
+  if (mode === "agent" || opts?.executionRole === "orchestrator") {
     // Native muonroi-tools builtins — ee_health, ee_feedback, usage_forensics,
     // lsp_query, setup_guide, selfverify_*. These run IN-PROCESS; the CLI no
     // longer self-spawns itself as an MCP server to expose them to its own inner
     // agent (that self-spawn cold-started 2-3.5s and overran the build deadline,
     // and a seed-time bug once persisted a crashing vitest-worker command). The
     // muonroi-tools MCP server stays only for EXTERNAL agents. See native-tools.ts.
-    registerNativeMuonroiTools(tools, { cwd: bash.getCwd() });
+    registerNativeMuonroiTools(tools, { cwd: bash.getCwd(), getCwd: () => bash.getCwd(), eeContext: taskContext.ee });
 
-    registerGsdWorkflowTools(tools, {
+    registerFlowWorkflowTools(tools, {
       cwd: bash.getCwd(),
       sessionModelId: opts?.modelId ?? "unknown",
       sessionId: opts?.sessionId,
+      planReviewBudget: opts?.planReviewBudget,
       depth: opts?.depthTier ?? "standard",
+      executionRole: opts?.executionRole,
       runTask: opts?.runTask,
       runDebate: opts?.runDebate,
+      startPlanReview: opts?.startPlanReview,
+      readPlanReview: opts?.readPlanReview,
     });
   }
 
@@ -1724,6 +2198,51 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
   // ── Agent introspection tools: help the inner agent discover capabilities ──
   // These are always added last (after all filtering) so list_tools reflects reality.
+  if (opts?.executionRole === "orchestrator") {
+    tools.worker_models = dynamicTool({
+      description:
+        "List enabled authenticated tool/text worker models, provider, tier, description, price and supported effort. Main chooses; no automatic router selection.",
+      inputSchema: jsonSchema({ type: "object", properties: { offset: { type: "integer", minimum: 0 } } }),
+      execute: async (input: any) => {
+        const models = await workerModelInventory(opts.credentialedProvider);
+        const offset = Number.isSafeInteger(input?.offset) && input.offset > 0 ? input.offset : 0;
+        return {
+          models: models.slice(offset, offset + 30),
+          total: models.length,
+          ...(offset + 30 < models.length ? { nextOffset: offset + 30 } : {}),
+        };
+      },
+    });
+    tools.worker_capabilities = dynamicTool({
+      description:
+        "List exact connected MCP capability names and descriptions main may explicitly grant to a worker. This does not execute them or grant orchestration tools.",
+      inputSchema: jsonSchema({ type: "object", properties: { offset: { type: "integer", minimum: 0 } } }),
+      execute: async (input: any) => {
+        const { acquireMcpTools } = await import("../mcp/client-pool.js");
+        const bundle = await acquireMcpTools(loadMcpServers());
+        try {
+          const capabilities = filterExecutionTools(bundle.tools, {}, "worker", Object.keys(bundle.tools));
+          const entries = Object.entries(capabilities);
+          const offset = Number.isSafeInteger(input?.offset) && input.offset > 0 ? input.offset : 0;
+          return {
+            isolation: WORKER_ISOLATION_CAPABILITIES,
+            capabilities: entries
+              .slice(offset, offset + 30)
+              .map(([name, value]) => ({ name, description: value.description?.slice(0, 500) })),
+            total: entries.length,
+            ...(offset + 30 < entries.length ? { nextOffset: offset + 30 } : {}),
+            errors: bundle.errors,
+            needsKey: bundle.needsKey,
+            readiness:
+              "Connected inventory only; execution readiness is established by actual tool calls. Use integration_status for recent observed checks.",
+            note: "Exact grants permit these capabilities for a general worker. Read-only explore/review jobs do not receive arbitrary MCP tools.",
+          };
+        } finally {
+          await bundle.close();
+        }
+      },
+    });
+  }
 
   tools.list_mcp_servers = dynamicTool({
     description:
@@ -1787,7 +2306,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const cat = (input?.category as string) || "all";
       const grouped: { native: string[]; mcp: string[] } = { native: [], mcp: [] };
 
-      const visible = liveToolSet ?? tools;
+      const visible =
+        opts?.getToolSet?.() ?? (boundWriteScope ? filterScopedWorkerTools(tools, tools) : (liveToolSet ?? tools));
       for (const [name, tool] of Object.entries(visible)) {
         const t = tool as { description?: string };
         const shortDesc = (t.description || "").split("\n")[0].slice(0, 140);
@@ -1804,7 +2324,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
 
       return JSON.stringify(
         {
-          total: Object.keys(liveToolSet ?? tools).length,
+          total: Object.keys(visible).length,
           native_count: grouped.native.length,
           mcp_count: grouped.mcp.length,
           ...grouped,
@@ -1837,7 +2357,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const name = typeof input?.name === "string" ? input.name.trim() : "";
       if (!name) return "ERROR: name is required";
 
-      const tool = ((liveToolSet ?? tools) as any)[name];
+      const tool = (
+        (opts?.getToolSet?.() ??
+          (boundWriteScope ? filterScopedWorkerTools(tools, tools) : (liveToolSet ?? tools))) as any
+      )[name];
       if (!tool) {
         return JSON.stringify(
           {
@@ -1887,5 +2410,5 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // See src/tools/arg-guard.ts for the measured failure it exists for.
   installArgGuards(tools, gitSafetyKey);
 
-  return tools;
+  return opts?.writeScope !== undefined ? filterScopedWorkerTools(tools, tools) : tools;
 }

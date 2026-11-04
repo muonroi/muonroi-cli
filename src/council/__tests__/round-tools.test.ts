@@ -51,6 +51,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
@@ -90,6 +91,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
@@ -151,6 +153,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
@@ -221,6 +224,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
@@ -250,7 +254,14 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
     const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
 
-    const result = await llm.debate("gpt-4o", "system", "prompt");
+    const observed: unknown[] = [];
+    const evidenceLLM = createCouncilLLM({} as any, "agent" as any, undefined, stats, (event) => {
+      observed.push(event);
+    });
+    const result = await evidenceLLM.debate("gpt-4o", "system", "prompt");
+    expect(observed).toEqual([
+      { toolCallId: "1", toolName: "bash", input: {}, output: "ls output", modelId: "gpt-4o", phase: "debate" },
+    ]);
 
     expect(typeof result).toBe("object");
     expect(result.text).toBe("debate answer");
@@ -273,6 +284,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),
@@ -318,6 +330,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
     vi.doMock("../../providers/runtime.js", () => ({
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
+      hasProviderFactory: vi.fn().mockReturnValue(true),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
       resolveModelRuntime: vi.fn().mockReturnValue({ model: {}, providerOptions: undefined }),
       shouldDropParam: vi.fn().mockReturnValue(false),

@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../utils/logger.js";
+
+afterEach(() => vi.restoreAllMocks());
 
 // ─── Hoisted mocks (must be at module top-level for vi.mock hoisting) ──────────
 
@@ -154,10 +157,14 @@ describe("bridge — missing core (BRIDGE-02)", () => {
     expect(result).toBeNull();
   });
 
-  it("Test 11: console.warn called with 'experience-core.js not found' message when file missing", async () => {
+  it("Test 11: missing-core fallback is logged once to file without a terminal warning", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fileSpy = vi.spyOn(logger, "file").mockImplementation(() => {});
     await classifyViaBrain("prompt");
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("experience-core.js not found"));
+    await searchCollection("col", [0.1], 3);
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(fileSpy).toHaveBeenCalledTimes(1);
+    expect(fileSpy).toHaveBeenCalledWith("info", "ee", expect.stringContaining("experience-core.js not found"));
     warnSpy.mockRestore();
   });
 });
@@ -204,10 +211,17 @@ describe("bridge — require throws (BRIDGE-02)", () => {
     expect(result).toBeNull();
   });
 
-  it("Test 17: console.warn called with 'failed to load' message when require throws", async () => {
+  it("Test 17: failed core load retains the error in file without a terminal warning", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const fileSpy = vi.spyOn(logger, "file").mockImplementation(() => {});
     await classifyViaBrain("prompt");
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("failed to load"));
+    expect(warnSpy).not.toHaveBeenCalled();
+    expect(fileSpy).toHaveBeenCalledWith(
+      "warn",
+      "ee",
+      expect.stringContaining("failed to load"),
+      expect.objectContaining({ error: expect.any(Error) }),
+    );
     warnSpy.mockRestore();
   });
 });

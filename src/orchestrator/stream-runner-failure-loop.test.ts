@@ -69,11 +69,15 @@ function prepare(opts: { rounds: number; toolExecute: (input: { file_path: strin
     stream: Array.from({ length: opts.rounds }, (_, i) => failingReadRound(i)),
   }).model;
 
+  // The stream's task context tracks its execution cwd even when setup is
+  // bypassed. This fake supplies that real BashTool contract without tools.
+  const childBash = { getCwd: () => process.cwd() } satisfies Pick<PreparedSubAgentCall["childBash"], "getCwd">;
+
   const prepared = {
     request: REQUEST,
     agentKey: "general",
     childMode: "yolo",
-    childBash: {},
+    childBash,
     childRuntime: {
       model,
       modelId: "mock-model",

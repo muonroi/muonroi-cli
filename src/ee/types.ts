@@ -28,8 +28,8 @@ export interface InterceptIntentContext {
   assistantReasoningExcerpt?: string;
   /** Principle UUIDs already surfaced earlier in the same session. */
   priorWarningIdsInSession?: string[];
-  /** Active GSD phase identifier when running under GSD workflow. */
-  gsdPhase?: string;
+  /** Active FLOW phase identifier when running under FLOW workflow. */
+  flowPhase?: string;
   /** First ~200 chars of the user prompt that started this turn. */
   userGoalExcerpt?: string;
 }
@@ -401,6 +401,8 @@ export interface EERecallEntry {
 }
 
 export interface EERecallResponse {
+  /** Proof supplied by a server that enforces project filtering. Absent on legacy advisory recall. */
+  scope?: { strict: boolean; project?: string; cwd?: string; repository?: { root: string; project: string } };
   /** Formatted recall index carrying `[id col]` handles (null when nothing matched). */
   text: string | null;
   entries: EERecallEntry[];
@@ -408,8 +410,18 @@ export interface EERecallResponse {
   query?: string;
 }
 
+export interface EERecallHttpFailure {
+  status: number;
+  projectRequired: boolean;
+}
+
 export interface EERecallOptions {
-  /** Scope hint → body.project_slug (advisory under recallMode). */
+  /** Authenticated caller's filesystem-derived repository identity; not inferred from query text. */
+  repository?: { root: string; project: string };
+  /** Request-local diagnostics; recall still returns null on failure. Never sent over HTTP. */
+  onHttpError?: (failure: EERecallHttpFailure) => void;
+  strictProject?: boolean;
+  /** Explicit project → body.project_slug; strict recall requires matching proof. */
   project?: string;
   /** Working dir → body.cwd (server derives project_slug + attribution). */
   cwd?: string;

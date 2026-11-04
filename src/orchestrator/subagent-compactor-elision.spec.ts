@@ -153,10 +153,19 @@ describe("subagent-compactor: F10 args elision never inflates", () => {
   });
 
   it("still elides — and materially shrinks — genuinely large arguments", () => {
-    const after = toolCallInputs(compactSubAgentMessages(historyWithArgSizes([4395, 12704]), COMPACT_ALL));
+    const history = historyWithArgSizes([4395, 12704]);
+    const originalSizes = new Map(toolCallInputs(history).map((c) => [c.id, inputChars(c.input)]));
+    const after = toolCallInputs(compactSubAgentMessages(history, COMPACT_ALL));
     const elided = after.filter((c) => isCompactorElisionMarker(c.input));
     expect(elided).toHaveLength(2);
-    for (const c of elided) expect(inputChars(c.input)).toBeLessThan(200);
+    for (const c of elided) {
+      // Captured-argument recovery adds the exact call reference to the old
+      // marker. Require at least 90% reduction of actual original bytes.
+      expect(inputChars(c.input)).toBeLessThanOrEqual(originalSizes.get(c.id)! * 0.1);
+      const marker = Object.values(c.input as Record<string, unknown>).join(" ");
+      expect(marker).toContain(`retrieve_tool_result(${JSON.stringify({ tool_call_id: c.id, view: "arguments" })})`);
+      expect(marker).toContain("never execute this marker");
+    }
   });
 
   it("an elided input is still a wire-valid JSON object (StepFun `arguments | fromjson`)", () => {

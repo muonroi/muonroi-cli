@@ -40,7 +40,7 @@ export interface BaseHookInput {
 export interface PreToolIntentContext {
   assistantReasoningExcerpt?: string;
   priorWarningIdsInSession?: string[];
-  gsdPhase?: string;
+  flowPhase?: string;
   userGoalExcerpt?: string;
 }
 

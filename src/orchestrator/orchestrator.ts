@@ -15,12 +15,6 @@ import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { runAnchoredStateRoot } from "../flow/run-root.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
-import {
-  isContextRailEnabled,
-  isIdealConversationHandoffEnabled,
-  isIdealNlEntryEnabled,
-  isIdealToolEntryEnabled,
-} from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -40,10 +34,12 @@ import { getProviderCapabilities, minimalReasoningProviderOptions } from "../pro
 import { apiBaseFor, isProviderDefaultApiBase } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
+  authModeForModel,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
   effectiveRateLimits,
+  hasProviderFactory,
   requireRuntimeProvider,
   resolveModelRuntime,
   resolveTemperatureParam,
@@ -60,6 +56,7 @@ import {
   getNextMessageSequence,
   getSessionChainInfos,
   getSessionTotalTokens,
+  loadRawTranscript,
   loadSessionChainTranscriptState,
   logInteraction,
   markLatestPendingMessageErrored,
@@ -67,7 +64,7 @@ import {
   persistApprovedPlan,
   recordUsageEvent,
   SessionStore,
-  sessionUsedGsdWorkflow,
+  sessionUsedFlowWorkflow,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -98,7 +95,7 @@ import {
   providerCapacityNote,
 } from "../utils/background-jobs.js";
 import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
-import { logger } from "../utils/logger.js";
+import { isTuiActive, logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
@@ -132,6 +129,13 @@ import {
   shouldTrustDeterministicRecipe,
 } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
+import {
+  isContextRailEnabled,
+  isIdealConversationHandoffEnabled,
+  isIdealNlEntryEnabled,
+  isIdealToolEntryEnabled,
+} from "../workflow/flags.js";
+import { createPlanReviewBudget, type PlanReviewBudget } from "../workflow/review-budget.js";
 import {
   type AgentOptions,
   type BatchChatCompletionResponse,
@@ -202,10 +206,18 @@ import {
 } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
+import {
+  type ExecutionRole,
+  filterExecutionTools,
+  orchestrationEffort,
+  selectOrchestratorModel,
+  validateWorkerSelection,
+} from "./orchestration-policy.js";
 import { estimateProjectSizeAt, type ProjectSize } from "./project-size.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
+import { RequestHistory } from "./request-history.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
@@ -213,6 +225,11 @@ import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { noteElidedForCap, type SubAgentCapState } from "./sub-agent-cap.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { shouldResumeSubSession } from "./sub-session-resume.js";
+import {
+  refreshSubSessionToolContract,
+  SUB_SESSION_COMPLETION_RULE,
+  SUB_SESSION_TOOL_BOUNDARY,
+} from "./sub-session-tool-contract.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
@@ -228,8 +245,13 @@ import { hasTurnProgressSince } from "./turn-progress.js";
 /**
  * Create a provider factory for the given provider ID using the shared runtime module.
  */
-function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string): LegacyProvider {
-  return createProviderFactory(providerId, { apiKey, baseURL }).factory;
+function createProvider(
+  providerId: ProviderId,
+  apiKey: string,
+  baseURL?: string,
+  authMode?: AgentOptions["authMode"],
+): LegacyProvider {
+  return createProviderFactory(providerId, { apiKey, baseURL, authMode }).factory;
 }
 
 /**
@@ -285,7 +307,7 @@ async function genTitle(
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   try {
     const { generateTextStreamed } = await import("../providers/streamed-generate.js");
-    const runtime = resolveModelRuntime(modelId);
+    const runtime = resolveModelRuntime(modelId, { stage: "title" });
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
     // A title is a ≤60-char fixed shape — reasoning on it is pure waste. On
@@ -352,9 +374,33 @@ function createTools(
   _provider: LegacyProvider,
   _mode: unknown,
   _opts?: {
+    executionRole?: ExecutionRole;
+    credentialedProvider?: ProviderId;
     runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
     runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
-    readDelegation?: (id: string) => Promise<ToolResult>;
+    readDelegation?: (
+      id: string,
+      artifact?: import("../types/index.js").DelegationArtifactReadInput,
+    ) => Promise<ToolResult>;
+    sendDelegation?: (
+      id: string,
+      message: string,
+      replyTo: string | undefined,
+      toolCallId: string,
+      signal?: AbortSignal,
+      writeScope?: string[],
+    ) => Promise<ToolResult>;
+    acknowledgeDelegation?: (id: string, resultVersion: string) => Promise<ToolResult>;
+    acceptDelegation?: (input: import("../types/index.js").DelegationAcceptanceInput) => Promise<ToolResult>;
+    startCouncil?: (input: {
+      topic: string;
+      reason: string;
+      context: string;
+      outputContract: string;
+    }) => Promise<ToolResult>;
+    startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
+    readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+    planReviewBudget?: PlanReviewBudget;
     listDelegations?: () => Promise<ToolResult>;
     killDelegation?: (id: string) => Promise<ToolResult>;
     scheduleManager?: unknown;
@@ -365,9 +411,18 @@ function createTools(
   },
 ): ToolSet {
   return createBuiltinTools(_bash as BashTool, (_mode ?? "agent") as AgentMode, {
+    executionRole: _opts?.executionRole,
+    credentialedProvider: _opts?.credentialedProvider,
     runTask: _opts?.runTask,
     runDelegation: _opts?.runDelegation,
     readDelegation: _opts?.readDelegation,
+    sendDelegation: _opts?.sendDelegation,
+    acknowledgeDelegation: _opts?.acknowledgeDelegation,
+    acceptDelegation: _opts?.acceptDelegation,
+    startCouncil: _opts?.startCouncil,
+    startPlanReview: _opts?.startPlanReview,
+    readPlanReview: _opts?.readPlanReview,
+    planReviewBudget: _opts?.planReviewBudget,
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
     modelId: _opts?.modelId,
@@ -393,6 +448,21 @@ export class Agent {
   private bash: BashTool;
   private delegations: DelegationManager;
   private _helperParentSessionId: string | null = null;
+  private _planReviewAllowance?: { owner: string | undefined; cwd: string; budget: PlanReviewBudget };
+
+  private requestPlanReviewBudget(): PlanReviewBudget | undefined {
+    if (this.executionRole !== "orchestrator") return undefined;
+    const owner = this.session?.id,
+      cwd = this.bash.getCwd();
+    if (
+      !this._planReviewAllowance ||
+      this._planReviewAllowance.owner !== owner ||
+      this._planReviewAllowance.cwd !== cwd
+    ) {
+      this._planReviewAllowance = { owner, cwd, budget: createPlanReviewBudget() };
+    }
+    return this._planReviewAllowance.budget;
+  }
   private _helperParentCwd: string | null = null;
   private schedules: ScheduleManager;
   private sessionStore: SessionStore | null = null;
@@ -409,6 +479,8 @@ export class Agent {
   private _initialHardMaxToolRounds = 0;
   private mode: AgentMode = "agent";
   private modelId: string;
+  private readonly executionRole: ExecutionRole;
+  private readonly requestedReasoningEffort?: import("../types/index.js").ReasoningEffort;
   private maxTokens: number;
   private planContext: string | null = null;
   private subagentStatusListeners = new Set<(status: SubagentStatus | null) => void>();
@@ -463,6 +535,23 @@ export class Agent {
    */
   get effectivePermissionMode(): PermissionMode {
     return this.permissionMode;
+  }
+  /** Host UI/CLI only; no native/model tool exposes permission elevation. */
+  async setPermissionModeFromUser(mode: PermissionMode): Promise<number> {
+    if (!["safe", "auto-edit", "yolo"].includes(mode)) throw new Error("Invalid user permission mode.");
+    const previous = this.permissionMode;
+    this.permissionMode = mode;
+    this.permissionElevationRestoreTo = null;
+    const workersUpdated = await this.delegations.setPermissionMode(mode);
+    await appendDecisionLog({
+      ts: Date.now(),
+      sessionId: this.session?.id,
+      kind: "permission-mode",
+      taken: true,
+      reason: "Explicit user permission selection",
+      meta: { previous, mode, workersUpdated },
+    });
+    return workersUpdated;
   }
   /**
    * Number of autonomous-execution elevation scopes currently open. See
@@ -557,6 +646,7 @@ export class Agent {
   private _activeRunId: string | null = null;
   /** Resume digest loaded from active flow run state.md. */
   private _resumeDigest: string | null = null;
+  private readonly _requestHistory = new RequestHistory();
   /**
    * Phase 12.1-02: All council state (synthesis/continuation flags, resolver
    * + buffer maps, stats) lives inside CouncilManager. Agent holds one ref.
@@ -566,6 +656,7 @@ export class Agent {
   private _compactedThisTurn = false;
   /** Guard: OAuth provider init runs at most once per Agent instance. */
   private _oauthInitDone = false;
+  private authMode?: import("../providers/subscription-fallback.js").ProviderAuthMode;
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
   private _priorWarningIdsInSession = new Set<string>();
   /** EE session guidance: structured warnings accumulated across turns — injected into model context at turn start. Keyed by principle_uuid to deduplicate. */
@@ -621,17 +712,21 @@ export class Agent {
     maxToolRounds?: number,
     options: AgentOptions = {},
   ) {
+    this.authMode = options.authMode;
     this.baseURL = baseURL || null;
     this.bash = new BashTool(process.cwd(), {
+      workerScope: options.executionRole === "worker",
       sandboxMode: options.sandboxMode ?? "off",
       sandboxSettings: options.sandboxSettings,
       shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
     const transientOwnerId = randomUUID();
+    const delegationCwdAtStart = this.bash.getCwd();
     this.delegations = new DelegationManager(
       () => this.bash.getCwd(),
       () => this._helperParentSessionId ?? this.session?.id ?? transientOwnerId,
-      () => this._helperParentCwd ?? this.bash.getCwd(),
+      // Registry scope belongs to the owner, not its mutable tool cwd.
+      () => this._helperParentCwd ?? this.session?.cwdAtStart ?? delegationCwdAtStart,
     );
     // The bash sleep-poll guard must see delegations too, not just shells.
     this.bash.setBackgroundJobProbe(async () =>
@@ -650,7 +745,18 @@ export class Agent {
     });
 
     const initialMode: AgentMode = "agent";
-    this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
+    this.executionRole = options.executionRole ?? "orchestrator";
+    this.requestedReasoningEffort = options.reasoningEffort;
+    const requestedModel = normalizeModelId(model || getCurrentModel(initialMode));
+    if (this.executionRole === "orchestrator" && !getModelInfo(requestedModel)) {
+      throw new Error(
+        `Unknown orchestrator model "${requestedModel}". Select a catalog model/provider; no implicit model substitution is allowed.`,
+      );
+    }
+    this.modelId =
+      this.executionRole === "orchestrator"
+        ? selectOrchestratorModel(detectProviderForModel(requestedModel)).id
+        : requestedModel;
     this.providerId = detectProviderForModel(this.modelId);
     setProviderHint(this.providerId);
     if (apiKey) {
@@ -744,6 +850,17 @@ export class Agent {
     return this.modelId;
   }
 
+  getExecutionRole(): ExecutionRole {
+    return this.executionRole;
+  }
+
+  getReasoningEffort(): import("../types/index.js").ReasoningEffort | undefined {
+    return (
+      this.requestedReasoningEffort ??
+      (this.executionRole === "orchestrator" ? orchestrationEffort(this.modelId) : undefined)
+    );
+  }
+
   /**
    * Register (or clear with null) the UI callback that drains messages typed
    * while a turn is streaming, for mid-turn steering injection. Called from the
@@ -773,7 +890,16 @@ export class Agent {
    * writes mode+model together.
    */
   private _applyModelId(model: string): void {
-    this.modelId = normalizeModelId(model);
+    const requestedModel = normalizeModelId(model);
+    if (this.executionRole === "orchestrator" && !getModelInfo(requestedModel)) {
+      throw new Error(
+        `Unknown orchestrator model "${requestedModel}". Select a catalog model/provider; no implicit model substitution is allowed.`,
+      );
+    }
+    this.modelId =
+      this.executionRole === "orchestrator"
+        ? selectOrchestratorModel(detectProviderForModel(requestedModel)).id
+        : requestedModel;
     const newProviderId = detectProviderForModel(this.modelId);
     if (newProviderId !== this.providerId) {
       this.providerId = newProviderId;
@@ -807,6 +933,7 @@ export class Agent {
       this.apiKey = null;
       this.provider = null;
       this._oauthInitDone = false;
+      this.authMode = undefined;
     }
   }
 
@@ -844,7 +971,7 @@ export class Agent {
     if (mode !== this.mode) {
       this.mode = mode;
       const modeModel = getModeSpecificModel(mode);
-      if (modeModel) {
+      if (modeModel && this.executionRole !== "orchestrator") {
         // Via _applyModelId, NOT a bare `this.modelId = ...`: a mode-specific
         // model can belong to a different provider than the session's, and
         // assigning the id alone would leave provider/baseURL/apiKey pointing at
@@ -881,6 +1008,11 @@ export class Agent {
     return !!this.apiKey;
   }
 
+  async refreshAuthentication(): Promise<void> {
+    this._oauthInitDone = false;
+    await this._initOAuthProvider();
+  }
+
   setApiKey(apiKey: string, baseURL?: string): void {
     this.apiKey = apiKey;
     // Drop baseURL when it points at a DIFFERENT provider's default apiBase
@@ -891,13 +1023,15 @@ export class Agent {
     const stale = isAnyProviderApiBase(baseURL) && baseURL !== apiBaseFor(this.providerId);
     const effectiveBaseURL = stale ? undefined : baseURL;
     this.baseURL = stale ? null : baseURL || null;
-    this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
+    this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL, this.authMode);
   }
 
   setProviderAndKey(providerId: ProviderId, apiKey: string, baseURL?: string): void {
+    if (this.executionRole === "orchestrator") this._applyModelId(selectOrchestratorModel(providerId).id);
     this.providerId = providerId;
     setProviderHint(this.providerId);
     this.setApiKey(apiKey, baseURL);
+    if (this.sessionStore && this.session) this.sessionStore.setModel(this.session.id, this.modelId);
   }
 
   getProviderId(): ProviderId {
@@ -965,6 +1099,8 @@ export class Agent {
       undefined,
       this.bash.getSandboxSettings(),
       this.providerId,
+      undefined,
+      { permissionMode: this.permissionMode, executionRole: this.executionRole },
     );
     const usedTokens = Math.min(contextWindow, estimateConversationTokens(system, this.messages, inFlightText));
     const remainingTokens = Math.max(0, contextWindow - usedTokens);
@@ -1291,21 +1427,21 @@ export class Agent {
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
 
-    // The GSD checklist is parsed out of `.planning/PLAN.md` — a file owned by
+    // The FLOW checklist is parsed out of `.planning/PLAN.md` — a file owned by
     // the CWD, not by this conversation. Restoring it unconditionally pinned a
     // stale plan onto any resumed session opened in a repo that had ever run
-    // GSD, including chats that never wrote a single todo. Only this session's
-    // own GSD tool calls make that plan its checklist.
+    // FLOW, including chats that never wrote a single todo. Only this session's
+    // own FLOW tool calls make that plan its checklist.
     try {
-      if (sessionUsedGsdWorkflow(this.session.id)) {
-        const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-        const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
-        if (gsdSnap) return gsdSnap;
+      if (sessionUsedFlowWorkflow(this.session.id)) {
+        const { getTaskListSnapshotFromFlow } = require("../workflow/phase-sync.js");
+        const flowSnap = getTaskListSnapshotFromFlow(this.bash?.getCwd() ?? process.cwd());
+        if (flowSnap) return flowSnap;
       }
     } catch (err) {
       // Fail-open to the legacy todo_write args below — but say why, otherwise
       // a missing checklist looks like "the todos were lost".
-      logger.error("orchestrator", "GSD task-list restore failed; falling back to todo_write", {
+      logger.error("orchestrator", "FLOW task-list restore failed; falling back to todo_write", {
         sessionId: this.session.id,
         message: (err as Error)?.message,
       });
@@ -1447,7 +1583,9 @@ export class Agent {
       cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + cacheCreate,
       session_usd: prev.session_usd + turnCostMicros / 1_000_000,
       provider: this.providerId,
-      model,
+      // Auxiliary usage is billed to its actual model, but does not replace
+      // the owning orchestrator shown in the TUI.
+      model: this.executionRole === "orchestrator" ? this.modelId : model,
       ctx_tokens: totalInput,
       ctx_pct: ctxPct,
     });
@@ -1486,16 +1624,33 @@ export class Agent {
     // a child. Leave notifications unclaimed until main's context is restored.
     if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
     try {
-      const delegationNotices = await this.delegations.consumeNotifications();
+      const persistNotification = (notification: { message: string; messageId?: string }) => {
+        if (notification.messageId && !this.session)
+          throw new Error("Worker message delivery requires a durable owner transcript; message remains pending.");
+        const matches = (m: { role: string; content: unknown }) =>
+          m.role === "system" &&
+          typeof m.content === "string" &&
+          (notification.messageId
+            ? m.content.includes(`[worker-message:${notification.messageId}]`)
+            : m.content === notification.message);
+        const alreadyInContext = this.messages.some(matches);
+        let seq: number | null = null;
+        if (this.session) {
+          // The process can stop after SQLite commits but before the job claim
+          // commits. Reuse that durable message on retry instead of duplicating it.
+          const persisted = loadRawTranscript(this.session.id).some(matches);
+          if (!persisted) seq = appendSystemMessage(this.session.id, notification.message);
+        }
+        if (!alreadyInContext) {
+          this.messages.push({ role: "system", content: notification.message });
+          this.messageSeqs.push(seq);
+        }
+      };
+      const delegationNotices = await this.delegations.consumeNotifications(persistNotification);
       const processNotices = (await this.bash.consumeExitNotifications()).map((message) => ({ message }));
       const notifications = [...delegationNotices, ...processNotices];
       for (const notification of notifications) {
-        this.messages.push({ role: "system", content: notification.message });
-        let seq: number | null = null;
-        if (this.session) {
-          seq = appendSystemMessage(this.session.id, notification.message);
-        }
-        this.messageSeqs.push(seq);
+        if (!("id" in notification)) persistNotification(notification);
 
         const notifInput: NotificationHookInput = {
           hook_event_name: "Notification",
@@ -1536,9 +1691,21 @@ export class Agent {
     }
     return {
       delegations,
+      workerApprovals: await this.delegations.pollApprovals(),
       processes: this.bash.getBackgroundProcessStates(),
       processesSince: this.bash.createdAt,
     };
+  }
+
+  /** Host UI lifecycle and decisions; never registered as model-callable tools. */
+  setWorkerApprovalController(active: boolean): void {
+    this.delegations.setApprovalController(active);
+  }
+  respondToWorkerApproval(
+    request: import("./worker-approval.js").WorkerApprovalView,
+    approved: boolean,
+  ): Promise<void> {
+    return this.delegations.decideApproval(request, approved);
   }
 
   /** Stop a background job from the /jobs view: a delegation id or a shell process id. */
@@ -1649,8 +1816,17 @@ export class Agent {
     const batchTools = !childCaps.supportsClientTools(childRuntime.modelInfo)
       ? []
       : await toolSetToBatchTools(childTools);
+    const workerProvider = requireRuntimeProvider(childRuntime);
+    const workerClientOptions =
+      workerProvider === this.providerId
+        ? this.getBatchClientOptions(signal)
+        : {
+            apiKey: await loadKeyForProvider(workerProvider),
+            baseURL: loadUserSettings().providers?.[workerProvider]?.baseURL ?? apiBaseFor(workerProvider),
+            signal,
+          };
     const batch = await createBatch({
-      ...this.getBatchClientOptions(signal),
+      ...workerClientOptions,
       name: buildBatchName(`task-${request.agent}`, request.description),
     });
 
@@ -1694,7 +1870,7 @@ export class Agent {
               },
             });
       await addBatchRequests({
-        ...this.getBatchClientOptions(signal),
+        ...workerClientOptions,
         batchId: batch.batch_id,
         batchRequests: [
           {
@@ -1711,7 +1887,7 @@ export class Agent {
                 maxOutputTokens: shouldDropParam(childRuntime, "maxOutputTokens")
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
-                reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
+                reasoningEffort: childRuntime.reasoningEffort,
                 tools: batchTools,
               }),
             },
@@ -1720,7 +1896,7 @@ export class Agent {
       });
 
       const result = await pollBatchRequestResult({
-        ...this.getBatchClientOptions(signal),
+        ...workerClientOptions,
         batchId: batch.batch_id,
         batchRequestId,
       });
@@ -1842,10 +2018,24 @@ export class Agent {
   ): Promise<ToolResult> {
     // Background jobs enter here without processMessage's auth initialization.
     await this._initOAuthProvider();
+    if (request.modelId && !(globalThis as Record<string, unknown>).__muonroiMockModel) {
+      const workerProvider = detectProviderForModel(request.modelId);
+      if (!hasProviderFactory(workerProvider)) {
+        const key = await loadKeyForProvider(workerProvider).catch((err) => {
+          logger.file("warn", "orchestrator", "Worker provider API key unavailable; checking OAuth", {
+            provider: workerProvider,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return undefined;
+        });
+        await createProviderFactoryAsync(workerProvider, key ? { apiKey: key } : {});
+      }
+    }
     const provider = this.requireProvider();
     const deps: StreamRunnerDeps = {
       resolveModelForTask: (task) => this._resolveModelForTask(task),
       getModelId: () => this.modelId,
+      getPermissionMode: () => this.permissionElevationRestoreTo ?? this.permissionMode,
       getProviderId: () => this.providerId,
       getBash: () => this.bash,
       getMaxToolRounds: () => this.maxToolRounds,
@@ -1868,6 +2058,22 @@ export class Agent {
   }
 
   private async runTask(request: TaskRequest, abortSignal?: AbortSignal): Promise<ToolResult> {
+    if (this.mode !== "agent" && request.agent !== "explore")
+      return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
+    if (this.executionRole === "orchestrator") {
+      try {
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.file("warn", "orchestrator", "Worker dispatch refused", { error: message });
+        return { success: false, output: message };
+      }
+    }
+    if (this.executionRole === "orchestrator" || request.background || request.reviewOf) {
+      const started = await this.runDelegation(request, abortSignal, true);
+      if (!started.success || request.background === true || !started.delegation) return started;
+      return this.waitForDelegation(started.delegation.id, abortSignal);
+    }
     const startInput: SubagentStartHookInput = {
       hook_event_name: "SubagentStart",
       agent_type: request.agent,
@@ -1944,7 +2150,22 @@ export class Agent {
     return result;
   }
 
-  private async runDelegation(request: TaskRequest, abortSignal?: AbortSignal): Promise<ToolResult> {
+  private async runDelegation(
+    request: TaskRequest,
+    abortSignal?: AbortSignal,
+    nativeTask = false,
+  ): Promise<ToolResult> {
+    if (this.mode !== "agent" && request.agent !== "explore")
+      return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
+    if (this.executionRole === "orchestrator") {
+      try {
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.file("warn", "orchestrator", "Background dispatch refused", { error: message });
+        return { success: false, output: message };
+      }
+    }
     const taskCreatedInput: TaskCreatedHookInput = {
       hook_event_name: "TaskCreated",
       agent_type: request.agent,
@@ -1966,13 +2187,23 @@ export class Agent {
       const refusal = await this.parallelDelegationRefusal();
       if (refusal) return { success: false, output: refusal };
 
-      result = await this.delegations.start(request, {
+      const start = nativeTask
+        ? this.delegations.startTask.bind(this.delegations)
+        : this.delegations.start.bind(this.delegations);
+      result = await start(request, {
         model: this.modelId,
         sandboxMode: this.bash.getSandboxMode(),
         sandboxSettings: this.bash.getSandboxSettings(),
         maxToolRounds: request.maxToolRounds ?? this.maxToolRounds,
         maxTokens: this.maxTokens,
         batchApi: this.batchApi,
+        permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+        workerProviderId: request.modelId ? getModelInfo(request.modelId)?.provider : undefined,
+        workerAuthMode: request.modelId ? authModeForModel(request.modelId) : undefined,
+        workerApiKey:
+          request.modelId && getModelInfo(request.modelId)?.provider === this.providerId && this.apiKey !== "oauth"
+            ? (this.apiKey ?? undefined)
+            : undefined,
       });
       if (result.success) {
         const note = await this.delegationCapacityNote();
@@ -1987,6 +2218,8 @@ export class Agent {
       };
     }
 
+    // A native worker receipt acknowledges launch; completion belongs to the child.
+    if (nativeTask) return result;
     const taskCompletedInput: TaskCompletedHookInput = {
       hook_event_name: "TaskCompleted",
       agent_type: request.agent,
@@ -2031,19 +2264,149 @@ export class Agent {
     }
   }
 
-  private async readDelegation(id: string): Promise<ToolResult> {
+  private async readDelegation(
+    id: string,
+    artifact?: import("../types/index.js").DelegationArtifactReadInput,
+  ): Promise<ToolResult> {
     try {
-      return {
-        success: true,
-        output: await this.delegations.read(id),
-      };
+      if (artifact)
+        return this.delegations.readToolArtifact(
+          id,
+          artifact.toolCallId,
+          artifact.resultVersion,
+          artifact.offset,
+          artifact.maxChars,
+        );
+      return await this.delegations.readResult(
+        id,
+        !this._helperParentSessionId || this.session?.id === this._helperParentSessionId,
+      );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      logger.warn("orchestrator", "Failed to read delegation result", { id, error: msg });
       return {
         success: false,
         output: `Failed to read delegation: ${msg}`,
       };
     }
+  }
+
+  private async waitForDelegation(id: string, signal?: AbortSignal): Promise<ToolResult> {
+    const result = await this.delegations.waitResult(id, signal);
+    if (result.success && result.output?.includes("status=running")) await this.consumeBackgroundNotifications();
+    return result;
+  }
+
+  private async sendDelegation(
+    id: string,
+    message: string,
+    replyTo: string | undefined,
+    toolCallId: string,
+    signal?: AbortSignal,
+    writeScope?: string[],
+  ): Promise<ToolResult> {
+    if (
+      this.executionRole !== "orchestrator" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    )
+      return { success: false, output: "Only the owning main may send worker instructions/replies." };
+    const sent = await this.delegations.sendMessage(
+      id,
+      message,
+      replyTo,
+      toolCallId,
+      ...(writeScope !== undefined ? [writeScope] : []),
+    );
+    if (!sent.success || !replyTo?.trim() || isTuiActive()) return sent;
+    const next = await this.waitForDelegation(id, signal);
+    return { ...next, output: `${sent.output}\n\n${next.output}` };
+  }
+
+  private async acknowledgeDelegation(id: string, resultVersion: string): Promise<ToolResult> {
+    if (
+      this.executionRole !== "orchestrator" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    ) {
+      return { success: false, output: "Only the owning main session may acknowledge a result after processing it." };
+    }
+    try {
+      return await this.delegations.acknowledge(id, resultVersion);
+    } catch (err) {
+      logger.warn("orchestrator", "Failed to acknowledge delegation result", { id, error: String(err) });
+      return {
+        success: false,
+        output: `Failed to acknowledge delegation result: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+  }
+
+  private async acceptDelegation(input: import("../types/index.js").DelegationAcceptanceInput): Promise<ToolResult> {
+    if (
+      this.executionRole !== "orchestrator" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    )
+      return { success: false, output: "Only the owning main may accept implementation evidence." };
+    return this.delegations.accept(input);
+  }
+
+  async startCouncil(input: {
+    topic: string;
+    reason: string;
+    context: string;
+    outputContract: string;
+  }): Promise<ToolResult> {
+    if (this.executionRole !== "orchestrator")
+      return { success: false, output: "Only main may convene a background council." };
+    const refusal = await this.parallelDelegationRefusal();
+    if (refusal) return { success: false, output: refusal };
+    return this.delegations.startCouncil(input, {
+      model: this.modelId,
+      sandboxMode: this.bash.getSandboxMode(),
+      sandboxSettings: this.bash.getSandboxSettings(),
+      maxToolRounds: this.maxToolRounds,
+      maxTokens: this.maxTokens,
+      permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+      workerAuthMode: authModeForModel(this.modelId),
+      workerProviderId: this.providerId,
+      workerApiKey: this.apiKey !== "oauth" ? (this.apiKey ?? undefined) : undefined,
+    });
+  }
+
+  getCouncilSynthesis(): string | null {
+    return this.councilManager.lastSynthesis;
+  }
+
+  async startPlanReview(
+    input: import("../workflow/async-plan-review.js").PlanReviewDispatch,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    signal?.throwIfAborted();
+    if (this.executionRole !== "orchestrator")
+      return { success: false, output: "Only main may dispatch a native background plan review." };
+    const refusal = await this.parallelDelegationRefusal();
+    if (refusal) return { success: false, output: refusal };
+    return this.delegations.startPlanReview(
+      input,
+      {
+        model: this.modelId,
+        sandboxMode: this.bash.getSandboxMode(),
+        sandboxSettings: this.bash.getSandboxSettings(),
+        maxToolRounds: this.maxToolRounds,
+        maxTokens: this.maxTokens,
+        permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+        workerAuthMode: authModeForModel(this.modelId),
+        workerProviderId: this.providerId,
+        workerApiKey: this.apiKey !== "oauth" ? (this.apiKey ?? undefined) : undefined,
+      },
+      signal,
+    );
+  }
+
+  async readPlanReview(
+    input: import("../workflow/async-plan-review.js").PlanReviewRead,
+  ): Promise<import("../workflow/async-plan-review.js").CompletedPlanReview> {
+    if (this.executionRole !== "orchestrator") throw new Error("Only main may complete a native plan review.");
+    return this.delegations.readPlanReview(input);
   }
 
   private async listDelegations(): Promise<ToolResult> {
@@ -2058,7 +2421,14 @@ export class Agent {
 
       const lines = delegations.map((delegation) => {
         const title = delegation.description || delegation.id;
-        return `- \`${delegation.id}\` [${delegation.status}] ${title}\n  ${delegation.summary}`;
+        const delivery =
+          delegation.deliveryStatus === "acknowledged" ? "delivered" : (delegation.deliveryStatus ?? "pending");
+        const acknowledgement = !delegation.resultVersion
+          ? "not_ready"
+          : delegation.deliveryStatus === "acknowledged"
+            ? "acknowledged"
+            : "pending";
+        return `- \`${delegation.id}\` [execution=${delegation.status}] [delivery=${delivery}] [ack=${acknowledgement}] ${title}\n  ${delegation.summary}${delegation.writeScope !== undefined ? `\n  writeScopeVersion=${delegation.writeScopeVersion} writeScope=${JSON.stringify(delegation.writeScope)}` : ""}${delegation.resultVersion ? `\n  resultVersion=${delegation.resultVersion}` : ""}`;
       });
 
       return {
@@ -2165,6 +2535,23 @@ export class Agent {
     });
   }
 
+  private async getContextProtection(): Promise<import("./working-context.js").ContextProtection> {
+    const { WORKING_CONTEXT_TAG } = await import("./working-context.js");
+    const jobs = await this.delegations.list();
+    return {
+      pinned: this.messages.filter(
+        (m, i) =>
+          (this.messageSeqs[i] !== null && this._pinnedSeqs.has(this.messageSeqs[i]!)) ||
+          (m.role === "system" &&
+            !isCompactionSummaryMessage(m) &&
+            !(typeof m.content === "string" && m.content.startsWith(`${WORKING_CONTEXT_TAG}\n`))),
+      ),
+      pendingJobIds: jobs
+        .filter((j) => j.status === "running" || !j.resultVersion || j.deliveryStatus !== "acknowledged")
+        .map((j) => j.id),
+    };
+  }
+
   private async compactForContext(
     provider: LegacyProvider,
     system: string,
@@ -2175,10 +2562,40 @@ export class Agent {
   ): Promise<boolean> {
     if (!this.session) return false;
 
+    const { WorkingContext, retainWorkingContext } = await import("./working-context.js");
+    const working = new WorkingContext(this.session.id, this.bash.getCwd(), this.messages);
+    try {
+      working.setProtection(await this.getContextProtection());
+    } catch (err) {
+      logger.file("warn", "orchestrator", "Compaction pruning protections unavailable", { error: String(err) });
+      working.setProtection({ unavailable: true });
+    }
+    const pruningEnabled = process.env.MUONROI_PROGRESSIVE_CONTEXT !== "0" && working.active();
+    const projectedHistory = pruningEnabled ? working.project(this.messages) : this.messages;
+    const workingReceipt = pruningEnabled
+      ? retainWorkingContext(this.messages, this.session.id, this.bash.getCwd())
+      : null;
+    const sourceMessages = workingReceipt ? [workingReceipt, ...projectedHistory] : projectedHistory;
+    // A final prepared request also includes tool schemas and output reserve.
+    // Its explicit overflow retry must not be vetoed by this history-only check.
+    if (
+      pruningEnabled &&
+      !force &&
+      !shouldCompactContext(estimateConversationTokens(system, sourceMessages), contextWindow, settings)
+    ) {
+      const measurements = working.measurements();
+      if (measurements.contextPrunedChars > 0)
+        logInteraction(this.session.id, "compaction", {
+          eventSubtype: "context_pruning",
+          data: { ...measurements, mode: "working-set", canonicalHistoryUnchanged: true, summaryCalls: 0 },
+        });
+      return measurements.contextPrunedChars > 0;
+    }
+
     // Phase 1: ask the compaction proposer model whether to compact and what to keep/drop.
     // Only compact if the model says yes. On error/skip, fall back to heuristic.
     const compactModelId = this._resolveCompactModel();
-    const proposal = await proposeCompaction(compactModelId, this.messages, signal);
+    const proposal = await proposeCompaction(compactModelId, sourceMessages, signal);
 
     if (proposal !== null) {
       // Model decided — compact only if model says shouldCompact
@@ -2194,8 +2611,15 @@ export class Agent {
       }
     }
 
-    const preparation = prepareCompaction(this.messages, system, settings);
+    const preparation = prepareCompaction(sourceMessages, system, settings);
     if (!preparation) return false;
+    if (pruningEnabled) {
+      const protectedEvidence = working.retainedMessages(sourceMessages);
+      const kept = new Set([...preparation.keptMessages, ...protectedEvidence]);
+      preparation.messagesToSummarize = preparation.messagesToSummarize.filter((m) => !protectedEvidence.has(m));
+      preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !protectedEvidence.has(m));
+      preparation.keptMessages = sourceMessages.filter((m) => kept.has(m));
+    }
 
     const trigger = force ? "manual" : "auto";
 
@@ -2225,7 +2649,7 @@ export class Agent {
     };
     await this.fireHook(preCompactInput, signal).catch(() => {});
 
-    const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
+    const keptSeqs = preparation.keptMessages.map((m) => this.messageSeqs[this.messages.indexOf(m)] ?? null);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactStartedAt = Date.now();
     const isSubSession = await (async () => {
@@ -2381,7 +2805,13 @@ export class Agent {
       durationMs: Date.now() - compactStartedAt,
     }).catch(() => undefined);
 
-    appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
+    appendCompaction(
+      this.session.id,
+      firstKeptSeq,
+      summary,
+      preparation.tokensBefore,
+      workingReceipt && typeof workingReceipt.content === "string" ? workingReceipt.content : undefined,
+    );
 
     // Re-inject pinned user messages that were about to be summarized away.
     // Pinned seqs that are still inside keptMessages don't need re-injection.
@@ -2429,11 +2859,18 @@ export class Agent {
 
     this.messages = [
       createCompactionSummaryMessage(summary),
+      ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [workingReceipt] : []),
       ...(taggedSessionStartReinjection ? [taggedSessionStartReinjection] : []),
       ...pinnedReinjections,
       ...preparation.keptMessages,
     ];
-    this.messageSeqs = [null, ...(taggedSessionStartReinjection ? [null] : []), ...pinnedReinjectionSeqs, ...keptSeqs];
+    this.messageSeqs = [
+      null,
+      ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [null] : []),
+      ...(taggedSessionStartReinjection ? [null] : []),
+      ...pinnedReinjectionSeqs,
+      ...keptSeqs,
+    ];
 
     // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
     // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
@@ -2603,6 +3040,7 @@ export class Agent {
     topic: string,
     options?: {
       skipClarification?: boolean;
+      infrastructure?: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
       /**
@@ -2621,6 +3059,8 @@ export class Agent {
        * behind it) actually runs (C2, 2026-08-06).
        */
       suppressPostDebate?: boolean;
+      /** Detached advice jobs return synthesis to main and never start a follow-up work turn. */
+      returnOnly?: boolean;
       /**
        * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
        * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
@@ -2633,16 +3073,35 @@ export class Agent {
       skipPil?: boolean;
       /** Caller-owned final output format, independent of spec inference. */
       synthesisOutputContract?: string;
+      /** Host collector for actually completed council tool calls. */
+      onCouncilToolResult?: import("../council/types.js").CouncilToolEvidenceSink;
+      onCouncilRecord?: import("../council/index.js").RunCouncilOptions["onCouncilRecord"];
       /** Cancellation of the SDK tool that owns a nested council. */
       abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    if (this.executionRole === "orchestrator" && !options?.infrastructure) {
+      const receipt = await this.startCouncil({
+        topic,
+        reason: "User requested council",
+        context: "",
+        outputContract:
+          options?.synthesisOutputContract ??
+          "Return advice, unresolved questions, evidence and limitations. Do not implement or accept work.",
+      });
+      yield {
+        type: receipt.success ? "content" : "error",
+        content: receipt.output ?? receipt.error ?? "Council launch failed.",
+      };
+      yield { type: "done", content: "" };
+      return;
+    }
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
       "../council/index.js"
     );
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
-    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
+    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats, options?.onCouncilToolResult);
 
     const processMessageFn = (message: string) => this.processMessage(message, options?.observer);
 
@@ -2725,6 +3184,7 @@ export class Agent {
           externalTopic: options?.externalTopic,
           skipPil: options?.skipPil,
           synthesisOutputContract: options?.synthesisOutputContract,
+          onCouncilRecord: options?.onCouncilRecord,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
@@ -2822,7 +3282,7 @@ export class Agent {
       // action means: nothing more to start here.
       const councilResolvedNext = chosenAction !== undefined;
       const continuationPrompt =
-        ownsController && synthesis && !councilResolvedNext
+        ownsController && synthesis && !councilResolvedNext && !options?.returnOnly
           ? buildNeutralPostCouncilContinuation(synthesis) || null
           : null;
       // REMOVED 2026-08-06 (C1/C2): the `chosenAction === "implement"` branch
@@ -2866,7 +3326,7 @@ export class Agent {
               // isToolActivityLive (an in-flight bash/task call) and
               // hasProgressSince (a provider request issued inside the
               // window that just elapsed). A council continuation re-enters
-              // preStreamPhase (e.g. "gsdGate"), whose leader-tier assessor
+              // preStreamPhase (e.g. "flowGate"), whose leader-tier assessor
               // pings hasTurnProgressSince for its whole lifetime — without
               // this wiring that ping was invisible here and a healthy,
               // still-working continuation could be killed at idleMs even
@@ -2933,6 +3393,34 @@ export class Agent {
       userModelMessage?: ModelMessage;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    if (this.executionRole === "orchestrator") {
+      const goal = payload.idea?.trim();
+      let councilReceipt = "";
+      if (payload.flags.forceCouncil) {
+        const receipt = await this.startCouncil({
+          topic: goal || `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`,
+          reason: "User explicitly requested --force-council",
+          context: JSON.stringify({ subcommand: payload.subcommand, runId: payload.runId, flags: payload.flags }),
+          outputContract:
+            "Return council advice with evidence, unresolved questions and limitations. Do not implement or accept work.",
+        });
+        councilReceipt = `\nCouncil launch receipt (consume its durable result; do not poll):\n${receipt.output ?? receipt.error ?? "Council launch failed."}\n`;
+        yield {
+          type: receipt.success ? "content" : "error",
+          content: receipt.output ?? receipt.error ?? "Council launch failed.",
+        };
+      }
+      yield* this.processMessage(
+        `Coordinate the user's /ideal ${payload.subcommand} request using planning tools and explicit bounded workers, followed by independent review. Do not run the legacy self-implementing product loop.\n` +
+          `Request: ${JSON.stringify({ subcommand: payload.subcommand, runId: payload.runId, flags: payload.flags })}\n` +
+          (goal
+            ? `User goal (preserve its language and scope):\n${goal}`
+            : "Use the current conversation's goal; ask the user only if it is missing.") +
+          councilReceipt,
+        options?.observer,
+      );
+      return;
+    }
     const { runProductLoop } = await import("../product-loop/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const { withCouncilSignal } = await import("../council/index.js");
@@ -3705,6 +4193,15 @@ export class Agent {
   private _buildBatchTurnRunnerDeps(): BatchTurnRunnerDeps {
     const self = this;
     return {
+      get executionRole() {
+        return self.executionRole;
+      },
+      get planReviewBudget() {
+        return self.requestPlanReviewBudget();
+      },
+      get reasoningEffort() {
+        return self.getReasoningEffort();
+      },
       get messages() {
         return self.messages;
       },
@@ -3738,16 +4235,34 @@ export class Agent {
         self._lastProviderOptionsShape = shape;
       },
       getCompactionStats: () => self.getCompactionStats(),
+      getContextProtection: () => self.getContextProtection(),
       getBatchClientOptions: (signal) => self.getBatchClientOptions(signal),
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
       extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
-      createTools: (bash, provider, mode, opts) => createTools(bash, provider, mode, opts),
+      createTools: (bash, provider, mode, opts) => {
+        const native = createTools(bash, provider, mode, {
+          ...opts,
+          executionRole: self.executionRole,
+          credentialedProvider: self.providerId,
+          planReviewBudget: self.requestPlanReviewBudget(),
+          startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+          readPlanReview: (input) => self.readPlanReview(input),
+        });
+        return filterExecutionTools(native, native, self.executionRole);
+      },
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),
-      readDelegation: (id) => self.readDelegation(id),
+      readDelegation: (id, artifact) => self.readDelegation(id, artifact),
+      sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
+        self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
+      acknowledgeDelegation: (id, version) => self.acknowledgeDelegation(id, version),
+      acceptDelegation: (input) => self.acceptDelegation(input),
+      startCouncil: (input) => self.startCouncil(input),
+      startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+      readPlanReview: (input) => self.readPlanReview(input),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       executeBatchToolCall: (tools, toolCall, messages, signal) =>
@@ -3849,7 +4364,12 @@ export class Agent {
     userMessage: string,
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
+    turnOptions?: { internalActivity?: boolean },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    // A background wake is not new user authorization to buy more reviews.
+    // Keep the same owner/cwd allowance across these internal continuations.
+    if (!turnOptions?.internalActivity) this._planReviewAllowance = undefined;
+    else if (this._planReviewAllowance) this._planReviewAllowance.budget.stopRequested = false;
     const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
     const currentChars = this.estimateConversationChars();
     logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
@@ -3863,32 +4383,55 @@ export class Agent {
       process.env.NODE_ENV === "test";
     const forceClassify = process.env.MUONROI_FORCE_ROUTING_CLASSIFY === "1";
 
-    if (isMockMode && !forceClassify) {
-      logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
-    } else {
-      try {
-        const { classifySubSessionAction } = await import("../pil/llm-classify.js");
-        // Feed the recent-conversation digest so the router can actually honour
-        // its "decide based on the conversation history" contract — otherwise a
-        // continuation ("ok làm phần đó đi") is judged in isolation and can be
-        // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
-        // on the session-size metadata block the ROTATE_SESSION rule relies on.
-        const routeResult = await classifySubSessionAction(this.modelId, userMessage, {
-          currentChars,
-          threshold,
-          recentTurns: this._buildRecentTurnsSummary(),
-        });
-        if (routeResult) {
-          routeAction = routeResult.action;
-          logger.info("orchestrator", "Routing action selected for user message", {
-            action: routeAction,
-            confidence: routeResult.confidence,
-            reason: routeResult.reason,
-          });
+    // Routing can wait on provider pacing before MessageProcessor owns a turn.
+    // Expose that wait to abort() without replacing a nested caller's controller.
+    const ownsRoutingController = !this.abortController;
+    const routingController = this.abortController ?? new AbortController();
+    if (ownsRoutingController) this.abortController = routingController;
+    try {
+      if (this.executionRole === "orchestrator" || (isMockMode && !forceClassify)) {
+        logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
+      } else {
+        try {
+          const { classifySubSessionAction } = await import("../pil/llm-classify.js");
+          // Feed the recent-conversation digest so the router can actually honour
+          // its "decide based on the conversation history" contract — otherwise a
+          // continuation ("ok làm phần đó đi") is judged in isolation and can be
+          // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
+          // on the session-size metadata block the ROTATE_SESSION rule relies on.
+          const routeResult = await classifySubSessionAction(
+            this.modelId,
+            userMessage,
+            {
+              currentChars,
+              threshold,
+              recentTurns: this._buildRecentTurnsSummary(),
+            },
+            routingController.signal,
+          );
+          if (routeResult) {
+            routeAction = routeResult.action;
+            logger.info("orchestrator", "Routing action selected for user message", {
+              action: routeAction,
+              confidence: routeResult.confidence,
+              reason: routeResult.reason,
+            });
+          }
+        } catch (err) {
+          if (routingController.signal.aborted) {
+            logger.debug("orchestrator", "Routing classification cancelled", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          } else {
+            logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", {
+              error: err,
+            });
+          }
         }
-      } catch (err) {
-        logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
       }
+      routingController.signal.throwIfAborted();
+    } finally {
+      if (ownsRoutingController && this.abortController === routingController) this.abortController = null;
     }
     breadcrumb("pre-stream.subSessionClassify.end", { sessionId: this.session?.id, routeAction });
 
@@ -3898,7 +4441,11 @@ export class Agent {
     // doing heavy multi-tool work. Deterministic, based on real execution, not a
     // prompt guess. Only rescues DIRECT_ANSWER — never hijacks a deliberate
     // ROTATE_SESSION. See reactive-delegation.ts.
-    if (routeAction === "DIRECT_ANSWER" && shouldReactivelyEscalate(this._lastTurnToolChars)) {
+    if (
+      this.executionRole !== "orchestrator" &&
+      routeAction === "DIRECT_ANSWER" &&
+      shouldReactivelyEscalate(this._lastTurnToolChars)
+    ) {
       logger.info("orchestrator", "Reactive escalation to sub-session (prior turn tool-heavy)", {
         prevTurnToolChars: this._lastTurnToolChars,
       });
@@ -3941,7 +4488,8 @@ export class Agent {
       }
     }
 
-    const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
+    const shouldRotate =
+      this.executionRole !== "orchestrator" && (currentChars > threshold || routeAction === "ROTATE_SESSION");
 
     if (shouldRotate && this.session && this.sessionStore) {
       logger.info("orchestrator", "Triggering silent session rotation", {
@@ -4003,6 +4551,7 @@ export class Agent {
     const parentCwdAtFork = this.bash.getCwd();
     const previousHelperOwner = this._helperParentSessionId;
     const previousHelperCwd = this._helperParentCwd;
+    const parentDelegationCwdAtFork = previousHelperCwd ?? this.session?.cwdAtStart ?? parentCwdAtFork;
 
     // Round 12 (G15): `routerSubSessions: false` keeps the CURRENT turn on
     // the main session/main model — router SPAWN_SUB_SESSION and reactive
@@ -4120,12 +4669,12 @@ export class Agent {
           // differ.
           this.modelId = this.session.model;
           const childState = loadSessionChainTranscriptState(subSessionId);
-          this.messages = childState.messages;
+          this.messages = refreshSubSessionToolContract(childState.messages);
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
           isSubSessionForked = true;
           this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
-          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
+          this._helperParentCwd = parentDelegationCwdAtFork;
           logger.info("orchestrator", "Resumed child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4167,7 +4716,7 @@ export class Agent {
           // recent discussion the user pointed at ("debate THESE parts"), and
           // drifted off-topic. Keep the tail; just guarantee the summary is
           // present and persist the compaction row for the child's continuity.
-          const seedMessages: ModelMessage[] = [...this.messages];
+          const seedMessages: ModelMessage[] = refreshSubSessionToolContract(this.messages);
           const seedSeqs: Array<number | null> = [...this.messageSeqs];
           if (latest?.summary) {
             if (!isCompactionSummaryMessage(seedMessages[0])) {
@@ -4186,9 +4735,9 @@ export class Agent {
               `Your assignment is to gather evidence and perform the scoped work needed for: "${userMessage}"\n` +
               `The Main Session owns the goal, acceptance decision and final user-facing answer. Return a concise deliverable to main, not a final answer on its behalf.\n\n` +
               `Your Operating Boundaries & Rules:\n` +
-              `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
+              `${SUB_SESSION_TOOL_BOUNDARY}\n` +
               `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
-              `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
+              `${SUB_SESSION_COMPLETION_RULE}\n` +
               `4. Your final response MUST contain a structured summary: Key Changes (file paths), Verification Details (commands and observed results), Remaining Blockers, and Result Summary. Cite tool/artifact IDs where available so main can retrieve full evidence.\n` +
               `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
           };
@@ -4206,7 +4755,7 @@ export class Agent {
 
           isSubSessionForked = true;
           this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
-          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
+          this._helperParentCwd = parentDelegationCwdAtFork;
           logger.info("orchestrator", "Forked child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4229,14 +4778,11 @@ export class Agent {
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
-    // Boundary between "already in the sub-session transcript" and "produced by
-    // THIS turn". Captured after the fork/resume above swapped `this.messages`
-    // to the sub-session, and read by salvageSubSessionOutput in the finally
-    // block below so a turn that produces nothing cannot hand the parent the
-    // PREVIOUS turn's answer (session 708f0fc4ac8b). Declared out here because
-    // `finally` cannot see bindings scoped to the `try` block.
-    const preTurnMessageCount = this.messages.length;
-    const autoCommitOn = isAutoCommitEnabled();
+    // Persisted boundary for THIS helper turn. Sequence numbers survive the
+    // compaction that can replace/shrink this.messages before handoff. They also
+    // exclude earlier answers when a resumed child produces no new deliverable.
+    const preTurnFirstSeq = isSubSessionForked && subSessionId ? getNextMessageSequence(subSessionId) : undefined;
+    const autoCommitOn = this.executionRole !== "orchestrator" && isAutoCommitEnabled();
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
 
@@ -4280,7 +4826,7 @@ export class Agent {
         try {
           attempts++;
           try {
-            const stream = withTurnWatchdog(processor.run(userMessage, observer, images), {
+            const stream = withTurnWatchdog(processor.run(userMessage, observer, images, turnOptions), {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
@@ -4425,7 +4971,7 @@ export class Agent {
       try {
         if (isSubSessionForked && parentSessionId && this.sessionStore) {
           try {
-            const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
+            const { loadTranscriptState } = await import("../storage/transcript.js");
 
             // Restore parent session
             this.session = this.sessionStore.getRequiredSession(parentSessionId);
@@ -4451,19 +4997,41 @@ export class Agent {
               });
             }
 
-            const { loadTranscriptState } = await import("../storage/transcript.js");
             const parentState = loadTranscriptState(parentSessionId);
             this.messages = parentState.messages;
             this.messageSeqs = parentState.seqs;
 
             this._helperParentSessionId = previousHelperOwner;
             this._helperParentCwd = previousHelperCwd;
+            // Restore ownership before attempting a child transcript read:
+            // a failed read must not strand the UI on the helper context.
+            const childState = loadTranscriptState(subSessionId!);
+            const finalMessages = salvageSubSessionOutput(childState.messages, {
+              firstSeq: preTurnFirstSeq!,
+              messageSeqs: childState.seqs,
+            });
             if (helperTurnSettled && !helperController?.signal.aborted) {
               helperReceipt = buildHelperReceipt(subSessionId!, finalMessages, helperFailure);
               const receiptMessage: ModelMessage = { role: "system", content: helperReceipt };
               const receiptSeqs = appendMessages(parentSessionId, [receiptMessage]);
               this.messages.push(receiptMessage);
               this.messageSeqs.push(...receiptSeqs);
+              // Child reads become owner delivery only once their evidence has
+              // actually been persisted into main's receipt. An interrupted
+              // helper must not consume the owner's only completion notice.
+              for (const message of finalMessages) {
+                if (message.role !== "tool" || !Array.isArray(message.content)) continue;
+                for (const result of message.content) {
+                  if (
+                    result.type !== "tool-result" ||
+                    result.toolName !== "delegation_read" ||
+                    result.output.type !== "text"
+                  )
+                    continue;
+                  const jobId = result.output.value.match(/^jobId=([^\r\n]+)/)?.[1];
+                  if (jobId) await this.delegations.read(jobId);
+                }
+              }
               logger.info("orchestrator", "Returned helper evidence to main for acceptance", {
                 parentSessionId,
                 subSessionId,
@@ -4483,13 +5051,16 @@ export class Agent {
           yield { type: "toast", toastLevel: "info", content: "Main đang đánh giá kết quả từ helper..." };
           const mainProcessor = new MessageProcessor(this._buildMessageProcessorDeps());
           try {
-            yield* withTurnWatchdog(mainProcessor.run(userMessage, observer, images, { retainModel: true }), {
-              idleMs: turnIdleMs,
-              totalMs: turnTotalMs,
-              label: "main acceptance turn",
-              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
-              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
-            });
+            yield* withTurnWatchdog(
+              mainProcessor.run(userMessage, observer, images, { retainModel: true, ...turnOptions }),
+              {
+                idleMs: turnIdleMs,
+                totalMs: turnTotalMs,
+                label: "main acceptance turn",
+                shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+                hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
+              },
+            );
           } catch (err) {
             logger.error("orchestrator", "Main helper acceptance failed", { parentSessionId, error: String(err) });
             if (err instanceof TurnStallError) {
@@ -4560,6 +5131,7 @@ export class Agent {
   private _buildMessageProcessorDeps(): MessageProcessorDeps {
     const self = this;
     return {
+      requestHistory: self._requestHistory,
       get messages() {
         return self.messages;
       },
@@ -4580,6 +5152,15 @@ export class Agent {
       },
       get modelId() {
         return self.modelId;
+      },
+      get executionRole() {
+        return self.executionRole;
+      },
+      get planReviewBudget() {
+        return self.requestPlanReviewBudget();
+      },
+      get reasoningEffort() {
+        return self.getReasoningEffort();
       },
       get providerId() {
         return self.providerId;
@@ -4667,6 +5248,7 @@ export class Agent {
       },
       getCompactedThisTurn: () => self._compactedThisTurn,
       getCompactionStats: () => self.getCompactionStats(),
+      getContextProtection: () => self.getContextProtection(),
       reportTurnToolLoad: (chars) => {
         self._lastTurnToolChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
         self._turnLoadOrdinal += 1;
@@ -4779,7 +5361,14 @@ export class Agent {
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),
-      readDelegation: (id) => self.readDelegation(id),
+      readDelegation: (id, artifact) => self.readDelegation(id, artifact),
+      sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
+        self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
+      acknowledgeDelegation: (id, version) => self.acknowledgeDelegation(id, version),
+      acceptDelegation: (input) => self.acceptDelegation(input),
+      startCouncil: (input) => self.startCouncil(input),
+      startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+      readPlanReview: (input) => self.readPlanReview(input),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => self.steerDrain?.() ?? [],
@@ -4946,6 +5535,7 @@ export class Agent {
   private async _initOAuthProvider(): Promise<void> {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
+    if (this.authMode === "api-key") return;
 
     // Re-resolve auth for the CURRENT provider. Runs when either:
     //  (a) no explicit API key / the "oauth" sentinel is held — OAuth may
@@ -4962,19 +5552,16 @@ export class Agent {
       const ids = await listOAuthProviderIds();
       const oauthCapable = ids.includes(this.providerId);
 
-      // One auth mode per provider (OAuth XOR API key): if this OAuth-capable
-      // provider has a live token, OAuth wins OUTRIGHT — even over a real held
-      // API key. This is the shadowing-bug fix: a stale sk-proj key must not
-      // beat a valid ChatGPT OAuth login. Check token presence BEFORE the
-      // early-out so a held key can no longer suppress OAuth.
+      // Subscription stays primary; a held API key remains a backup.
       let hasOAuthTokens = false;
       if (oauthCapable) {
         try {
           const cfg = await getOAuthProviderConfig(this.providerId);
-          const tokens = cfg ? await cfg.loadTokensWithRefresh().catch(() => null) : null;
+          const tokens = cfg ? await cfg.loadTokensWithRefresh() : null;
           hasOAuthTokens = !!tokens?.accessToken;
-        } catch {
-          hasOAuthTokens = false;
+        } catch (error) {
+          logger.file("warn", "orchestrator", `[auth] subscription token check failed: ${(error as Error).message}`);
+          throw error;
         }
       }
 
@@ -4993,8 +5580,16 @@ export class Agent {
             : undefined;
         const result = await createProviderFactoryAsync(this.providerId, {
           baseURL: effectiveBaseURL ?? undefined,
+          apiKey: this.apiKey && this.apiKey !== "oauth" ? this.apiKey : undefined,
         });
-        this.apiKey = "oauth";
+        if (keyIsSentinelOrEmpty) {
+          try {
+            this.apiKey = await loadKeyForProvider(this.providerId);
+          } catch (error) {
+            logger.file("debug", "orchestrator", `[auth] subscription has no backup key: ${(error as Error).message}`);
+            this.apiKey = "oauth";
+          }
+        }
         this.provider = result.factory;
         return;
       }
@@ -5011,7 +5606,7 @@ export class Agent {
           this.apiKey = key;
           const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
           if (staleBaseURL) this.baseURL = null;
-          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined);
+          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined, this.authMode);
         } else if (providerDeferred) {
           this.provider = null;
         }
@@ -5030,9 +5625,14 @@ export class Agent {
           this.provider = null;
         }
       }
-    } catch {
-      // Registry unavailable — fail-open; the existing provider (if any) is
-      // left untouched and requireProvider() will surface any error.
+    } catch (error) {
+      this._oauthInitDone = false;
+      logger.file(
+        "warn",
+        "orchestrator",
+        `[auth] initialization failed for ${this.providerId}: ${(error as Error).message}`,
+      );
+      throw error;
     }
   }
 

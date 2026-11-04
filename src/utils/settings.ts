@@ -29,6 +29,7 @@ import { logger } from "./logger.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
+export type RoutingMode = "fixed" | "auto" | "suggest";
 
 export type PeakHourMode = "downgrade" | "switch";
 
@@ -179,6 +180,8 @@ export interface RateLimitOverride {
 }
 
 export interface UserSettings {
+  /** Explicit user-selected default; absent means safe. CLI --permission overrides it. */
+  permissionMode?: import("./permission-mode.js").PermissionMode;
   apiKey?: string;
   /**
    * One-time guard: true once legacy keychain/settings API keys have been
@@ -403,18 +406,22 @@ export interface UserSettings {
    * Default "fast".
    */
   routingDemoteMin?: "off" | "fast" | "balanced";
+  /** Main-turn routing policy; project pins retain precedence over user defaults. */
+  routingMode?: RoutingMode;
 }
 
 export interface ProjectSettings {
   model?: string;
+  /** Explicit opt-in: auto/suggest treat model as a baseline instead of a pin. */
+  routingMode?: RoutingMode;
   shell?: ShellSettings;
   lsp?: LspSettings;
   /**
-   * Relocate GSD planning state (`STATE.md`, `config.json`, `phases/`, …) out
+   * Relocate FLOW planning state (`STATE.md`, `config.json`, `phases/`, …) out
    * of `.planning/` at the repo root. Some repos already use `.planning/` for
    * their own unrelated plan folders (e.g. a Shipd/Olympus challenge repo),
-   * so every session writing GSD state there litters the working tree.
-   * Absolute, or relative to the repo root. See `gsd/paths.ts` `planningRoot`.
+   * so every session writing FLOW state there litters the working tree.
+   * Absolute, or relative to the repo root. See `workflow/paths.ts` `planningRoot`.
    * Env override: `MUONROI_STATE_DIR` (wins over this setting).
    */
   stateDir?: string;
@@ -667,17 +674,17 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
   writeJson(getUserSettingsPath(), next);
 }
 
-export function loadProjectSettings(): ProjectSettings {
-  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
+export function loadProjectSettings(cwd = process.cwd()): ProjectSettings {
+  const projectPath = path.join(cwd, ".muonroi-cli", "settings.json");
   return readJson<ProjectSettings>(projectPath) || {};
 }
 
-export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
-  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
+export function saveProjectSettings(partial: Partial<ProjectSettings>, cwd = process.cwd()): void {
+  const projectPath = path.join(cwd, ".muonroi-cli", "settings.json");
   // Protect the footprint BEFORE the first write so the secrets-bearing file is
   // gitignored from the moment it exists.
-  ensureFootprintGitignored(process.cwd());
-  const current = loadProjectSettings();
+  ensureFootprintGitignored(cwd);
+  const current = loadProjectSettings(cwd);
   writeJson(projectPath, {
     ...current,
     ...partial,

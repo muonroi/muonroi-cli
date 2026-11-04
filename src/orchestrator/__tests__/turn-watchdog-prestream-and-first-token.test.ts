@@ -4,7 +4,7 @@
  * (`startPeriodicTurnProgressPing` / `hasTurnProgressSince`):
  *
  *   1. `preStreamPhase` (message-processor.ts) used to ping ZERO times — any
- *      single pre-stream phase (a hook, PIL classify, samrGuidance, gsdGate,
+ *      single pre-stream phase (a hook, PIL classify, samrGuidance, flowGate,
  *      the G9 relatedness classifier) slower than `idleMs` starved the
  *      watchdog exactly like round 4's `compaction.ts` did before ITS
  *      one-off fix. `preStreamPhase` now starts a periodic ping for the
@@ -432,7 +432,7 @@ describe("round 8 — the pinger must bind to the STACK'S TOP, not the monotonic
 
 describe("round 9 (Defect A) — council-continuation watchdog (orchestrator.ts ~2739) must wire the same progress/suppression guards as the top-level sibling (orchestrator.ts ~4111-4116)", () => {
   // orchestrator.ts's council-continuation entry re-enters preStreamPhase
-  // (e.g. "gsdGate") via the nested `this.processMessage(...)` call, exactly
+  // (e.g. "flowGate") via the nested `this.processMessage(...)` call, exactly
   // like round 5's top-level scenario above — a leader-tier assessor can
   // legitimately run past idleMs while pinging turn-progress the whole time.
   // The top-level watchdog (~4102) survives this via `hasProgressSince`; the
@@ -441,7 +441,7 @@ describe("round 9 (Defect A) — council-continuation watchdog (orchestrator.ts 
   it("RED — documents the bug: the OLD wiring (shouldSuppressFire: isInteractivePaused only, no hasProgressSince) kills a legitimately-pinging nested phase", async () => {
     const phaseMs = IDLE_MS * 5;
     async function* turn(): AsyncGenerator<StreamChunk, void, unknown> {
-      await preStreamPhase("gsdGate", "sess-defectA-old", () => new Promise((r) => setTimeout(r, phaseMs)));
+      await preStreamPhase("flowGate", "sess-defectA-old", () => new Promise((r) => setTimeout(r, phaseMs)));
       yield { type: "done" } as StreamChunk;
     }
 
@@ -461,7 +461,7 @@ describe("round 9 (Defect A) — council-continuation watchdog (orchestrator.ts 
   it("GREEN — post-fix wiring (shouldSuppressFire also covers isToolActivityLive, hasProgressSince wired to hasTurnProgressSince, matching orchestrator.ts ~4111-4116) keeps the same nested phase alive", async () => {
     const phaseMs = IDLE_MS * 5;
     async function* turn(): AsyncGenerator<StreamChunk, void, unknown> {
-      await preStreamPhase("gsdGate", "sess-defectA-fixed", () => new Promise((r) => setTimeout(r, phaseMs)));
+      await preStreamPhase("flowGate", "sess-defectA-fixed", () => new Promise((r) => setTimeout(r, phaseMs)));
       yield { type: "done" } as StreamChunk;
     }
 

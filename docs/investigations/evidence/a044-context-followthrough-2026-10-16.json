@@ -1,0 +1,188 @@
+﻿{
+  "schemaSnapshot": {
+    "tools": 43,
+    "nativeChars": 25029,
+    "mcpChars": 0
+  },
+  "reads": {
+    "normalChars": 31862,
+    "boundedChars": 3947,
+    "rangedChars": 1068,
+    "normalCap": 32000,
+    "boundedCap": 4096
+  },
+  "harness": {
+    "runId": "c9aeea2e-211c-43a5-bb18-8c9d17b96443",
+    "summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "recordedAtUtc": "2026-10-16T13:56:45.9339011Z",
+  "compiledControls": {
+    "boundedReadNamesOmittedLines": true,
+    "continuationReturnsNamedLine": true,
+    "previewDoesNotWrite": true,
+    "previewLeavesWriteLedgerEmpty": true,
+    "observedResearchProjected": true,
+    "previewNotReportedAsImplementation": true,
+    "observedImplementationProjected": true,
+    "explicitStageOverridesObservations": true,
+    "schemaTotalsReconcile": true,
+    "rebuiltMcpAdvertisesRunner": true,
+    "actualNodeTestThroughMcp": true,
+    "actualPytestThroughMcp": true,
+    "localOfflineHarnessBootAndLogPass": true
+  },
+  "tests": {
+    "files": 27,
+    "failed": 0,
+    "passed": 247
+  },
+  "files": [
+    {
+      "path": "src/orchestrator/task-context.ts",
+      "sha256": "5436fd50590f5a7f09bb71c58c1680465bce4c52aa4832953adf3fd3e279dc3a",
+      "bytes": 7904
+    },
+    {
+      "path": "src/orchestrator/prompt-breakdown.ts",
+      "sha256": "4fede46929a9a7628d6e5ba6a4a8182d521c0234da9150c08404341c362a43e8",
+      "bytes": 4689
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "sha256": "f3ff4eaf084cde330c85dcabccb407c4efbc280e91c54d2502151dc8f1bc0456",
+      "bytes": 264092
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "f78e9c3dfe8fe262deec873effccbed03cb1d85f8cae41f4940885a1482ed8a6",
+      "bytes": 71508
+    },
+    {
+      "path": "src/orchestrator/tool-utils.ts",
+      "sha256": "d5365c2cfebe0be04431170759676e3deb5f9f79b37c561b436dad95ccbc59b7",
+      "bytes": 12644
+    },
+    {
+      "path": "src/cli/forensics-diagnostics.ts",
+      "sha256": "94eb00390be32da4660024d7d977ac476842a3b85701102138cf10c9157ca2cf",
+      "bytes": 9283
+    },
+    {
+      "path": "src/tools/registry.ts",
+      "sha256": "f391f4860c72454ce05db75b62f08e99a4e8f87a46995d23f19e645f359cf6c0",
+      "bytes": 101928
+    },
+    {
+      "path": "src/tools/context-load.ts",
+      "sha256": "3d7d29e899f1c73f62f1173509e4dd57ccb0503b60c3acc3efbbfbd7726adcdf",
+      "bytes": 3282
+    },
+    {
+      "path": "src/tools/file.ts",
+      "sha256": "ad8e535736a801c6577fb2eda3e1599b54f08fb908189574f654e7d02149ba21",
+      "bytes": 12363
+    },
+    {
+      "path": "src/tools/native-tools.ts",
+      "sha256": "207494f0e394888b6dac3875ffea2bfb163bf0c0a803a68d02b47a3c2733e57b",
+      "bytes": 23370
+    },
+    {
+      "path": "src/tools/verification-run.ts",
+      "sha256": "1b1c43d099aa61f0c0bdcf1542fc46bb75050908ef05243b372992969ee50f2c",
+      "bytes": 6541
+    },
+    {
+      "path": "src/mcp/tools-server.ts",
+      "sha256": "b2747770fd38665602f55cd73a33e56be7a4305e542976c5cf82c613fd8b2c6f",
+      "bytes": 8711
+    },
+    {
+      "path": "src/storage/tool-results.ts",
+      "sha256": "f8176676ca76a6761e2a854980255fbb000051510016463f34e206a4a0cc6610",
+      "bytes": 3066
+    },
+    {
+      "path": "src/types/index.ts",
+      "sha256": "fcb40cd965160150f865d54a166f68f1d9f505ef5ff2e1300bd0e12c5c56088a",
+      "bytes": 37293
+    },
+    {
+      "path": "src/pil/context-modules.ts",
+      "sha256": "3aa5343782312cf5100de5aa527f294ca9d82af950b27173f3f71ebab86e3fcf",
+      "bytes": 6294
+    },
+    {
+      "path": "src/pil/native-capabilities-workbook.ts",
+      "sha256": "ce2d8ada2cf6b128f408b077805c558825ad533028dfcc41e572c0506cfdc29c",
+      "bytes": 16567
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "sha256": "90aa0e4373ba8fde3e1551eac13630ca88d957e659fcbe76cc181efd46177c99",
+      "bytes": 4443
+    },
+    {
+      "path": "src/ui/components/tool-group.tsx",
+      "sha256": "2acee970318d242043681cae600f0a3f8c52e2945e396d8259144dcef976d972",
+      "bytes": 9431
+    },
+    {
+      "path": "src/ui/components/message-view.tsx",
+      "sha256": "a4a266b4989ee973b613a7985d1666db76d696f4b4ce64e3816f1f57c6e69ea4",
+      "bytes": 18527
+    },
+    {
+      "path": "src/ui/utils/tool-summary.ts",
+      "sha256": "62491f02c213c595da25128da25e52eed68c778ff6fad5d0d652679130cdcbed",
+      "bytes": 4025
+    },
+    {
+      "path": ".scratch/a044-context-followthrough/accepted-tests.log",
+      "sha256": "f5b2443b4c38e6104237deeac219711645672f337dc3fd1229ecdaec9b39e251",
+      "bytes": 2554
+    },
+    {
+      "path": ".scratch/a044-context-followthrough/accepted-build.log",
+      "sha256": "65d071e765349a54c0e54e3d407459cf0030f4a4cc9597d5adffeb21d3118056",
+      "bytes": 7498
+    },
+    {
+      "path": ".scratch/a044-context-followthrough/compiled-controls.mjs",
+      "sha256": "c8f29398747c285fe24649e07453dd26a12ceded2b4a8c5e6d10abec17c40fb2",
+      "bytes": 7428
+    },
+    {
+      "path": ".scratch/a044-context-followthrough/compiled-controls.json",
+      "sha256": "ac3b850a97720567dea91a7dcf7bddce8322c8d83bec7b9438b9787bd442aa7b",
+      "bytes": 22747
+    },
+    {
+      "path": ".scratch/a044-context-followthrough/compiled-controls-missing-fixture-key.json",
+      "sha256": "f468e4a341a77a84c0a8817c45110b4656df375bd32b7d4b81ed6bbafccafd5e",
+      "bytes": 23584
+    },
+    {
+      "path": "dist/src/tools/registry.js",
+      "sha256": "620f7f56558f3bde5f2a585b6fabb0b5681405579143537fc0f8112c94d5b8ee",
+      "bytes": 104230
+    },
+    {
+      "path": "dist/src/tools/verification-run.js",
+      "sha256": "0c8d365128ec3ec74d4a03e20548ad9d4905e2d53e7fee7f19db1c3a527fedda",
+      "bytes": 6639
+    },
+    {
+      "path": "dist/src/orchestrator/task-context.js",
+      "sha256": "e2aa691a608b694bf2b7128ff0119dcbfb508636d933a3c1fffe83982e2c80fe",
+      "bytes": 8142
+    }
+  ],
+  "boundary": "Local build, targeted regression, actual native/MCP tools and offline TUI; no paid-provider/full-suite/publish claim"
+}

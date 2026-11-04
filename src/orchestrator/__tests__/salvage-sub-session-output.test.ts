@@ -24,6 +24,31 @@ const prior: ModelMessage[] = [
 ];
 
 describe("salvageSubSessionOutput", () => {
+  it("keeps the new deliverable and tool evidence after compaction changes array indices", () => {
+    const compacted: ModelMessage[] = [
+      { role: "system", content: "Old history summary" },
+      { role: "assistant", content: "Prior answer retained in the compacted tail" },
+      { role: "user", content: "Current follow-up" },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: "proof-id",
+            toolName: "bash",
+            output: { type: "text", value: "command=fixture; exit=0" },
+          },
+        ],
+      },
+      { role: "assistant", content: "CURRENT_DELIVERABLE" },
+    ];
+    const result = salvageSubSessionOutput(compacted, { firstSeq: 17, messageSeqs: [null, 16, 17, 18, 19] });
+    expect(result).toHaveLength(2);
+    expect(JSON.stringify(result)).toContain("proof-id");
+    expect(JSON.stringify(result)).toContain("CURRENT_DELIVERABLE");
+    expect(JSON.stringify(result)).not.toContain("Prior answer");
+  });
+
   it("returns nothing when the current turn produced no assistant message", () => {
     const messages: ModelMessage[] = [...prior, { role: "user", content: "câu hỏi mới về test fail" }];
 

@@ -1,0 +1,236 @@
+{
+  "at": "2026-10-17T15:11:16.516Z",
+  "status": "PASS",
+  "checks": {
+    "fullSuiteExitZero": true,
+    "fullRunnerSummaryAvailable": true,
+    "separateBunSqliteExitZero": true,
+    "bunRunnerSummaryAvailable": true,
+    "finalNativeEightPassed": true,
+    "freshNativeBootPassed": true,
+    "frozenManifestUnchanged": true,
+    "sourceTestRevisionUnchanged": true,
+    "realSettingsUnchangedAfterFullSuite": true
+  },
+  "incidentSession": "5689cd3c2e8c",
+  "head": "2d33b8d9a557a8fec30ea4713d98b8469f8f5603",
+  "baseline": {
+    "file": ".scratch/session5689/baseline.json",
+    "dirtyPaths": 407
+  },
+  "source": {
+    "files": 2058,
+    "fingerprint": "a50eafc42098504f1b695118d466b01a079e1c52f1451281788e669abc6f8368",
+    "freezeEntries": 51,
+    "freezePath": ".scratch\\session5689\\w1-w2-ui-freeze.json",
+    "freezeSha256": "e88b60d724d884d42fd18ead76384ac3240c1f39fa1277c222cd9aaf5c85a528",
+    "mismatches": []
+  },
+  "fullSuite": {
+    "command": "bun run test --exclude '.scratch/**' --exclude '.quick-codex-flow/**' --reporter=verbose",
+    "exitCode": 0,
+    "summary": [
+      "Test Files  1007 passed | 6 skipped (1013)",
+      "Tests  9478 passed | 14 skipped | 2 todo (9494)",
+      "Start at  21:50:35",
+      "Duration  1151.13s (transform 17.80s, setup 13.16s, import 240.65s, tests 668.87s, environment 67ms)"
+    ]
+  },
+  "bunSqlite": {
+    "command": "bun test src/ee/__tests__/export-transcripts.test.ts src/storage/__tests__/transcript-fts.test.ts",
+    "exitCode": 0,
+    "summary": ["10 pass", "0 fail", "Ran 10 tests across 2 files. [742.00ms]"]
+  },
+  "native": {
+    "report": ".scratch/session5689/tui-safe-final-acceptance.json",
+    "controls": [
+      {
+        "name": "sentinel",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\sentinel\\report.json",
+        "jobId": "eager-silver-falcon",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": null
+      },
+      {
+        "name": "allow",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\allow\\report.json",
+        "jobId": "lively-silver-sparrow",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "consumed"
+      },
+      {
+        "name": "deny",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\deny\\report.json",
+        "jobId": "brisk-white-wolf",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "denied"
+      },
+      {
+        "name": "escape",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\escape\\report.json",
+        "jobId": "gentle-silver-wolf",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "denied"
+      },
+      {
+        "name": "foreground",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\foreground\\report.json",
+        "jobId": "steady-amber-owl",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "consumed"
+      },
+      {
+        "name": "responsive",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-YeqPhM\\responsive\\report.json",
+        "jobId": "brisk-amber-fox",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "consumed"
+      },
+      {
+        "name": "long-preview",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-nLYzDr\\long-preview\\report.json",
+        "jobId": "calm-indigo-falcon",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "consumed"
+      },
+      {
+        "name": "draft-preview",
+        "pass": true,
+        "report": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\tui-safe-nLYzDr\\draft-preview\\report.json",
+        "jobId": "eager-blue-fox",
+        "model": "deepseek-v4-flash",
+        "permission": "safe",
+        "role": "worker",
+        "approvalState": "consumed"
+      }
+    ],
+    "selfverify": {
+      "report": ".scratch/session5689/native-selfverify.json",
+      "log": ".scratch/session5689/native-selfverify.log",
+      "summary": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "inconclusive": 0,
+        "passRate": 1
+      },
+      "skipped": [],
+      "emitted": [],
+      "scope": "Fresh built tools-MCP selfverify_start/status/result; actual Bun boot-only; emit=false",
+      "isolatedHome": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session5689\\selfverify-ayY7DZ"
+    },
+    "limits": [
+      "Offline SDK response fixtures; actual built App/native tools/detached child I/O and callbacks; no paid-provider behavior tested",
+      "Stable file URL/hash provenance plus actual exercised paths; not module-loader tracing",
+      "Core6 selected from first finalbuild run; its extra long-preview assertion failure preserved separately; corrected geometry-aware preview controls passed in second finalbuild run",
+      "Native host decisions only through exact visible UI key controls; no model approval messages or root SDK approval responses"
+    ]
+  },
+  "settings": [
+    {
+      "file": "C:\\Users\\phila\\.muonroi-cli\\user-settings.json",
+      "expectedSha256": "58f1769f7b9095eddd7f110e801f2e884a4182585bb1e8c376c03f45deadb3e3",
+      "afterFullSuiteSha256": "58f1769f7b9095eddd7f110e801f2e884a4182585bb1e8c376c03f45deadb3e3"
+    },
+    {
+      "file": "C:\\Users\\phila\\.muonroi-cli\\settings.json",
+      "expectedSha256": null,
+      "afterFullSuiteSha256": null
+    }
+  ],
+  "preservedInterruptedFullRun": ".scratch/session5689/full-tests-interrupted-before-quick-hint-fix.log",
+  "artifacts": [
+    {
+      "file": ".scratch/session5689/final-full-tests.log",
+      "sha256": "3f729d0cec5cb91f39e065cb0b5a9cef45742d66b8d3d83002deb7cc6c9633f8"
+    },
+    {
+      "file": ".scratch/session5689/final-bun-sqlite.log",
+      "sha256": "2807c123fb4f3cb1f1438ea5d003e6ddd2ff6f7f294eed00e20c6b12afbb1d8b"
+    },
+    {
+      "file": ".scratch/session5689/w1-w2-ui-build.log",
+      "sha256": "920214fd429206539d64d3617a03e69bdc2b116c2125de6c47d3db53c3c296e9"
+    },
+    {
+      "file": ".scratch/session5689/ui-inspection-final-focused.log",
+      "sha256": "7250b01b4890ef5be45325668a628bfc24776941b69bdba562e9c261f8cf7d9c"
+    },
+    {
+      "file": ".scratch/session5689/w1-red-sentinel.log",
+      "sha256": "727d7a01f1baafe9880246e118f4fc534b25bcdbe60307c1d4bb9d8a922b7650"
+    },
+    {
+      "file": ".scratch/session5689/w1-preview-red.log",
+      "sha256": "18e2c0624ce72f7282a1b61a411c39ab46baa0161647941afc235de25337b23c"
+    },
+    {
+      "file": ".scratch/session5689/w2-prepared-red.log",
+      "sha256": "f359ce6297c26151cf16f9125ca46738b68c7d63df5cb091fba084cd8a70791b"
+    },
+    {
+      "file": ".scratch/session5689/w2-prepared-green.log",
+      "sha256": "945d0d13975b4da72185bec1cd5e084b52529ecfe20294b2c929955cee6c20a1"
+    },
+    {
+      "file": ".scratch/session5689/w2-quick-red.log",
+      "sha256": "544403467945d68b8676810f2dadbea5bba66b80777a14d681fb5e6d935942d4"
+    },
+    {
+      "file": ".scratch/session5689/w2-quick-green.log",
+      "sha256": "46910df1bc7210e73a3b425f1b8dcb29791a4c9fc374e5d0cb37b681a3cc0fac"
+    },
+    {
+      "file": ".scratch/session5689/tui-safe-inspection-diagnostic.json",
+      "sha256": "7b5facd5d8193ca7137112e56a48f2fd9e528689743422243d23472e8a4a6113"
+    },
+    {
+      "file": ".scratch/session5689/tui-safe-final-acceptance.json",
+      "sha256": "ef2d03e2eac653164599bcd2f483bc6057030ba46d294e95a70c431c65a23a97"
+    },
+    {
+      "file": ".scratch/session5689/native-selfverify.json",
+      "sha256": "8f313420813829c84653bb5c28eaf362990f4e7eb2ad41f20d49f03eb0bccb65"
+    },
+    {
+      "file": ".scratch/session5689/validation-revision-before.json",
+      "sha256": "3fec8e78043aa0afb0a5fe106133a5f29a7eb4c09dbdb4a99b726e601e7a2afe"
+    },
+    {
+      "file": ".scratch/session5689/validation-revision-after.json",
+      "sha256": "5dff99cc7652a7ebab2f141f9afc239af9b978e0be9431210467bbdf63020c78"
+    },
+    {
+      "file": ".scratch/session5689/w1-w2-ui-freeze.json",
+      "sha256": "e88b60d724d884d42fd18ead76384ac3240c1f39fa1277c222cd9aaf5c85a528"
+    }
+  ],
+  "limits": [
+    "Canonical repository unit scope plus separately configured Bun-native SQLite suites; configured skips and todo remain visible in the full log.",
+    "Actual built Bun App and native tools/child I/O with offline SDK response fixtures; no paid-provider or universal model behavior claim.",
+    "Stable file hashes/URLs and exercised paths are not module-loader tracing.",
+    "The deeper cause of old transcript paging remains unattributed; worker approval now uses a separately owned preview viewport.",
+    "Existing user TUI processes must restart to load the new local build; no user DB/settings/jobs were migrated or rewritten."
+  ]
+}

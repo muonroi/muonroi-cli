@@ -20,9 +20,15 @@
  */
 
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import { FORENSICS_TOOL_DESCRIPTION } from "../cli/forensics-diagnostics.js";
+import { isConcreteEEProject, NativeEEContext } from "../ee/native-context.js";
 import { LSP_TOOL_OPERATIONS, LspError } from "../lsp/types.js";
 import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
+import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
+import { integrationHealth } from "../utils/integration-health.js";
+import { logger, redactSecrets } from "../utils/logger.js";
+import { runVerificationTests, VERIFICATION_RUNNERS } from "./verification-run.js";
 
 /** Map a thrown error to the LspError tagged-union shape. */
 function mapLspError(e: unknown): LspError {
@@ -40,6 +46,7 @@ function lspErrLine(e: unknown): string {
 
 /** The native tool names this module registers — used by the MCP-twin dedup. */
 export const NATIVE_MUONROI_TOOL_NAMES = [
+  "integration_status",
   "ee_health",
   "ee_feedback",
   "ee_write",
@@ -49,6 +56,7 @@ export const NATIVE_MUONROI_TOOL_NAMES = [
   "impact_of_change",
   "lsp_mutation_preview",
   "setup_guide",
+  "verification_run",
   "selfverify_start",
   "selfverify_status",
   "selfverify_result",
@@ -62,21 +70,70 @@ const errLine = (error: string, message: string): string => `ERROR ${error}: ${m
 export interface NativeToolOpts {
   /** Workspace cwd for lsp_query. Defaults to process.cwd(). */
   cwd?: string;
+  getCwd?: () => string;
+  eeContext?: NativeEEContext;
 }
 
 /**
  * Add the native muonroi-tools builtins to `tools`. Mutates and returns it.
  */
 export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts = {}): ToolSet {
+  tools.integration_status = dynamicTool({
+    description:
+      "Read recent persisted integration checks. Connection, executed tools and toolchain failures are separate facts, not a global readiness certification. Optional failures do not block unrelated work.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: { hours: { type: "integer", minimum: 1, maximum: 168 } },
+      additionalProperties: false,
+    }),
+    execute: async (input: any) => json(integrationHealth(input?.hours ?? 24)),
+  });
+  const eeContext = opts.eeContext ?? new NativeEEContext(crypto.randomUUID(), opts.cwd ?? process.cwd());
+  const alignEE = () => eeContext.alignCwd(opts.getCwd?.() ?? opts.cwd ?? process.cwd());
+  tools.verification_run = dynamicTool({
+    description:
+      "Run explicit existing runnable local test files without shell commands or dependency downloads. Markdown/document content checks use read_file/grep, not this runner. runner=auto selects a single installed Vitest/Jest/Mocha, or pytest for Python files using .venv. Multiple JS runners require explicit selection. runner=node runs JavaScript node:test files. No arbitrary package scripts; use bash for other repo workflows/builds. Returns runner, command, cwd, exit and output. Tests can write fixtures/cache; this does not require a source-edit plan.",
+    inputSchema: jsonSchema({
+      type: "object",
+      properties: {
+        cwd: { type: "string" },
+        files: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 100 },
+        timeoutMs: { type: "number", minimum: 100, maximum: 300000 },
+        runner: { type: "string", enum: [...VERIFICATION_RUNNERS] },
+      },
+      required: ["files"],
+      additionalProperties: false,
+    }),
+    execute: async (input: any, context) => {
+      try {
+        return json(
+          await runVerificationTests(
+            input?.cwd ?? opts.cwd ?? process.cwd(),
+            input?.files,
+            input?.timeoutMs,
+            context.abortSignal,
+            input?.runner,
+          ),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[verification-run] Invalid workspace or runner: ${message}`);
+        return errLine("verification_failed", message);
+      }
+    },
+  });
   // ── Experience Engine: health + feedback (ee_query is already native) ──────
   tools.ee_health = dynamicTool({
-    description: "Check Experience Engine server reachability (returns {ok, status}).",
+    description:
+      "Probe the configured EE endpoint's reachability and show this task's effective scope plus last measured recall state/time. Health200 proves reachability only; recallReady=not_checked remains separate from lastRecall. No implicit recall or extra model request.",
     inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
     execute: async () => {
       try {
         const { healthEE } = await import("../ee/search.js");
-        return json(await healthEE());
+        alignEE();
+        return json({ ...(await healthEE()), scope: eeContext.scope(), lastRecall: eeContext.lastRecall });
       } catch (e) {
+        logger.file("warn", "ee", "Native EE health failed", { error: e instanceof Error ? e.message : String(e) });
         return errLine("ee_unavailable", e instanceof Error ? e.message : String(e));
       }
     },
@@ -115,7 +172,8 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       try {
         const { feedbackEE } = await import("../ee/search.js");
         const { sessionRecallLedger } = await import("../ee/recall-ledger.js");
-        const result = await feedbackEE(id, collection, verdict, reason);
+        alignEE();
+        const result = await feedbackEE(id, collection, verdict, reason, eeContext.feedbackScope(id, collection));
         // A queued result (brain unreachable → durably enqueued) counts as success:
         // the agent has discharged its rating, so clear the ledger regardless. This
         // is what stops the mandatory-rating gate from looping while the brain is
@@ -133,6 +191,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
           pendingRemaining: sessionRecallLedger.pendingCount(),
         });
       } catch (e) {
+        logger.file("warn", "ee", "Native EE feedback failed", { error: e instanceof Error ? e.message : String(e) });
         return errLine("feedback_failed", e instanceof Error ? e.message : String(e));
       }
     },
@@ -145,7 +204,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       "generalizable lesson (1-3 sentences — what to do or avoid next time, NOT a play-by-play of this turn). The " +
       "lesson is embedded immediately and becomes recallable via ee_query in THIS and future sessions. Use ee_query " +
       "first when unsure if a lesson already exists. collection defaults to experience-behavioral (use " +
-      "experience-principles only for a broad, project-independent principle).",
+      "experience-principles only for a broad, project-independent principle). Project lessons use the verified native recall scope; query first to resolve it, or pass an explicit project slug. Never derive scope from a folder basename.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -154,6 +213,10 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
           description: "The lesson: the mistake/pitfall AND the fix, concise and generalizable.",
         },
         title: { type: "string", description: "Optional short title (<=120 chars)." },
+        project: {
+          type: "string",
+          description: "Optional explicit concrete EE project slug; otherwise reuse this task's verified recall scope",
+        },
         collection: {
           type: "string",
           enum: ["experience-behavioral", "experience-principles"],
@@ -175,21 +238,38 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         input?.collection === "experience-principles" ? "experience-principles" : "experience-behavioral";
       const title =
         typeof input?.title === "string" && input.title.trim() ? input.title.trim().slice(0, 120) : undefined;
+      alignEE();
+      if (input?.project !== undefined && !isConcreteEEProject(input.project))
+        return errLine(
+          "invalid_scope",
+          "project must be a concrete EE slug; discover it with ee_query(action=projects)",
+        );
+      const project =
+        input?.project ?? (collection === "experience-principles" ? undefined : eeContext.scope().project);
+      if (collection !== "experience-principles" && !project)
+        return "[ee_project_required] Resolve this task's project with native ee_query({query: ..., cwd: ...}) first, or pass ee_write's explicit project. No lesson was written; folder names are not authoritative project slugs.";
       try {
         const { writeExperienceEE } = await import("../ee/search.js");
-        const path = await import("node:path");
-        const cwd = opts.cwd ?? process.cwd();
         // confidence 0.65 (above the import default 0.6): an agent-asserted lesson
         // is deliberate but unproven — the ee_feedback loop then tunes it.
         const result = await writeExperienceEE(text, {
           collection,
           title,
-          projectSlug: path.basename(cwd),
+          projectSlug: project,
           confidence: 0.65,
         });
         if (!result.ok) return errLine("write_failed", result.error ?? "import-memory POST failed");
-        return json({ ok: true, id: result.id, collection, recallable: "now — same session via ee_query" });
+        return json({
+          ok: true,
+          id: result.id,
+          collection,
+          project: project ?? null,
+          recallable: "now — same session via ee_query",
+        });
       } catch (e) {
+        logger.file("warn", "ee", "Native EE lesson write failed", {
+          error: e instanceof Error ? e.message : String(e),
+        });
         return errLine("write_failed", e instanceof Error ? e.message : String(e));
       }
     },
@@ -197,24 +277,46 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
 
   // ── Self-diagnostics: usage_forensics ─────────────────────────────────────
   tools.usage_forensics = dynamicTool({
-    description:
-      "Per-session token-cost forensics by session-id prefix: peak input, cache-hit ratio, per-event breakdown.",
+    description: FORENSICS_TOOL_DESCRIPTION,
     inputSchema: jsonSchema({
       type: "object",
-      properties: { prefix: { type: "string", description: "Session id prefix (1-100 chars)" } },
+      properties: {
+        prefix: { type: "string", minLength: 1, maxLength: 100, description: "Session id prefix" },
+        until: {
+          type: "string",
+          description: "Snapshot cutoff timestamp. Reuse returned snapshot.until for later pages.",
+        },
+        usage_offset: { type: "integer", minimum: 0 },
+        error_offset: { type: "integer", minimum: 0 },
+        measurement_offset: { type: "integer", minimum: 0 },
+      },
       required: ["prefix"],
     }),
     execute: async (input: any) => {
       const prefix = typeof input?.prefix === "string" ? input.prefix.trim() : "";
-      if (!prefix) return errLine("invalid_args", "usage_forensics requires a non-empty prefix");
+      if (!prefix || prefix.length > 100)
+        return errLine("invalid_args", "usage_forensics requires a prefix of 1-100 characters");
+      const offsets = [input.usage_offset, input.error_offset, input.measurement_offset];
+      if (offsets.some((x) => x !== undefined && (!Number.isSafeInteger(x) || x < 0)))
+        return errLine("invalid_args", "Offsets must be non-negative integers");
+      if (input.until !== undefined && (typeof input.until !== "string" || !Number.isFinite(Date.parse(input.until))))
+        return errLine("invalid_args", "until must be a valid timestamp");
       try {
         const { resolveSessionIds, collectCostForensics } = await import("../cli/cost-forensics.js");
         const ids = await resolveSessionIds(prefix);
         if (ids.length === 0) return errLine("not_found", `no session matches prefix '${prefix}'`);
         if (ids.length > 1) return errLine("ambiguous", `prefix '${prefix}' matched ${ids.length} sessions`);
-        return json(await collectCostForensics(ids[0]!));
+        return json(
+          await collectCostForensics(ids[0]!, {
+            until: input.until,
+            usageOffset: input.usage_offset ?? 0,
+            errorOffset: input.error_offset,
+            measurementOffset: input.measurement_offset,
+          }),
+        );
       } catch (e) {
-        return errLine("db_error", e instanceof Error ? e.message : String(e));
+        logger.file("warn", "storage", "Native usage_forensics failed", { error: e });
+        return errLine("db_error", redactSecrets(e instanceof Error ? e.message : String(e)));
       }
     },
   });
@@ -254,7 +356,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
     description:
       "Wait for LSP diagnostics on a file, with timeout clamping (default 1500ms, max 5000ms). " +
       "Returns { diagnostics: LspDiagnostic[], lspStatus: 'ok'|'partial'|'unavailable', clean: boolean, metadata: { tokenBudgetUsed } }. " +
-      "clean=true means zero error-level diagnostics. Grep fallback is allowed when lspStatus !== 'ok'.",
+      "clean=true means zero error-level diagnostics; assess completeness with lspStatus. Text/config/log search can use grep directly without this prerequisite.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -277,8 +379,8 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   tools.impact_of_change = dynamicTool({
     description:
       "Analyse impact of a change: returns { references, diagnostics, referencesComplete, safeToRename, clean, " +
-      "suggestedGuard, degraded, lspStatus, metadata }. Safe for use as lsp-before-grep gate: grep fallback is " +
-      "allowed when lspStatus !== 'ok'; safeToRename is true only when refs are complete and the union is clean.",
+      "suggestedGuard, degraded, lspStatus, metadata }. Use for semantic change impact, independently of text search. " +
+      "safeToRename is true only when refs are complete and the union is clean.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -297,7 +399,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   tools.lsp_mutation_preview = dynamicTool({
     description:
       "Preview a mutation (stub — no real edits). Returns { op: 'allowlist', dryRunResult: { proposedEdits: [], " +
-      "tokenEstimate: 0 }, schemaVersion: '1.0' }. MUTATION_TOOLS gating applies; no apply path in Sprint 1.",
+      "tokenEstimate: 0 }, schemaVersion: '1.0' }. MUTATION_TOOLS gating applies; no apply path in Sprint 1. This does not validate a real edit. For a concrete textual replacement preview use edit_file(dry_run=true) when exposed; applying uses normal edit guards.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -332,17 +434,29 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       properties: {
         mode: { type: "string", enum: ["tier1", "agentic"] },
         since: { type: "string" },
+        cwd: { type: "string", description: "Workspace under test. Defaults to the calling shell cwd." },
+        files: {
+          type: "array",
+          items: { type: "string" },
+          description: "Exact task-owned files relative to cwd; skips whole-worktree diff selection.",
+        },
         max: { type: "number" },
         emit: { type: "boolean" },
         out: { type: "string" },
         goal: { type: "string" },
         llm: { type: "string" },
         turns: { type: "number" },
-        mockLlmDir: { type: "string", description: "Use 'none' to run child TUI against real LLM APIs" },
+        mockLlmDir: {
+          type: "string",
+          description:
+            "Omit for bundled offline fixtures. 'none' enables real provider calls only in agentic mode; invalid in tier1.",
+        },
       },
       required: ["mode"],
     }),
     execute: async (input: any) => {
+      const invalid = validateSelfVerifyRequest(input ?? {});
+      if (invalid) return errLine("invalid_args", invalid);
       const jm = getSelfVerifyJobManager();
       if (input?.mode === "agentic") {
         if (!input?.goal || !input?.llm) return errLine("invalid_args", "agentic mode requires both goal and llm");
@@ -351,6 +465,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         return json({
           runId: jm.start({
             kind: "agentic",
+            cwd: input.cwd ?? opts.cwd ?? process.cwd(),
             goal: input.goal,
             llm: input.llm,
             turns: input.turns,
@@ -359,7 +474,16 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
         });
       }
       return json({
-        runId: jm.start({ kind: "tier1", since: input?.since, max: input?.max, emit: input?.emit, out: input?.out }),
+        runId: jm.start({
+          kind: "tier1",
+          cwd: input?.cwd ?? opts.cwd ?? process.cwd(),
+          files: input?.files,
+          mockLlmDir: input?.mockLlmDir,
+          since: input?.since,
+          max: input?.max,
+          emit: input?.emit,
+          out: input?.out,
+        }),
       });
     },
   });

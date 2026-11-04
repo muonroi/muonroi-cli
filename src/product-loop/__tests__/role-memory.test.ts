@@ -8,7 +8,7 @@ describe("role-memory management", () => {
   let tempDir: string;
 
   beforeEach(async () => {
-    tempDir = path.join(os.tmpdir(), `gsd-test-${Math.random().toString(36).slice(2)}`);
+    tempDir = path.join(os.tmpdir(), `flow-test-${Math.random().toString(36).slice(2)}`);
     await fs.mkdir(tempDir, { recursive: true });
   });
 

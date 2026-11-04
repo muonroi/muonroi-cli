@@ -57,6 +57,49 @@ beforeEach(() => {
   __resetRateLimiterForTests();
 });
 
+describe("rate-limiter cancellation", () => {
+  it("removes an aborted RPM reservation without dispatching", async () => {
+    const clock = makeClock();
+    await acquireRateLimitSlot("cancel-rpm", { requestsPerMinute: 1 }, clock);
+    const controller = new AbortController();
+    const reason = new Error("request cancelled during RPM wait");
+    await expect(
+      acquireRateLimitSlot(
+        "cancel-rpm",
+        { requestsPerMinute: 1 },
+        clock,
+        () => controller.abort(reason),
+        controller.signal,
+      ),
+    ).rejects.toBe(reason);
+    expect(__rateLimiterStateForTests("cancel-rpm")?.dispatches).toHaveLength(1);
+  });
+
+  it.each([
+    false,
+    true,
+  ])("retires a cancelled concurrency waiter, including grant races (%s)", async (abortAfterGrant) => {
+    const controller = new AbortController();
+    const reason = new Error("request cancelled in semaphore queue");
+    const held = await acquireRateLimitSlot("cancel-concurrency", { concurrency: 1 });
+    const pending = acquireRateLimitSlot(
+      "cancel-concurrency",
+      { concurrency: 1 },
+      undefined,
+      undefined,
+      controller.signal,
+    );
+    const assertion = expect(pending).rejects.toBe(reason);
+    if (abortAfterGrant) held.release();
+    controller.abort(reason);
+    if (!abortAfterGrant) held.release();
+    await assertion;
+    const next = await acquireRateLimitSlot("cancel-concurrency", { concurrency: 1 });
+    next.release();
+    expect(__rateLimiterStateForTests("cancel-concurrency")?.inFlight).toBe(0);
+  });
+});
+
 describe("rate-limiter — the declared limit reaches runtime at all", () => {
   it("maps catalog rate_limits into ModelInfo (the field that used to be dropped)", () => {
     const info = catalogModelToModelInfo({

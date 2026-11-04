@@ -1,0 +1,120 @@
+{
+  "capturedAt": "2026-10-17T07:30:21.206970+00:00",
+  "session": "804115f7251f",
+  "helper": "ccb10ee4d77d",
+  "failure": {
+    "id": 60874,
+    "sid": "ccb10ee4d77d",
+    "at": "2026-10-17T07:22:02.088Z",
+    "type": "tool_result",
+    "subtype": "respond_general",
+    "keys": ["success", "error", "reason"],
+    "meta": {
+      "success": false,
+      "error": "Model tried to call unavailable tool 'respond_general'. Available tools: context_load, fetch_url, web_search, read_file, grep, compact, read_pil_context, convene_council, ask_user, bash, bash_output_get, process_logs, process_stop, process_list, write_file, edit_file, git_commit, task, consult_parent_session, delegate, delegation_read, delegation_ack, delegation_list, ee_query, retrieve_tool_result, search_session_history, verification_run, ee_health, ee_feedback, ee_write, usage_forensics, lsp_",
+      "reason": "tool-error"
+    }
+  },
+  "mainFinal": {
+    "eventId": 60950,
+    "at": "2026-10-17T07:23:14.041Z",
+    "textLength": 5144,
+    "toolCallCount": 17
+  },
+  "verification": {
+    "red": {
+      "failed": 2
+    },
+    "accepted": {
+      "files": 8,
+      "tests": 91,
+      "exit": 0
+    },
+    "buildExit": 0,
+    "compiledHandoff": {
+      "startedAt": "2026-10-17T07:29:35.507Z",
+      "boundary": "Fresh compiled Agent, actual SDK prepared prompts/tool schemas and isolated SQLite; deterministic mock provider; no paid calls",
+      "checks": {
+        "isolatedHome": true,
+        "actualChildForked": true,
+        "preparedChildContractMatchesExposedTools": true,
+        "mainOwnsFinal": true,
+        "mainFinalPersisted": true,
+        "noUnavailableResponseCall": true
+      },
+      "requests": [
+        {
+          "phase": "helper",
+          "toolsCount": 53,
+          "hasRespondGeneral": false,
+          "hasReadFile": true,
+          "plainTextHandoff": true,
+          "legacyRequired": false
+        },
+        {
+          "phase": "main",
+          "toolsCount": 53,
+          "hasRespondGeneral": false,
+          "hasReadFile": true,
+          "plainTextHandoff": false,
+          "legacyRequired": false
+        }
+      ],
+      "sessionId": "2eb2998a4057",
+      "childId": "813df18f508d",
+      "finishedAt": "2026-10-17T07:29:36.889Z"
+    },
+    "compiledControls": {
+      "startedAt": "2026-10-17T07:28:57.796Z",
+      "finishedAt": "2026-10-17T07:29:05.473Z",
+      "checks": {
+        "settingsHomeIsIsolated": true,
+        "nativeFtsPreflight": true,
+        "completeProposalEnvelope": true,
+        "truncatedProposalRejected": true,
+        "ambiguousProposalRejected": true,
+        "lspStubHasRealPreviewGuidance": true,
+        "healthDoesNotClaimRecallReadiness": true,
+        "defaultProjectPinPreserved": true,
+        "routeStatusShowsPin": true,
+        "routeStatusDoesNotWrite": true,
+        "explicitSuggestKeepsBaselineSetting": true,
+        "autoUsesSameProviderCheaperTier": true,
+        "suggestKeepsBaselineAndReportsCandidate": true,
+        "cachedSuggestRechecksCap": true,
+        "liveTuiModeCommandAndStatus": true,
+        "nativeSelfverifyRebuiltMcpBootAndStatus": true
+      },
+      "runId": "935e2c6e-8b5a-4643-8d2e-247b38de9d43"
+    },
+    "selfverify": {
+      "runId": "935e2c6e-8b5a-4643-8d2e-247b38de9d43",
+      "total": 2,
+      "passed": 2
+    },
+    "limits": [
+      "Mock provider controls, not a paid StepFun trial",
+      "Existing user process not restarted",
+      "No full suite, push or remote deployment"
+    ]
+  },
+  "sha256": {
+    "src/orchestrator/orchestrator.ts": "3c2557302ce78c4027a822d9c228275c7cd06300049b0e088d3a86ea3c776881",
+    "src/orchestrator/sub-session-tool-contract.ts": "22c067bfbfe3eff3cb124f1b43412f788847255178a945e924f9da78c997386d",
+    "src/orchestrator/__tests__/sub-session-tool-contract.test.ts": "06369da9b385be5fc651d2b8f40b898667653c775283435f5b52a82c307d582b",
+    "src/orchestrator/__tests__/sub-session-realdb.test.ts": "ba191fb3bea64c9644913c3c3b94d919506b121e28f506cf88255b3c6eabedf1",
+    "src/orchestrator/__tests__/main-handoff-stream.test.ts": "f87b01e72a035b2f020cb002640723bffaf2d06f9a954bdaf2adf3c2a44b400e",
+    "dist/src/orchestrator/orchestrator.js": "6a70624dccceb94fe8b21b8067b109695be1345d1b08d93dc0a40927f2c5abc6",
+    "dist/src/orchestrator/sub-session-tool-contract.js": "ec4a0d81ddd50ab631a7de464bc3fb9b02a38c57d30db59f67a9f25f50e6aa7b",
+    "docs/investigations/session-804-response-tool-contract-2026-10-17.md": "1ff1d51890af00260dd4a817426b0efb6e64e9e7f3a4ce7417b8a6e0697a7bc3",
+    ".scratch/session-804115f7251f/red.log": "9ccd2819e5f1959e7563d74ac26a448c9f73f11447d64649973a775212a8e313",
+    ".scratch/session-804115f7251f/accepted-tests.log": "e92c30c201297a403fc6116855d317e549efa7cc722b4d7263fd40022238f820",
+    ".scratch/session-804115f7251f/build.log": "bfb7c51d2a4b74a66845c56290322f2167aa490fa3fd1cb7b15b56589f0c67ff",
+    ".scratch/session-804115f7251f/family.json": "7d51b2995438d7c88ec7f59797ef45bdd47b30aca8aedef40b64ec29f823d132",
+    ".scratch/session-804115f7251f/probe.json": "1c1114c5e96f5e08a1fa0053f78ff43be2df876b98c15193ecdaeb278c2051ee",
+    ".scratch/session-804115f7251f/compiled-handoff.mjs": "f7981d67ce805acc80be042b731fa0d74555b32d518f860204f4d324731ab5ea",
+    ".scratch/session-804115f7251f/compiled-handoff.json": "9b4424165e50a9c73f0e258dc91b6a05cba03bbdeca9f62fec83e3c89a7ecedc",
+    ".scratch/session-804115f7251f/compiled-controls.mjs": "cafe5a312955c161d92b7087cdeb959cb01d00d13e1b776598a6e369d554dcd0",
+    ".scratch/session-804115f7251f/compiled-controls.json": "ddbce4c404dbe38bbcccc98c9f1dcfd56c323d279f5b8d660737cc46c35f6127"
+  }
+}

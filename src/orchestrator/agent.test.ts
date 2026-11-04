@@ -76,13 +76,16 @@ describe("Agent class", { timeout: 30_000 }, () => {
     expect(model.length).toBeGreaterThan(0);
   });
 
-  it("can set model", async () => {
+  it("worker can set an explicit catalog model", async () => {
     const { Agent } = await importAgentModule();
+    const { getAnyTestModel } = await import("../__test-helpers__/catalog-fixtures.js");
+    const selected = getAnyTestModel();
     const agent = new Agent(undefined, undefined, undefined, undefined, {
       persistSession: false,
+      executionRole: "worker",
     });
-    agent.setModel("claude-sonnet-4-6-20250514");
-    expect(agent.getModel()).toBe("claude-sonnet-4-6-20250514");
+    agent.setModel(selected);
+    expect(agent.getModel()).toBe(selected);
   });
 
   it("constructs with sandbox mode — always returns 'off' (sandbox removed)", async () => {
@@ -185,12 +188,15 @@ describe("Agent class", { timeout: 30_000 }, () => {
     expect(agent).toBeDefined();
   });
 
-  it("constructs with explicit model parameter", async () => {
+  it("worker constructs with its explicit catalog model parameter", async () => {
     const { Agent } = await importAgentModule();
-    const agent = new Agent(undefined, undefined, "claude-sonnet-4-6-20250514", undefined, {
+    const { getAnyTestModel } = await import("../__test-helpers__/catalog-fixtures.js");
+    const selected = getAnyTestModel();
+    const agent = new Agent(undefined, undefined, selected, undefined, {
       persistSession: false,
+      executionRole: "worker",
     });
-    expect(agent.getModel()).toBe("claude-sonnet-4-6-20250514");
+    expect(agent.getModel()).toBe(selected);
   });
 
   it("startNewSession resets the reactive-escalation tool-chars counter", async () => {

@@ -4,7 +4,17 @@ import * as path from "path";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
-export type LogNamespace = "cli" | "ui" | "orchestrator" | "storage" | "ee" | "mcp" | "pil" | "router";
+export type LogNamespace =
+  | "cli"
+  | "ui"
+  | "orchestrator"
+  | "storage"
+  | "ee"
+  | "mcp"
+  | "pil"
+  | "router"
+  | "integration"
+  | "skills";
 
 export interface LogContext {
   elapsedMs?: number;
@@ -256,7 +266,7 @@ export function serializeErrorRedacted(err: Error): SerializedError {
 /**
  * Returns true if the interactive TUI is active, preventing console writes.
  */
-function isTuiActive(): boolean {
+export function isTuiActive(): boolean {
   try {
     return (globalThis as Record<string, unknown>).__muonroiTuiActive === true;
   } catch {
@@ -309,6 +319,12 @@ function formatConsole(level: LogLevel, ns: LogNamespace, msg: string, ctx?: Log
  * Structured unified logging system.
  */
 export const logger = {
+  /** Persist diagnostics without writing to the terminal, including before TUI startup. */
+  file(level: LogLevel, ns: LogNamespace, msg: string, ctx?: LogContext): void {
+    if (!isLogLevelEnabled(level)) return;
+    appendToFile(level, ns, msg, ctx);
+  },
+
   debug(ns: LogNamespace, msg: string, ctx?: LogContext): void {
     if (!isLogLevelEnabled("debug")) return;
     if (isTuiActive()) {

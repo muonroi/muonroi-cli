@@ -115,7 +115,10 @@ describe("main handoff with real MessageProcessor and mock SDK stream", () => {
       return original(options);
     });
     try {
-      agent = new Agent("test-key", undefined, "deepseek-v4-flash", 2, { persistSession: true });
+      agent = new Agent("test-key", undefined, "deepseek-v4-flash", 2, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
       const chunks = [];
       const emitter = createHeadlessJsonlEmitter(parentId);
@@ -205,8 +208,20 @@ describe("main handoff with real MessageProcessor and mock SDK stream", () => {
         ],
       },
     });
+    const originalStream = handle.model.doStream.bind(handle.model);
+    const helperRequests: Array<{ prompt: string; tools: string[] }> = [];
+    const streamSpy = vi.spyOn(handle.model, "doStream").mockImplementation(async (options) => {
+      const prompt = JSON.stringify(options.prompt);
+      if (options.tools?.length && prompt.includes("You are executing a sub-task delegated by the Main Session")) {
+        helperRequests.push({ prompt, tools: options.tools.map((tool) => tool.name) });
+      }
+      return originalStream(options);
+    });
     try {
-      const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 2, { persistSession: true });
+      const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 2, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
       const chunks = [];
       for await (const chunk of agent.processMessage("What is the sum of two and two?")) chunks.push(chunk);
@@ -220,7 +235,15 @@ describe("main handoff with real MessageProcessor and mock SDK stream", () => {
       const rows = getDatabase().prepare("SELECT message_json FROM messages WHERE session_id = ?").all(parentId);
       expect(JSON.stringify(rows)).toContain("Helper receipt");
       expect(JSON.stringify(rows)).toContain("MAIN_FINAL");
+      expect(helperRequests.length).toBeGreaterThan(0);
+      for (const request of helperRequests) {
+        expect(request.tools).toContain("read_file");
+        expect(request.tools).not.toContain("respond_general");
+        expect(request.prompt).toContain("plain assistant text");
+        expect(request.prompt).not.toContain("MUST return your final response using");
+      }
     } finally {
+      streamSpy.mockRestore();
       handle.uninstall();
       closeDatabase();
       process.chdir(previousCwd);

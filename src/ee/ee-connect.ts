@@ -15,8 +15,9 @@
  *     migrated to a fresh snooze — the old flag no longer suppresses forever.
  *   - At most once per session (deduped in ee-connect-bus).
  */
-import { isEeConnectCardEnabled } from "../gsd/flags.js";
+
 import { loadUserSettings, saveUserSettings } from "../utils/settings.js";
+import { isEeConnectCardEnabled } from "../workflow/flags.js";
 import { getCachedServerBaseUrl, probeEEHealth } from "./auth.js";
 import { publishEeConnect } from "./ee-connect-bus.js";
 

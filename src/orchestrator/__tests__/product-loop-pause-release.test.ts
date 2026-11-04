@@ -50,7 +50,10 @@ const STATUS_PAYLOAD = {
 };
 
 function makeAgent(): Agent {
-  return new Agent("sk-test", undefined, "glm-4.7", undefined, { persistSession: false });
+  return new Agent("sk-test", undefined, "glm-4.7", undefined, {
+    persistSession: false,
+    executionRole: "infrastructure",
+  });
 }
 
 describe("runProductLoopV1 — abandoned interactive card must not leak its watchdog pause", () => {

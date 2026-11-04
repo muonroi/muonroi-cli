@@ -60,13 +60,13 @@ function buildHarnessComponents() {
 }
 
 // ---------------------------------------------------------------------------
-// @ts-expect-error: compile-time define
-const isHarnessEnabled = typeof __MUONROI_HARNESS__ !== "undefined" ? __MUONROI_HARNESS__ : false;
-
 let _Provider: (props: SemanticProviderProps) => ReactNode;
 let _Semantic: (props: SemanticProps) => ReactNode;
 
-if (isHarnessEnabled) {
+// Keep the compile-time expression directly on the branch so bundlers can
+// eliminate registry code without propagating a module-level variable.
+// @ts-expect-error: compile-time define
+if (typeof __MUONROI_HARNESS__ !== "undefined" && __MUONROI_HARNESS__) {
   const { Provider, SemanticNode } = buildHarnessComponents();
   _Provider = Provider;
   _Semantic = SemanticNode;

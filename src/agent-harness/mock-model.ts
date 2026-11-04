@@ -58,7 +58,7 @@ export interface MockModelFixture {
    * calling the model with a distinctive system prompt ("Reply with ONE line of
    * EIGHT lowercase words…") and parses a comma-separated line. The generic
    * fixture stream ("Hello back!" / arbitrary chunks) does not parse → the turn
-   * degrades to intentKind=UNKNOWN, which skips the gsd gate and breaks routing
+   * degrades to intentKind=UNKNOWN, which skips the flow gate and breaks routing
    * in E2E specs. The mock detects that classify call by its system prompt and
    * returns THIS line instead of consuming the turn fixture — so every spec gets
    * a sane classification for free. Override per-fixture when a spec needs a
@@ -105,7 +105,7 @@ const CLASSIFY_SIGNATURE = "Reply with ONE line of EIGHT lowercase words";
  * These fire on their own schedule and are not what any E2E fixture is scripting,
  * but they are still `doStream` calls — so without an intercept each one EATS a
  * fixture round and the agent receives someone else's chunks. Measured in
- * gsd-hard-gate: the recorded calls were
+ * flow-hard-gate: the recorded calls were
  *   [0] session-naming  [1] classify  [2] compaction-proposer  [3] AGENT
  * so the title call consumed the `write_file` tool-call round and the agent got a
  * text-stop round instead — it never emitted the tool call, so the tool result and
@@ -135,7 +135,7 @@ const ANCILLARY_SIGNATURES: ReadonlyArray<{ label: string; signature: string; re
 
 /**
  * Safe default classification: a non-chitchat coding task of standard depth.
- * `intent=task` keeps the toolset + gsd gate active; `standard` depth avoids
+ * `intent=task` keeps the toolset + flow gate active; `standard` depth avoids
  * forcing heavy-only paths. First word MUST be a valid taskType.
  */
 const DEFAULT_CLASSIFY_LINE = "generate, balanced, task, code, standard, local, english, clear";
@@ -208,7 +208,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       // line and DO NOT advance the turn-fixture cursor, so the classify call
       // (which fires on every turn) never steals the round chunks meant for the
       // agent's actual reply. Without this the generic fixture text fails
-      // parseResponse → intentKind=UNKNOWN → gsd gate/routing break in E2E.
+      // parseResponse → intentKind=UNKNOWN → flow gate/routing break in E2E.
       if (interceptClassify && systemPromptText(options).includes(CLASSIFY_SIGNATURE)) {
         if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
           process.stderr.write(`[mock-model] doStream classify → "${classifyLine}"\n`);

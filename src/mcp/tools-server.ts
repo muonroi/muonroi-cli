@@ -27,6 +27,8 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
+import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
+import { runVerificationTests, VERIFICATION_RUNNERS } from "../tools/verification-run.js";
 import { registerForensicsTools } from "./forensics-tools.js";
 import { registerLspTools } from "./lsp-tools.js";
 import { type Job, JobManager, type Runner } from "./self-verify-jobs.js";
@@ -55,6 +57,30 @@ function jobSummary(job: Job): unknown {
 
 export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void {
   server.registerTool(
+    "verification_run",
+    {
+      description:
+        "Run explicit existing local tests with Vitest/Jest/Mocha, JavaScript node:test or pytest in .venv. Select runner when auto is ambiguous. No shell commands, dependency downloads or source-edit gate override.",
+      inputSchema: {
+        cwd: z.string().optional(),
+        files: z.array(z.string()).min(1).max(100),
+        timeoutMs: z.number().min(100).max(300000).optional(),
+        runner: z.enum(VERIFICATION_RUNNERS).optional(),
+      },
+    },
+    async (args, extra) => {
+      try {
+        return ok(
+          await runVerificationTests(args.cwd ?? process.cwd(), args.files, args.timeoutMs, extra.signal, args.runner),
+        );
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.error(`[verification-run] Failed: ${message}`);
+        return fail("verification_failed", message);
+      }
+    },
+  );
+  server.registerTool(
     "selfverify_start",
     {
       description:
@@ -62,6 +88,13 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
       inputSchema: {
         mode: z.enum(["tier1", "agentic"]),
         since: z.string().max(200).optional(),
+        cwd: z.string().max(2000).optional(),
+        files: z.array(z.string().max(2000)).max(500).optional(),
+        mockLlmDir: z
+          .string()
+          .max(2000)
+          .optional()
+          .describe("Omit for bundled offline fixtures; 'none' is supported only in agentic mode."),
         max: z.number().int().min(1).max(50).optional(),
         emit: z.boolean().optional(),
         out: z.string().max(500).optional(),
@@ -71,6 +104,8 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
       },
     },
     async (args) => {
+      const invalid = validateSelfVerifyRequest(args);
+      if (invalid) return fail("invalid_args", invalid);
       if (args.mode === "agentic") {
         if (!args.goal || !args.llm) {
           return fail("invalid_args", "agentic mode requires both goal and llm");
@@ -79,11 +114,21 @@ export function registerSelfVerifyTools(server: McpServer, jm: JobManager): void
         if (!getModelInfo(args.llm)) {
           return fail("unknown_model", `llm '${args.llm}' is not in catalog.json`);
         }
-        const runId = jm.start({ kind: "agentic", goal: args.goal, llm: args.llm, turns: args.turns });
+        const runId = jm.start({
+          kind: "agentic",
+          cwd: args.cwd ?? process.cwd(),
+          goal: args.goal,
+          llm: args.llm,
+          turns: args.turns,
+          mockLlmDir: args.mockLlmDir,
+        });
         return ok({ runId });
       }
       const runId = jm.start({
         kind: "tier1",
+        cwd: args.cwd ?? process.cwd(),
+        files: args.files,
+        mockLlmDir: args.mockLlmDir,
         since: args.since,
         max: args.max,
         emit: args.emit,

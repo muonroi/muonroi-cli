@@ -1,9 +1,11 @@
+import { fileURLToPath } from "node:url";
 import * as fs from "fs";
 import * as os from "os";
 import * as path from "path";
 import { findGitRoot } from "./git-root";
+import { logger } from "./logger.js";
 
-export type SkillScope = "project" | "user";
+export type SkillScope = "project" | "user" | "builtin";
 
 export interface DiscoveredSkill {
   name: string;
@@ -81,11 +83,19 @@ function loadSkillFromDir(rootDir: string, scope: SkillScope): DiscoveredSkill |
     if (!fs.existsSync(skillMdPath) || !fs.statSync(skillMdPath).isFile()) return null;
     const content = fs.readFileSync(skillMdPath, "utf-8");
     const { frontmatter, ok } = extractFrontmatter(content);
-    if (!ok) return null;
+    if (!ok) {
+      logger.file("warn", "skills", "Skill has no valid frontmatter", { skillMdPath });
+      return null;
+    }
     const meta = parseSkillFrontmatter(frontmatter);
     const name = meta.name?.trim();
     const description = meta.description?.trim();
-    if (!name || !description) return null;
+    if (!name || !description) {
+      logger.file("warn", "skills", "Skill metadata is incomplete", { skillMdPath });
+      return null;
+    }
+    // Shared installations belong to other clients. Do not advertise their legacy workflow here.
+    if (/^gsd(?:-|$)/i.test(name) || /^gsd(?:-|$)/i.test(path.basename(rootDir))) return null;
     return {
       name,
       description,
@@ -93,7 +103,8 @@ function loadSkillFromDir(rootDir: string, scope: SkillScope): DiscoveredSkill |
       rootDir: path.resolve(rootDir),
       scope,
     };
-  } catch {
+  } catch (error) {
+    logger.file("warn", "skills", "Could not read skill", { skillMdPath, error: String(error) });
     return null;
   }
 }
@@ -122,13 +133,15 @@ function listSkillDirectories(skillsRoot: string): string[] {
       if (e.isSymbolicLink()) {
         try {
           if (fs.statSync(full).isDirectory()) dirs.push(full);
-        } catch {
+        } catch (error) {
+          logger.file("warn", "skills", "Could not resolve skill symlink", { full, error: String(error) });
           // Dangling symlink (target does not exist) — skip silently.
         }
       }
     }
     return dirs.sort();
-  } catch {
+  } catch (error) {
+    logger.file("warn", "skills", "Could not enumerate skill root", { skillsRoot, error: String(error) });
     return [];
   }
 }
@@ -187,6 +200,12 @@ export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
     }
   }
 
+  // CLI-owned workflow is packaged with the runtime and cannot be replaced by a shared skill.
+  const builtin = loadSkillFromDir(
+    fileURLToPath(new URL("../workflow/skills/muonroi-flow/", import.meta.url)),
+    "builtin",
+  );
+  if (builtin) byName.set(builtin.name, builtin);
   const skills = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name));
   _skillsCache = { skills, cachedAt: now, cwd: projectRoot };
   return skills;
@@ -205,6 +224,15 @@ export function formatSkillsForPrompt(skills: DiscoveredSkill[]): string | null 
       `  <skill>\n    <name>${escapeXml(s.name)}</name>\n    <description>${escapeXml(s.description)}</description>\n    <location>${escapeXml(s.skillMdPath)}</location>\n  </skill>`,
   );
   return `${SKILLS_INSTRUCTIONS}\n\n<available_skills>\n${parts.join("\n")}\n</available_skills>`;
+}
+
+/** Full names remain visible; descriptions/paths are available through context_load. */
+export function formatCompactSkillsForPrompt(skills: DiscoveredSkill[]): string | null {
+  if (!skills.length) return null;
+  return (
+    "AGENT SKILLS: compact index (descriptions abbreviated). Use context_load(topic=skills, query=<name or topic>) for original metadata/path; offset pages the entire catalog. Read the selected SKILL.md before acting; do not omit user-named or repo-required skills.\n" +
+    skills.map((s) => `- ${s.name}: ${s.description.replace(/\s+/g, " ").slice(0, 72)}`).join("\n")
+  );
 }
 
 /** Plain-text listing for /skills slash command in the TUI. */

@@ -106,6 +106,51 @@ async function runToEnd(gen: AsyncGenerator<unknown, unknown, unknown>): Promise
 const isPostDebateCard = (c: any) => c?.type === "council_question" && c?.councilQuestion?.phase === "post-debate";
 
 describe("suppressPostDebate post-debate suppression", () => {
+  it.each([
+    false,
+    true,
+  ])("preserves caller output and exposes synthesis failure=%s without default quality prose", async (failed) => {
+    const { runCouncil } = await import("../index.js");
+    const planning = await import("../planner.js");
+    const exact = '{"recommendation":"needs more evidence"}';
+    const phase = vi.spyOn(planning, "runPlanning").mockImplementation(async function* () {
+      yield* [];
+      return {
+        outcome: null,
+        plan: null,
+        synthesisText: exact,
+        ...(failed ? { synthesisFailReason: "truncated on both attempts" } : {}),
+      };
+    });
+    try {
+      const { chunks, ret } = await runToEnd(
+        runCouncil(
+          "Review MCP gap",
+          "mock-model",
+          [],
+          undefined,
+          buildMockLLM(),
+          vi.fn().mockResolvedValue("unused"),
+          vi.fn().mockResolvedValue(true),
+          async function* () {
+            yield { type: "done" };
+          },
+          {
+            skipClarification: true,
+            skipPil: true,
+            suppressPreDebateCards: true,
+            suppressPostDebate: true,
+            synthesisOutputContract: "Return only the requested JSON.",
+          },
+        ),
+      );
+      expect(ret).toBe(failed ? null : exact);
+      expect(chunks.some((c) => c.type === "error")).toBe(failed);
+      expect(chunks.some(isPostDebateCard)).toBe(false);
+    } finally {
+      phase.mockRestore();
+    }
+  });
   it("does not persist a synthesis that finishes after council cancellation", async () => {
     const { runCouncil } = await import("../index.js");
     const planning = await import("../planner.js");

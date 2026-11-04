@@ -112,7 +112,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     });
     cleanup = handle.uninstall;
     const classify = createLlmClassifier("deepseek-v4-flash");
-    const result = await classify("vendor the gsd subset natively and rename across the repo");
+    const result = await classify("vendor the flow subset natively and rename across the repo");
     expect(result?.taskType).toBe("refactor");
     expect(result?.depthTier).toBe("heavy");
     expect(result?.needsClarification).toBe(false);
@@ -302,7 +302,7 @@ describe("createLlmClassifier (PIL Layer 1 Pass 4)", () => {
     });
     cleanup = clear.uninstall;
     const clearClassify = createLlmClassifier("deepseek-v4-flash");
-    const cr = await clearClassify("vendor the gsd subset natively and rename to workflow, keep tests green");
+    const cr = await clearClassify("vendor the flow subset natively and rename to workflow, keep tests green");
     expect(cr?.needsClarification).toBe(false);
     expect(cr?.depthTier).toBe("heavy");
     clear.uninstall();

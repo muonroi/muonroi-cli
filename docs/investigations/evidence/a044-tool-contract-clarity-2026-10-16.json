@@ -1,0 +1,70 @@
+﻿{
+  "focusedTests": {
+    "files": 6,
+    "failed": 0,
+    "passed": 50
+  },
+  "compiledControls": {
+    "passed": 8,
+    "failed": 0
+  },
+  "recordedAtUtc": "2026-10-16T13:18:41.4620678Z",
+  "files": [
+    {
+      "path": "src/tools/registry.ts",
+      "sha256": "3f6c620309422856a36c4562817639680f1c93557466941a3353c308841f8851",
+      "bytes": 100785
+    },
+    {
+      "path": "src/tools/file-tracker.ts",
+      "sha256": "ec5950621f1a84a0929f5f9651e18dcf749ab654a6ffb62c944fac5865dd13d6",
+      "bytes": 3349
+    },
+    {
+      "path": "src/tools/commit-ledger-refusal.ts",
+      "sha256": "e48722bbf6a993033a1bc5ec1ffa5d96f762302ea7fc298a37b487dd94e09f87",
+      "bytes": 4013
+    },
+    {
+      "path": "src/tools/registry-git-commit-empty-ledger.test.ts",
+      "sha256": "9f00e977b2d0e17866454bdf248892832b1baaf385f019b0bf144114517a485a",
+      "bytes": 8283
+    },
+    {
+      "path": ".scratch/a044-tool-contract-clarity/verify-compiled.mjs",
+      "sha256": "eea9a372fa361ed3791c2cad3ea0a174ff3650633fbce02460cd78764935b3da",
+      "bytes": 2715
+    },
+    {
+      "path": ".scratch/a044-tool-contract-clarity/compiled-result.json",
+      "sha256": "85b6a277d65b69c1dd1fd59a994df8fdee389b93621a7d41fc53f383f90c348e",
+      "bytes": 412
+    },
+    {
+      "path": ".scratch/a044-tool-contract-clarity/tests.log",
+      "sha256": "cecf5977f33370ae31f537eac3383ecab4caf8e4cec2ab9b44602b6a0a4aa790",
+      "bytes": 4584
+    },
+    {
+      "path": ".scratch/a044-tool-contract-clarity/build.log",
+      "sha256": "8c024acbeaee6614a2c08639a158fd0a1ba8ae62f27c6c6430925698112bc263",
+      "bytes": 7486
+    },
+    {
+      "path": ".scratch/a044-tool-contract-clarity/red.log",
+      "sha256": "0ce2cf8a246608276e5f847e938c1013b13c2a6b12846ff871f65f5924c50f56",
+      "bytes": 4888
+    },
+    {
+      "path": "dist/src/tools/registry.js",
+      "sha256": "dcf3ac6c801210b254e1384342b3ac5f307be35a6e3aae0930679358bcbe5e22",
+      "bytes": 102982
+    },
+    {
+      "path": "dist/src/tools/file-tracker.js",
+      "sha256": "14f243832ff631202d21f8d7b99a54f540ccd2143a2bd05a9fabb8f245340586",
+      "bytes": 2286
+    }
+  ],
+  "boundary": "Local build and native isolated controls; full suite and live TUI not run"
+}

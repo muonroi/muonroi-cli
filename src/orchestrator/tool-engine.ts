@@ -63,8 +63,6 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { isGsdHardGateEnabled } from "../gsd/flags.js";
-import { evaluateMutationGate } from "../gsd/mutation-gate.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -95,6 +93,7 @@ import {
   runPipeline,
   shouldHaltOnResponseTool,
 } from "../pil/index.js";
+import { isContinuationPhrase } from "../pil/layer1-intent.js";
 import { isMetaAnalysisPrompt, isPlanExecution } from "../pil/layer6-output.js";
 import { taskTypeToMaxTokens, taskTypeToReasoningEffort, taskTypeToTier } from "../pil/task-tier-map.js";
 import { mentionsEcosystemScope } from "../playbook/directives.js";
@@ -127,6 +126,7 @@ import {
   resolveTemperatureParam,
 } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
+import { ToolCallMarkupLeakError } from "../providers/tool-markup-guard.js";
 import type { ProviderId } from "../providers/types.js";
 import { needsVisionProxy, proxyVision } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
@@ -176,6 +176,9 @@ import {
 } from "../utils/settings";
 import { isFirstTurnToolsEnabledByProject } from "../utils/settings.js";
 import { resolveShell } from "../utils/shell.js";
+import { isFlowHardGateEnabled } from "../workflow/flags.js";
+import { evaluateMutationGate, WORKFLOW_READ_ONLY_TOOLS } from "../workflow/mutation-gate.js";
+import { createPlanReviewBudget } from "../workflow/review-budget.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import type { AskUserAskInfo } from "./ask-user.js";
@@ -184,6 +187,8 @@ import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.j
 import { relaxCompactionSettings } from "./compaction";
 import { evaluateCompactionConsult } from "./compaction-consult.js";
 import { takeProposerStallNotice } from "./compaction-stall-notice.js";
+import { completionScopeGuidance, ownedCompletionScope } from "./completion-scope.js";
+import { readContextPreservation } from "./context-preservation.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
 import type { CouncilManager } from "./council-manager.js";
 import { consumeCouncilConvene, hasPendingCouncilConvene, peekCouncilConveneToolCallId } from "./council-request.js";
@@ -194,6 +199,7 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
+import { filterExecutionTools, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
 import {
   appendNoticeToFinalMessages,
   buildOutputLimitContinuationPrompt,
@@ -204,7 +210,7 @@ import {
 } from "./output-limit-continuation.js";
 import type { PendingCallsLog } from "./pending-calls.js";
 import { stableCallId } from "./pending-calls.js";
-import { createPromptMeasurer } from "./prompt-breakdown.js";
+import { assertRequestFitsContext, createPromptMeasurer, recordPreparedRequest } from "./prompt-breakdown.js";
 import {
   applyModelConstraints,
   buildMcpCapabilityBlock,
@@ -270,6 +276,7 @@ import {
   initCompactionHysteresisState,
 } from "./subagent-compactor.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
+import { projectTaskContext, TaskContext } from "./task-context.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity, isToolActivityLive, withToolActivity } from "./tool-activity.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
@@ -288,7 +295,7 @@ import {
  * orchestrator via `processMessageFn` carrying an already-reviewed plan, marked
  * with `SPRINT_EXECUTION_MARKER` (/ideal) or `COUNCIL_PLAN_EXECUTION_MARKER`
  * (the council's per-phase loop) — is a KNOWN code-writing task that must not
- * be starved by a noisy classify. Observed live (2026-07-10, gsd-core
+ * be starved by a noisy classify. Observed live (2026-07-10, flow-core
  * migration): the impl prompt was classified `analyze`/default → capped at
  * 4_096 output → the model spent the whole budget narrating its plan, hit
  * `finishReason:"length"` mid-word, produced ZERO code, and the turn wedged.
@@ -467,6 +474,7 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
     userMessage: string,
     opts: {
       skipClarification: boolean;
+      infrastructure?: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage: ModelMessage;
       /** Agent-convened run: no human to answer the launch / preflight / escalation cards. */
@@ -654,6 +662,7 @@ function stripWriteTools(tools: ToolSet): ToolSet {
     "bash_output_get",
     "process_list",
     "delegation_read",
+    "delegation_ack",
     "delegation_list",
     "ee_query",
     "ee_health",
@@ -805,6 +814,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // retry or stall reprompt (`continue streamAttempt`) cannot reset the
   // counter and exceed the intended cap of auto-compactions per turn
   // (default 6, env MUONROI_TOOL_LIMIT_AUTO_RECOVER_CAP).
+  const taskContext = new TaskContext(
+    deps.session?.id ?? crypto.randomUUID(),
+    deps.bash.getCwd(),
+    deps.messages,
+    isContinuationPhrase(userMessage),
+    "orient",
+    isContinuationPhrase,
+  );
+  taskContext.contextProtection = deps.getContextProtection;
+  await taskContext.refreshProtection();
   let toolLimitAutoRecoverCount = 0;
   const TOOL_LIMIT_AUTO_RECOVER_CAP = getToolLimitAutoRecoverCap();
   // Convene-council loop guard. The agent may convene the council at most once
@@ -814,6 +833,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // per-stream-attempt) so a `continue` restart cannot reset it. Live-caught:
   // the model looped convene→synthesis→convene, burning a second council.
   let conveneRunsThisTurn = 0;
+  // A new provider attempt rebuilds tools; keep expensive review allowance
+  // outside that loop just like the convene-council request counter.
+  const planReviewBudget = deps.planReviewBudget ?? createPlanReviewBudget();
   const COUNCIL_MAX_CONVENES_PER_TURN = (() => {
     const raw = Number.parseInt(process.env.MUONROI_MAX_CONVENES_PER_TURN ?? "", 10);
     return Number.isFinite(raw) && raw >= 1 ? raw : 1;
@@ -847,6 +869,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
   // message at most this many times; past the cap the reply gets a visible
   // cut-off notice instead. See output-limit-continuation.ts.
   let outputLimitContinuations = 0;
+  // Session81: a failed text-only synthesis must not silently finish the task.
+  // One tool-enabled continuation may repair a typed markup failure; never
+  // execute the suppressed command or reset the remaining step budget.
+  let emptyFinalRecoveries = 0;
+  let emptyFinalSpentSteps = 0;
   const outputLimitContinuationCap = getOutputLimitContinuationCap();
 
   // F3c — per-turn LLM call cap: counts every streamText() invocation
@@ -932,6 +959,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // that interrupted text mid-generation. See shouldContinueAfterMidLoopStall.
       let chunksThisStep = 0;
       let completedStepMessages: ModelMessage[] = [];
+      // SDK onStepFinish can precede consumption/persistence of fullStream tool-call chunks.
+      // Only a completed result from an exposed native Flow tool establishes ownership here.
+      let currentTurnFlowUsed = false;
       // Decide whether a fired stall watchdog should re-prompt (re-issue the
       // same request) instead of falling through to rescue/error. Returns the
       // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
@@ -997,6 +1027,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let reasoningPreview = "";
       let encryptedReasoningHidden = false;
       let streamOk = false;
+      let retryEmptyFinal = false;
+      let finalAnswerFailed = false;
       let closeMcp: (() => Promise<void>) | undefined;
       let disposeProviderWatchdog: (() => void) | undefined;
       let stepNumber = -1;
@@ -1063,11 +1095,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             | undefined) ??
           "standard";
         const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
+          planReviewBudget,
+          executionRole: deps.executionRole,
+          credentialedProvider: deps.providerId,
+          taskContext,
           runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
           runDelegation: (request, abortSignal) =>
             deps.runDelegation(request, combineAbortSignals(signal, abortSignal)),
-          readDelegation: (id) => deps.readDelegation(id),
+          readDelegation: (id, artifact) => deps.readDelegation(id, artifact),
+          sendDelegation: deps.sendDelegation,
+          acknowledgeDelegation: deps.acknowledgeDelegation,
+          acceptDelegation: deps.acceptDelegation,
+          startCouncil: deps.startCouncil,
+          startPlanReview: deps.startPlanReview,
+          readPlanReview: deps.readPlanReview,
           listDelegations: () => deps.listDelegations(),
+          killDelegation: (id) => deps.killDelegation(id),
           modelId: turnModelId,
           depthTier,
           sessionId: deps.session?.id,
@@ -1087,6 +1130,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // synthesis from a prior council run.
             deps.councilManager.setLastSynthesis(null);
             const gen = deps.runCouncilV2(topic, {
+              infrastructure: true,
               abortSignal: combineAbortSignals(signal, abortSignal),
               skipClarification: true,
               skipPil: true,
@@ -1182,18 +1226,22 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         const _userTurnCount = (deps.messages as Array<{ role?: string }>).filter((m) => m?.role === "user").length;
         const _isFirstTurn = _userTurnCount <= 1;
         const _firstTurnToolsEnabled = _isFirstTurn && isFirstTurnToolsEnabledByProject();
-        let rawToolSet: ToolSet = selectRawToolSet({
-          baseTools: baseToolsRaw,
-          supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
-          firstTurnToolsEnabled: _firstTurnToolsEnabled,
-          isChitchat,
-          isDirectAnswer,
-          priorTurnHadTools: _priorTurnHadTools,
-        });
+        let rawToolSet: ToolSet =
+          deps.executionRole === "orchestrator"
+            ? { ...baseToolsRaw }
+            : selectRawToolSet({
+                baseTools: baseToolsRaw,
+                supportsClientTools: turnCaps.supportsClientTools(runtime.modelInfo),
+                firstTurnToolsEnabled: _firstTurnToolsEnabled,
+                isChitchat,
+                isDirectAnswer,
+                priorTurnHadTools: _priorTurnHadTools,
+              });
         // MCP skip: chitchat / direct-answer / greeting inputs don't need 7 MCP servers'
         // worth of tool schemas (~20K input tokens). PIL Layer 1 already
         // gates this conservatively (≤10 chars + ≤2 words OR brain "none").
         if (
+          deps.executionRole !== "orchestrator" &&
           deps.mode === "agent" &&
           (!isChitchat || _priorTurnHadTools) &&
           !isDirectAnswer &&
@@ -1314,6 +1362,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // is built before any MCP server connects and is REPLACED (not mutated)
         // by the spread merges above - so without this both answered as if no
         // mcp_* tool existed. See setLiveToolSet in src/tools/registry.ts.
+        rawToolSet = filterExecutionTools(rawToolSet, baseToolsRaw, deps.executionRole ?? "worker");
         setLiveToolSet(rawToolSet);
         const pipeline = buildTurnToolPipeline(rawToolSet, {
           capOptions: {
@@ -1333,11 +1382,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // Wrap non-read-only tools in a turn-scoped mutex to prevent race conditions during parallel execution.
         const writeMutex = new SimpleMutex();
         const READ_ONLY_TOOLS = new Set([
+          ...WORKFLOW_READ_ONLY_TOOLS,
           "read_file",
           "grep",
           "bash_output_get",
           "process_list",
           "delegation_read",
+          "delegation_ack",
           "delegation_list",
           "delegate",
           "ask_user",
@@ -1360,22 +1411,26 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         /**
          * Tools that perform mutations (writes, edits, side-effects).
          * MUTATION_TOOLS are read from this set to route them through the mutation
-         * gate and prevent accidental execution when GSD hard gate is active.
+         * gate and prevent accidental execution when FLOW hard gate is active.
          * Registration: add the tool name string to this set and ensure the tool
          * itself is wired in the tool assembly step.
          */
         const MUTATION_TOOLS = new Set(["lsp_mutation_preview"]);
 
-        // Task 8: native GSD mutation gate. Read once per turn (not per call) since
+        // Task 8: native FLOW mutation gate. Read once per turn (not per call) since
         // hardGateEnabled/directAnswer don't change mid-turn; the gate itself
         // re-reads STATE.md per call (cheap fs read) so it stays live if the
-        // model advances phase/verdict mid-turn via gsd_* tools.
-        const gsdHardGateEnabled = isGsdHardGateEnabled();
-        const gsdDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer;
+        // model advances phase/verdict mid-turn via flow_* tools.
+        const flowHardGateEnabled = isFlowHardGateEnabled();
+        const flowDirectAnswer = (pilCtx as { directAnswer?: boolean }).directAnswer;
 
         for (const name of Object.keys(tools)) {
           const tool = tools[name];
           if (!tool || typeof tool.execute !== "function") continue;
+          // Main's new direct reads use the existing SDK/UI approval path in safe mode.
+          if (deps.executionRole === "orchestrator" && (name === "read_file" || name === "grep")) {
+            tool.needsApproval = deps.permissionMode === "safe";
+          }
           const originalExecute = tool.execute;
           // Read-only tools skip the mutation gate and the write mutex, but ALL
           // tools get a breadcrumb: a freeze can start under any of them, and a
@@ -1400,8 +1455,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 if (!guarded) return await originalExecute(input, context);
                 const gate = evaluateMutationGate(deps.bash.getCwd(), {
                   toolName: name,
-                  hardGateEnabled: gsdHardGateEnabled,
-                  directAnswer: gsdDirectAnswer,
+                  hardGateEnabled: flowHardGateEnabled,
+                  directAnswer: flowDirectAnswer,
+                  input,
                 });
                 if (gate.blocked) {
                   // Return the SAME shape the wrapped tool returns — a string. The
@@ -1411,8 +1467,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   // a `{success,output,error}` object here made that value serialize
                   // to EMPTY: the gate still prevented the write (verified: target
                   // file absent), but the model was told nothing, so it could not act
-                  // on "call gsd_status → gsd_discuss → gsd_plan → gsd_plan_review"
-                  // and just saw a blank result. Measured in gsd-hard-gate: round 2's
+                  // on "call flow_status → flow_discuss → flow_plan → flow_plan_review"
+                  // and just saw a blank result. Measured in flow-hard-gate: round 2's
                   // tool-result value was "\n\n[step 1 mirror] …" — only the
                   // convergence-mirror note appended to an empty string.
                   return gate.reason;
@@ -1451,7 +1507,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // biome-ignore lint/suspicious/noExplicitAny: matches RuntimeResult.providerOptions shape (any) used downstream
         const baseProviderOpts: any = buildTurnProviderOptions(runtime, { sessionId: deps.session?.id }) ?? {};
         const providerOpts =
-          runtime.modelInfo?.reasoning && runtime.modelInfo?.provider === "anthropic"
+          deps.executionRole !== "orchestrator" &&
+          runtime.modelInfo?.reasoning &&
+          runtime.modelInfo?.provider === "anthropic"
             ? {
                 ...baseProviderOpts,
                 anthropic: {
@@ -1504,12 +1562,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // F3c — tool-turn: use reduced system prompt (skip
         // native-capabilities + skills already shown in first call).
         const activeSystem = llmCallsThisTurn > 0 && toolTurnSystem ? toolTurnSystem : system;
-        const systemWithWorkbook = shouldInjectCheapModelWorkbook(runtime.modelInfo)
-          ? injectCheapModelWorkbook(activeSystem, pilCtx.taskType)
-          : activeSystem;
-        const systemWithPlaybook = shouldInjectCheapModelPlaybook(runtime.modelInfo)
-          ? injectCheapModelPlaybook(systemWithWorkbook)
-          : systemWithWorkbook;
+        const activeParts = llmCallsThisTurn > 0 && toolTurnSystem ? (args.toolTurnParts ?? systemParts) : systemParts;
+        const systemWithWorkbook =
+          deps.executionRole !== "orchestrator" && shouldInjectCheapModelWorkbook(runtime.modelInfo)
+            ? injectCheapModelWorkbook(activeSystem, pilCtx.taskType)
+            : activeSystem;
+        const systemWithPlaybook =
+          deps.executionRole !== "orchestrator" && shouldInjectCheapModelPlaybook(runtime.modelInfo)
+            ? injectCheapModelPlaybook(systemWithWorkbook)
+            : systemWithWorkbook;
         // A2: front-load a one-line shell/env directive for fast-tier models.
         // The authoritative ENVIRONMENT block already states OS/shell/cwd in
         // the prompt body, but budget models underweight non-front-loaded
@@ -1517,12 +1578,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // from resolveShell({}) (same source as buildEnvironmentBlock) so it
         // is always accurate to the actual shell the bash tool will spawn.
         // Gated to fast tier, so the claude branch below still sees `system`.
-        const systemWithShell = shouldInjectCheapModelPlaybook(runtime.modelInfo)
-          ? injectCheapModelShellDirective(
-              systemWithPlaybook,
-              cheapModelShellLine(resolveShell({}).kind, process.platform),
-            )
-          : systemWithPlaybook;
+        const systemWithShell =
+          deps.executionRole !== "orchestrator" && shouldInjectCheapModelPlaybook(runtime.modelInfo)
+            ? injectCheapModelShellDirective(
+                systemWithPlaybook,
+                cheapModelShellLine(resolveShell({}).kind, process.platform),
+              )
+            : systemWithPlaybook;
 
         // Append the LIVE MCP tool roster so the agent calls connected MCP
         // tools by their exact mcp_<server>__<tool> name instead of shelling
@@ -1532,7 +1594,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // the cached staticPrefix; for claude it lands in the second
         // (non-cached) system message via the slice below.
         const mcpCapabilityBlock = buildMcpCapabilityBlock(Object.keys(tools));
-        const systemWithCaps = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
+        const capabilitySystem = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
+        const systemWithCaps =
+          deps.executionRole === "orchestrator" ? `${capabilitySystem}\n\n${ORCHESTRATOR_CONTRACT}` : capabilitySystem;
 
         // Task 3 — non-Claude prompt-cache prefix stability. On non-Claude the
         // system is a single string; per-turn-dynamic content (dynamicSuffix +
@@ -1549,7 +1613,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           : splitFrontAndDynamicTail({
               modelId: runtime.modelId,
               systemWithCaps,
-              staticPrefix: systemParts.staticPrefix,
+              staticPrefix: activeParts.staticPrefix,
             });
         // Only relocate when the enriched user message is actually present to
         // receive the tail; otherwise fall back to the original single string so
@@ -1562,7 +1626,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         if (process.env.MUONROI_DEBUG_CACHE_PREFIX === "1") {
           try {
             console.error(
-              `[cache-prefix] model=${runtime.modelId} staticPrefixLen=${systemParts.staticPrefix.length} ` +
+              `[cache-prefix] model=${runtime.modelId} staticPrefixLen=${activeParts.staticPrefix.length} ` +
                 `frontLen=${_nonClaudeFront.length} dynTailLen=${_nonClaudeDynamicTail.length} ` +
                 `fold=${_willFoldDynamicTail} msgCount=${(deps.messages as unknown[]).length}`,
             );
@@ -1575,12 +1639,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           ? [
               {
                 role: "system" as const,
-                content: systemParts.staticPrefix,
+                content: activeParts.staticPrefix,
                 providerOptions: { anthropic: { cacheControl: { type: "ephemeral" as const } } },
               },
               {
                 role: "system" as const,
-                content: systemWithCaps.slice(systemParts.staticPrefix.length),
+                content: systemWithCaps.slice(activeParts.staticPrefix.length),
               },
             ]
           : _willFoldDynamicTail
@@ -1588,13 +1652,46 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             : systemWithCaps;
 
         const measurePrompt = await createPromptMeasurer(systemForModel, tools);
-        const capturePromptBreakdown = (messages: readonly ModelMessage[]) => {
-          deps.setLastPromptBreakdown({
+        const turnMaxOutputTokensParam = resolveMaxOutputTokensParam(runtime, resolveTurnMaxOutputTokens(pilCtx));
+        const capturePromptBreakdown = (messages: readonly ModelMessage[], stepNumber?: number) => {
+          const measured = {
             ...measurePrompt(messages),
-            staticPrefixChars: systemParts.staticPrefix.length,
-            dynamicSuffixChars: systemParts.dynamicSuffix.length,
+            ...activeParts.components,
+            ...taskContext.measurements(messages, deps.executionRole),
+            requestHistoryReusedChars: historyReplayRestored ? 0 : (historyReplay?.savedChars ?? 0),
+          };
+          deps.setLastPromptBreakdown({
+            ...measured,
+            staticPrefixChars: activeParts.staticPrefix.length,
+            dynamicSuffixChars: activeParts.dynamicSuffix.length,
             playwrightGuidanceChars: playwrightGuidance.length,
           });
+          const contextWindow = runtime.modelInfo?.contextWindow ?? 0;
+          const blocked =
+            contextWindow > 0 &&
+            Number.isFinite(contextWindow) &&
+            measured.estimatedInputTokens + Math.max(0, turnMaxOutputTokensParam.maxOutputTokens ?? 0) > contextWindow;
+          if (stepNumber !== undefined || blocked)
+            recordPreparedRequest(
+              {
+                sessionId: deps.session?.id,
+                modelId: runtime.modelId,
+                callId: _topCallId,
+                stepNumber: stepNumber ?? 0,
+                requestPhase: stepNumber === undefined ? "preflight" : "step",
+                contextWindowTokens: runtime.modelInfo?.contextWindow ?? 0,
+                reservedOutputTokens: turnMaxOutputTokensParam.maxOutputTokens,
+                contextStage: taskContext.enabled ? taskContext.snapshot().stage : undefined,
+                contextStageSource: taskContext.enabled ? taskContext.selectionSource : undefined,
+              },
+              { ...measured, contextBudgetBlocked: blocked ? 1 : 0 },
+              measurePrompt.toolSchemas,
+            );
+          assertRequestFitsContext(
+            measured.estimatedInputTokens,
+            runtime.modelInfo?.contextWindow ?? 0,
+            turnMaxOutputTokensParam.maxOutputTokens,
+          );
         };
 
         // Task 2.6a — assign a fresh correlation ID for this top-level streamText call.
@@ -1641,13 +1738,30 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         );
         // Substitute the enriched user message for the current turn so the LLM sees PIL additions,
         // while leaving the DB-persisted `deps.messages` clean for future turns.
-        const _messagesForCall = (deps.messages as any[]).map((m: any) =>
+        const _canonicalMessagesForCall = (deps.messages as any[]).map((m: any) =>
           m === userModelMessage
             ? _willFoldDynamicTail
               ? foldDynamicTailIntoUserMessage(userEnrichedMessage, _nonClaudeDynamicTail)
               : userEnrichedMessage
             : m,
         );
+        const requestHistory = !_isClaudeModel && deps.session ? deps.requestHistory : undefined;
+        const historyScope = JSON.stringify([
+          deps.session?.id,
+          deps.bash.getCwd(),
+          runtime.modelId,
+          systemForModel,
+          deps.permissionMode,
+          deps.bash.getSandboxMode(),
+          getCompactionFocus(),
+          topLevelCompactThreshold,
+          topLevelCompactKeepLast,
+          topLevelCompactTailBudget,
+        ]);
+        if (taskContext.working.active() || taskContext.working.retainedToolIds().length > 0) requestHistory?.clear();
+        const historyReplay = requestHistory?.project(_canonicalMessagesForCall, historyScope);
+        let historyReplayRestored = false;
+        const _messagesForCall = historyReplay?.messages ?? _canonicalMessagesForCall;
         if (wireDebug.enabled) {
           wireDebug.logRequest({
             providerId: runtime.modelInfo?.provider ?? "unknown",
@@ -1668,11 +1782,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // is unrepresentable for Anthropic and the API rejects the request.
         const _topMessagesForCall = applyAnthropicPromptCaching(
           foldMidConversationSystemMessages(
-            turnCaps.sanitizeHistory(_messagesForCall) as typeof deps.messages,
+            turnCaps.sanitizeHistory(
+              taskContext.enabled ? taskContext.working.project(_messagesForCall) : _messagesForCall,
+            ) as typeof deps.messages,
           ) as typeof deps.messages,
           runtime.modelId,
         );
-        capturePromptBreakdown(_topMessagesForCall);
+        capturePromptBreakdown(
+          isChitchat && !taskContext.working.active()
+            ? _topMessagesForCall
+            : projectTaskContext(_topMessagesForCall, taskContext, deps.executionRole),
+        );
         // Closure-mutable cap for the tool-loop askcard rescue.
         // Phase 1 (SAMR) skips the dynamic cap (it's a single-step path).
         // Algorithm extracted to ./tool-loop-cap.ts so it can be unit-tested.
@@ -1681,8 +1801,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // the turn instead stops when N consecutive steps only repeat calls this
         // loop already made with the same result (no-progress-guard.ts).
         const _stepLimits = resolveTurnStepLimits({
-          maxToolRounds: deps.maxToolRounds,
-          hardMaxToolRounds: deps.hardMaxToolRounds,
+          maxToolRounds: Math.max(1, deps.maxToolRounds - emptyFinalSpentSteps),
+          hardMaxToolRounds: Math.max(1, deps.hardMaxToolRounds - emptyFinalSpentSteps),
         });
         const _noProgress = _stepLimits.stopOnNoProgress ? createNoProgressGuard() : null;
         let _noProgressHit = false;
@@ -1850,6 +1970,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // _ceilingHit and _ceilingHitAtStep are kept for telemetry: a
         // crossing event is logged for forensics, but no action is taken.
         const dynamicStopWhen = (async (state: { steps: ReadonlyArray<unknown> }) => {
+          // A native plan-review allowance is a host resource limit, not a
+          // model-overridable pattern hint. End tool execution and let the
+          // existing tool-free finalization report the unresolved review.
+          if (planReviewBudget.stopRequested) return true;
           // F3b — HARD cap: absolute non-bumpable ceiling per user turn.
           // Fires AFTER the soft cap (maxToolRounds) has been bumped by the
           // user. Prevents runaway sessions (session 526a83cf22df: 16 LLM
@@ -1953,7 +2077,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // write-ahead and this point was timed, so when session
               // 1096fc59144c showed 97s of wall clock with zero LLM calls logged
               // in the gap, the cause was simply unattributable — MCP acquire and
-              // the GSD assessor were both ruled out afterwards by elimination,
+              // the FLOW assessor were both ruled out afterwards by elimination,
               // not by measurement. On attempt 1 this is the pre-stream setup
               // cost; on a retry it is cumulative (setup + earlier attempts +
               // backoff), which is exactly the number the turn watchdog races.
@@ -2113,7 +2237,6 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // ended at "…vẫn 429 sau 2.6–"). resolveMaxOutputTokensParam widens a
         // reasoning model to its catalog-declared ceiling and also owns the
         // OAuth/capability drop rule — same helper every council call uses.
-        const turnMaxOutputTokensParam = resolveMaxOutputTokensParam(runtime, resolveTurnMaxOutputTokens(pilCtx));
         const result = streamText({
           model: runtime.model,
           system: systemForModel,
@@ -2128,7 +2251,23 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Conservative: only fixes the two observed Qwen-style defects.
           // See src/orchestrator/tool-args-repair.ts for the transforms.
           experimental_repairToolCall: repairToolCallHook,
-          prepareStep: ({ stepNumber: sn, messages: stepMessages }) => {
+          prepareStep: async ({ stepNumber: sn, messages: stepMessages }) => {
+            if (taskContext.working.active()) await taskContext.refreshProtection();
+            const preservation = readContextPreservation(stepMessages);
+            if (
+              preservation.preserveFullContext ||
+              preservation.keepToolIds.length > 0 ||
+              taskContext.working.active() ||
+              taskContext.working.retainedToolIds().length > 0
+            ) {
+              requestHistory?.clear();
+              if (historyReplay) {
+                stepMessages = historyReplay.restore(stepMessages);
+                historyReplayRestored = true;
+              }
+            }
+            taskContext.working.setSource(stepMessages);
+            if (taskContext.enabled) stepMessages = taskContext.working.project(stepMessages);
             chunksThisStep = 0;
             if (deps.isSubSession) {
               logger.info("orchestrator", "Sub-session executing tool round", {
@@ -2214,8 +2353,23 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               if (_mirrorNote && baseRes.messages) {
                 baseRes.messages = attachReminderToMessages(baseRes.messages, _mirrorNote) as typeof stepMessages;
               }
-              capturePromptBreakdown(baseRes.messages ?? stepMessages);
-              return baseRes;
+              taskContext.alignCwd(deps.bash.getCwd());
+              if (sn > 0) taskContext.observe(baseRes.messages ?? stepMessages);
+              const projected =
+                isChitchat && !taskContext.working.active()
+                  ? (baseRes.messages ?? stepMessages)
+                  : projectTaskContext(baseRes.messages ?? stepMessages, taskContext, deps.executionRole);
+              const completionScope = ownedCompletionScope(
+                deps.bash.getCwd(),
+                deps.session?.id,
+                deps.executionRole,
+                currentTurnFlowUsed,
+              );
+              const scoped = completionScope
+                ? attachReminderToMessages(projected, completionScopeGuidance(completionScope))
+                : projected;
+              capturePromptBreakdown(scoped, sn);
+              return { ...baseRes, messages: scoped };
             };
             // Compute the mirror once per prepareStep call. Empty on early steps
             // or when there's no overlap signal — see buildConvergenceMirror.
@@ -2226,27 +2380,17 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // PRESERVE_FULL_CONTEXT skips the compactor entirely (full history).
             // KEEP_TOOL_IDS: id1,id2 (from prior stub " (id=...) ") protects only those specific tool results
             // without the cost of a full veto. Parsed from reasoning or assistant note.
-            let keepToolIds: string[] = [];
-            const hasPreserve = stripped.some((m: any) => {
-              const c = m?.content;
-              const texts: string[] = [];
-              if (typeof c === "string") texts.push(c);
-              if (Array.isArray(c)) {
-                for (const p of c) if (typeof p?.text === "string") texts.push(p.text);
-              }
-              const joined = texts.join(" ");
-              if (joined.includes("PRESERVE_FULL_CONTEXT")) return true;
-              // Idea 3: parse lighter token
-              const mKeep = joined.match(/KEEP_TOOL_IDS\s*[:=]\s*([a-z0-9_, -]+)/i);
-              if (mKeep) {
-                keepToolIds = mKeep[1]
-                  .split(/[,\s]+/)
-                  .map((s) => s.trim())
-                  .filter(Boolean);
-              }
-              return false;
-            });
-            if (hasPreserve) {
+            const { preserveFullContext: hasPreserve, keepToolIds: preservationIds } =
+              readContextPreservation(stripped);
+            const keepToolIds = [...new Set([...preservationIds, ...taskContext.working.retainedToolIds()])];
+            // A replay may omit entire old tool pairs. Once explicitly pinned,
+            // keep the restored prefix for this turn; the compactor's history
+            // slice runs before its per-result KEEP filtering and could drop
+            // that restored pair again (cross-turn-request-history: old-0).
+            if (
+              hasPreserve ||
+              (historyReplayRestored && (historyReplay?.savedChars ?? 0) > 0 && keepToolIds.length > 0)
+            ) {
               return withSteers({ messages: stripped });
             }
 
@@ -2342,8 +2486,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // (estimateCompactionPressure) and the compaction it predicts cannot
             // drift apart. persistArtifact is deliberately NOT in the base: the
             // predictor must not persist anything, only this real run may.
-            const runCompaction = (focusOverride?: string | null): ModelMessage[] =>
-              compactSubAgentMessages(stripped, {
+            const runCompaction = (focusOverride?: string | null): ModelMessage[] => {
+              const compacted = compactSubAgentMessages(stripped, {
                 ...compactOptsBase(),
                 focusNote: resolveFocusNote(focusOverride),
                 persistArtifact,
@@ -2364,6 +2508,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   deps.crossTurnDedup?.noteElided(ids);
                 },
               });
+              if (
+                compacted !== stripped &&
+                !taskContext.working.active() &&
+                keepToolIds.length === 0 &&
+                pendingSteers.length === 0
+              ) {
+                requestHistory?.remember(deps.messages, compacted, historyScope);
+              }
+              return compacted;
+            };
 
             // O3 — compaction hysteresis (holds the frozen compacted prefix
             // between compactions so the provider prompt-cache prefix stays
@@ -2507,7 +2661,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   // history and defeats the batching win. One read_file carrying N
                   // paths is ONE tool_call → never split → the token cut holds on
                   // every provider.
-                  const _b = `[Tool batching: you called ${_total} read-only tool(s) one-at-a-time — each extra call re-sends the whole conversation, so N single reads cost O(N²) tokens. To read MULTIPLE files, call read_file ONCE with file_paths=["a","b","c"] — a SINGLE tool_call that no provider splits. For other read-only tools (grep, bash_output_get), emit all pending calls in ONE assistant turn. Do NOT sequence reads across steps.]`;
+                  const _b =
+                    deps.executionRole === "orchestrator"
+                      ? "[Tool batching: group independent exposed coordination calls when useful. Delegate substantive inspection, audits and probes to eligible workers; do not probe missing work tools. Pending background jobs require ending the turn, not repeated polling.]"
+                      : `[Tool batching: you called ${_total} read-only tool(s) one-at-a-time — each extra call re-sends the whole conversation, so N single reads cost O(N²) tokens. To read MULTIPLE files, call read_file ONCE with file_paths=["a","b","c"] — a SINGLE tool_call that no provider splits. For other read-only tools (grep, bash_output_get), emit all pending calls in ONE assistant turn. Do NOT sequence reads across steps.]`;
                   // Attach to `coalesced` (the B4-compacted history), NOT `stripped`:
                   // read-only tools (read_file/grep/…) are exactly what triggers this
                   // reminder, and returning `stripped` here silently discarded the
@@ -2635,6 +2792,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           },
           onStepFinish: (event) => {
             if (providerSignal.aborted) return;
+            if (
+              deps.executionRole === "orchestrator" &&
+              event.content.some(
+                (part) =>
+                  part.type === "tool-result" &&
+                  part.toolName.startsWith("flow_") &&
+                  Object.hasOwn(tools, part.toolName),
+              )
+            )
+              currentTurnFlowUsed = true;
             completedStepMessages = event.response.messages as ModelMessage[];
             const currentStep = getStepNumber(event, Math.max(stepNumber, 0));
             stepNumber = Math.max(stepNumber, currentStep);
@@ -2830,7 +2997,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // an in-step spam — this does. Surface only the first indicator;
               // if the model spams past the cap, finalize NOW with the
               // buffered answer instead of streaming out the degenerate step.
-              if (isResponseTool(tc.function.name)) {
+              if (tools[tc.function.name] && isResponseTool(tc.function.name)) {
                 _responseToolEmitCount += 1;
                 try {
                   const _payload = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
@@ -2899,7 +3066,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                         priorWarningIdsInSession: Array.from(deps.priorWarningIdsInSession as Set<string>).slice(-20),
                       }
                     : {}),
-                  ...(pilCtx.gsdPhase ? { gsdPhase: pilCtx.gsdPhase } : {}),
+                  ...(pilCtx.flowPhase ? { flowPhase: pilCtx.flowPhase } : {}),
                   ...(userMessage.slice(0, 200) ? { userGoalExcerpt: userMessage.slice(0, 200) } : {}),
                 };
                 const preInput: PreToolUseHookInput = {
@@ -3225,11 +3392,19 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                       : undefined;
                   logInteraction(deps.session.id, "tool_result", {
                     eventSubtype: tc.function.name,
-                    data: { success: tr.success, outputPreview, ...(diffMeta ? { diff: diffMeta } : {}) },
+                    data: {
+                      success: tr.success,
+                      outputPreview,
+                      ...(tr.preview ? { preview: true } : {}),
+                      ...(diffMeta ? { diff: diffMeta } : {}),
+                    },
                   });
                 }
-              } catch {
-                /* fail-open */
+              } catch (error) {
+                logger.file("warn", "storage", "Tool result diagnostic write failed", {
+                  tool: tc.function.name,
+                  error,
+                });
               }
               // Durably record the finished call NOW, not at turn end. If the
               // turn is aborted later (idle watchdog on a wedged tool), the
@@ -3240,6 +3415,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               if (deps.sessionStore && deps.session) {
                 persistToolResultWriteAhead(deps.session.id, part.toolCallId, {
                   success: tr.success,
+                  ...(tr.preview ? { preview: true } : {}),
                   output: tr.output,
                   error: tr.error,
                 });
@@ -3255,15 +3431,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // dedicated chunk so the sticky checklist panel can re-render
               // without parsing tool args itself. Skipped when the snapshot
               // doesn't parse (malformed args) so the UI is never poisoned.
-              if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("gsd_"))) {
+              if (tr.success && (tc.function.name === "todo_write" || tc.function.name.startsWith("flow_"))) {
                 try {
-                  // A gsd_* call means the workflow plan IS the checklist. A
+                  // A flow_* call means the workflow plan IS the checklist. A
                   // todo_write does not: preferring the CWD's `.planning/PLAN.md`
                   // there replaced the model's own todos with whatever plan the
                   // repo happens to carry.
-                  const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-                  const snap = tc.function.name.startsWith("gsd_")
-                    ? getTaskListSnapshotFromGsd(deps.bash.getCwd())
+                  const { getTaskListSnapshotFromFlow } = require("../workflow/phase-sync.js");
+                  const snap = tc.function.name.startsWith("flow_")
+                    ? getTaskListSnapshotFromFlow(deps.bash.getCwd())
                     : null;
                   if (snap) {
                     yield { type: "task_list_update", taskListSnapshot: snap };
@@ -4204,6 +4380,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             let _f6Elapsed = 0;
             let _f6ChunkChars = 0;
             let _f6Error: string | null = null;
+            let _f6MarkupFailure = false;
             // A response tool already produced the final structured answer —
             // F6 synthesis would duplicate it as prose. Skip entirely. With
             // the stopWhen terminal-halt above, the turn now ends right after
@@ -4231,7 +4408,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 try {
                   const _ff = await forcedFinalize({
                     model: runtime.model,
-                    messages: _topMessagesForCall as unknown[],
+                    messages: [..._topMessagesForCall, ...scrubbed] as unknown[],
                     system: typeof systemForModel === "string" ? systemForModel : undefined,
                   });
                   _f6Elapsed = Date.now() - _f6Start;
@@ -4248,7 +4425,44 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   _f6Elapsed = Date.now() - _f6Start;
                   _f6Outcome = "error";
                   _f6Error = (_err as Error)?.message?.slice(0, 200) ?? String(_err).slice(0, 200);
+                  _f6MarkupFailure = _err instanceof ToolCallMarkupLeakError;
+                  logger.file("warn", "orchestrator", "Final synthesis failed", {
+                    error: _f6Error,
+                    sessionId: deps.session?.id,
+                  });
                 }
+              }
+            }
+            if ((_f6Outcome === "error" || _f6Outcome === "fired_empty") && !signal.aborted) {
+              retryEmptyFinal =
+                _f6MarkupFailure &&
+                !_toolsAreEmpty &&
+                emptyFinalRecoveries < 1 &&
+                textToolReSteerCount < MAX_TEXT_TOOL_RESTEER &&
+                !_hardCapHit &&
+                !_noProgressHit &&
+                !_ceilingHit &&
+                _lastFinishReason !== "length" &&
+                stepNumber + 1 < _stepLimits.softCap &&
+                stepNumber + 1 < _stepLimits.hardCap;
+              // Output-token truncation has its own bounded continuation below.
+              if (!retryEmptyFinal && _lastFinishReason !== "length") {
+                finalAnswerFailed = true;
+                const notice =
+                  "\n\n[Task incomplete: the model did not produce a usable final answer. Completed tool results have been retained. Retry the request or switch model.]";
+                _f6SynthesisText = notice;
+                assistantText += notice;
+                yield { type: "content", content: notice };
+                if (deps.session)
+                  logInteraction(deps.session.id, "final_answer_failure", {
+                    model: turnModelId,
+                    data: {
+                      outcome: _f6Outcome,
+                      markupFailure: _f6MarkupFailure,
+                      recoveries: emptyFinalRecoveries,
+                      completedToolCalls: activeToolCalls.length,
+                    },
+                  });
               }
             }
             try {
@@ -4262,6 +4476,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     error: _f6Error,
                     ceilingHit: _ceilingHit,
                     scrubbedLen: scrubbed.length,
+                    recoveryScheduled: retryEmptyFinal,
                   },
                 });
               }
@@ -4434,6 +4649,29 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           deps.appendCompletedTurn(userModelMessage, [{ role: "assistant", content: stripDsmlMarkup(assistantText) }]);
         }
 
+        if (retryEmptyFinal && streamOk && !signal.aborted) {
+          emptyFinalRecoveries++;
+          textToolReSteerCount++;
+          emptyFinalSpentSteps += stepNumber + 1;
+          deps.messages.push({
+            role: "user",
+            content:
+              "[Final answer recovery] Your last attempt ended without a usable answer and its text-only synthesis emitted invalid tool markup. " +
+              "Continue the original request from the completed tool evidence above. Do not repeat completed actions. " +
+              "If further work is required, use the actual tool interface subject to its normal approvals; never write tool-call XML as text. " +
+              "Otherwise give the user the verified result and remaining blockers.",
+          });
+          deps.messageSeqs.push(null);
+          if (deps.session)
+            logInteraction(deps.session.id, "final_answer_recovery", {
+              model: turnModelId,
+              data: { attempt: emptyFinalRecoveries, spentSteps: emptyFinalSpentSteps },
+            });
+          stall.dispose();
+          await closeMcp?.();
+          continue;
+        }
+
         // Fallback: model responded in text despite tool_choice=required
         // Attempt JSON extraction from assistant text → yield as structured_response
         if (_hasResponseTools && !responseToolCalled && pilCtx.taskType && assistantText.trim()) {
@@ -4479,7 +4717,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               taskHash,
               tier,
               runtime.modelId,
-              "success", // Phase 6: all normal completions = 'success'
+              finalAnswerFailed ? "fail" : "success",
               0, // retryCount: 0 for first attempt
               turnDuration,
             );
@@ -4487,7 +4725,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // HTTP path: also report via router store taskHash (covers warm/cold EE routes)
           const storeHash = routerStore.getState().taskHash;
           if (storeHash) {
-            reportRouteOutcome(storeHash, "success", turnDuration);
+            reportRouteOutcome(storeHash, finalAnswerFailed ? "fail" : "success", turnDuration);
           }
         }
 
@@ -4528,6 +4766,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 bashCodeBlock: _codeBlockBash,
                 textToolXmlLeak: _textToolCall.detected,
                 textToolXmlTool: _textToolCall.tool,
+                incomplete: finalAnswerFailed,
               },
             });
           }
@@ -4982,6 +5221,7 @@ export function coalesceReadOnlyMessages(messages: any[]): any[] {
     "bash_output_get",
     "process_list",
     "delegation_read",
+    "delegation_ack",
     "delegation_list",
     "ee_query",
     "ee_health",

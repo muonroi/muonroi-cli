@@ -1005,7 +1005,7 @@ export function analyzeRevision(repoRoot: string, rev: string): AnalyzeResult {
     return analyze({
       treeRoot: dir,
       changedFiles,
-      baselineSources: readBaselineSources(repoRoot, `${rev}^`, changedFiles),
+      baselineSources: readBaselineSources(repoRoot, `${rev}^`, changedFiles, rev),
       baselineLabel: `${rev}^..${rev}`,
     });
   } finally {
@@ -1034,11 +1034,35 @@ export function analyzeRevision(repoRoot: string, rev: string): AnalyzeResult {
   }
 }
 
-export function readBaselineSources(repoRoot: string, ref: string, files: string[]): Map<string, string> {
+export function readBaselineSources(
+  repoRoot: string,
+  ref: string,
+  files: string[],
+  revision?: string,
+): Map<string, string> {
   const map = new Map<string, string>();
+  // Preserve the baseline of Git-detected moves. Existing exports in a renamed
+  // module are not additions; newly added exports in that module still are.
+  const renamedFrom = new Map<string, string>();
+  const statuses = git(repoRoot, [
+    "diff",
+    "--find-renames",
+    "--name-status",
+    "-z",
+    ref,
+    ...(revision ? [revision] : []),
+  ]).split("\0");
+  for (let i = 0; i < statuses.length && statuses[i]; ) {
+    const status = statuses[i++]!;
+    const original = statuses[i++]!;
+    if (status.startsWith("R") || status.startsWith("C")) {
+      const destination = statuses[i++]!;
+      renamedFrom.set(destination, original);
+    }
+  }
   for (const f of files) {
     try {
-      map.set(f, git(repoRoot, ["show", `${ref}:${f}`]));
+      map.set(f, git(repoRoot, ["show", `${ref}:${renamedFrom.get(f) ?? f}`]));
     } catch (err) {
       // A file ADDED by the change is absent from the baseline, so this failure
       // is the normal path, not an error. git's own text lands in `stderr` on

@@ -5,6 +5,17 @@ export default defineConfig([
   {
     entry: {
       index: "src/index.ts",
+      protocol: "src/protocol.ts",
+      "argv-contract": "src/argv-contract.ts",
+      selector: "src/selector.ts",
+      predicate: "src/predicate.ts",
+      driver: "src/driver.ts",
+      idle: "src/idle.ts",
+      "mock-llm": "src/mock-llm.ts",
+      "spec-helpers": "src/spec-helpers.ts",
+      "notification-bridge": "src/notification-bridge.ts",
+      "event-filter": "src/event-filter.ts",
+      "event-redact": "src/event-redact.ts",
       lint: "src/lint.ts",
       "mcp-server": "src/mcp-server.ts",
       registry: "src/registry.ts",

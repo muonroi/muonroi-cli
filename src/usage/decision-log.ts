@@ -22,10 +22,12 @@ import * as path from "node:path";
 import { redactSecrets } from "../utils/logger.js";
 
 export type DecisionKind =
+  | "auth-fallback"
   | "auto-council"
   | "post-turn-compact"
   | "router-tier"
   | "permission-override"
+  | "permission-mode"
   | "yolo-override"
   | "scope-gate";
 

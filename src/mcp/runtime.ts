@@ -2,7 +2,13 @@ import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
 import { jsonSchema } from "@ai-sdk/provider-utils";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { recordIntegrationHealth } from "../utils/integration-health.js";
+import { mcpIdentityEnvironment } from "./stdio-identity.js";
+
+export { mcpIdentityEnvironment } from "./stdio-identity.js";
+
 import type { ToolSet } from "ai";
+import { logger } from "../utils/logger.js";
 import type { McpServerConfig } from "../utils/settings.js";
 import { capMcpToolResult } from "./cap-tool-result.js";
 import { MCP_FULL_INPUT_SCHEMA } from "./full-schema.js";
@@ -13,7 +19,7 @@ import {
   partitionEnabledServers,
 } from "./key-requirements.js";
 import { getMcpKey } from "./mcp-keychain.js";
-import { createOAuthProviderWithCallback } from "./oauth-provider.js";
+import { createOAuthProviderWithCallback, ensureOAuthSignedIn } from "./oauth-provider.js";
 import { validateMcpServerConfig } from "./validate.js";
 
 async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfig> {
@@ -26,7 +32,7 @@ async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfi
   return { ...server, env: { ...(server.env ?? {}), [hydration.envVar]: key } };
 }
 
-function mcpToolPrefix(server: McpServerConfig): string {
+export function mcpToolPrefix(server: McpServerConfig): string {
   return `mcp_${server.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
@@ -195,7 +201,7 @@ function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider
     return new StdioClientTransport({
       command,
       args,
-      env: server.env ? { ...getDefaultEnvironment(), ...server.env } : undefined,
+      env: { ...getDefaultEnvironment(), ...mcpIdentityEnvironment(), ...server.env },
       cwd: server.cwd,
       stderr: "pipe",
     });
@@ -290,10 +296,18 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
   if (server.transport !== "stdio" && opts?.onOAuthRequired) {
     const oauthResult = await createOAuthProviderWithCallback({
       serverId: server.id,
+      serverUrl: server.url ?? "",
       onAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url),
     });
     authProvider = oauthResult.provider;
     cleanup = oauthResult.close;
+    // Keep the callback server alive when this throws: the browser redirect
+    // lands on it after the sign-in prompt, and onCode then persists tokens.
+    await ensureOAuthSignedIn(oauthResult.provider, {
+      label: server.label,
+      url: server.url ?? "",
+      headers: server.headers,
+    });
   }
 
   const client = await createMCPClient({
@@ -327,10 +341,46 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
       ...(stripped as object),
       description: `[MCP ${server.label}] ${tool.description ?? name}${paramNote}`,
       ...(typeof baseExecute === "function"
-        ? { execute: async (args: unknown, options: unknown) => capMcpToolResult(await baseExecute(args, options)) }
+        ? {
+            execute: async (args: unknown, options: unknown) => {
+              try {
+                const result = await baseExecute(args, options);
+                const isError =
+                  !!result && typeof result === "object" && (result as { isError?: boolean }).isError === true;
+                recordIntegrationHealth({
+                  component: `mcp:${server.id}`,
+                  check: `tool:${name}`,
+                  status: isError ? "unavailable" : "ready",
+                  detail: isError
+                    ? String(JSON.stringify(result)).slice(0, 1200)
+                    : "Tool completed; this proves only this call.",
+                });
+                return capMcpToolResult(result);
+              } catch (error) {
+                recordIntegrationHealth({
+                  component: `mcp:${server.id}`,
+                  check: `tool:${name}`,
+                  status: "unavailable",
+                  detail: String(error),
+                });
+                logger.file("warn", "mcp", "MCP tool call failed", {
+                  serverId: server.id,
+                  tool: name,
+                  error: String(error),
+                });
+                throw error;
+              }
+            },
+          }
         : {}),
     } as ToolSet[string];
   }
+  recordIntegrationHealth({
+    component: `mcp:${server.id}`,
+    check: "connection",
+    status: "ready",
+    detail: `Connected; ${Object.keys(tools).length} tools advertised. Tool execution not certified.`,
+  });
   return { tools, client, cleanup };
 }
 
@@ -411,7 +461,7 @@ export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuil
   // Surface (not swallow) any server that didn't make it — never silently
   // degrade to "builtins only" without a trace.
   if (errors.length > 0) {
-    console.error(`[MCP] ${errors.length} server(s) unavailable this turn: ${errors.join(" | ")}`);
+    logger.file("warn", "mcp", `[MCP] ${errors.length} server(s) unavailable this turn: ${errors.join(" | ")}`);
   }
 
   return {

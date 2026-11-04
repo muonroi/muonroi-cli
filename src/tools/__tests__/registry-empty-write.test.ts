@@ -20,7 +20,7 @@ interface Exec {
 
 describe("registry empty write_file guard", () => {
   it("blocks write_file with empty args", async () => {
-    process.env.MUONROI_GSD_NATIVE = "0";
+    process.env.MUONROI_FLOW_NATIVE = "0";
     const tools = createBuiltinTools(new BashTool(process.cwd()), "agent");
     const wf = tools.write_file as unknown as Exec;
     const result = await wf.execute({});
@@ -31,7 +31,7 @@ describe("registry empty write_file guard", () => {
   });
 
   it("blocks edit_file with missing fields", async () => {
-    process.env.MUONROI_GSD_NATIVE = "0";
+    process.env.MUONROI_FLOW_NATIVE = "0";
     const tools = createBuiltinTools(new BashTool(process.cwd()), "agent");
     const ef = tools.edit_file as unknown as Exec;
     const result = await ef.execute({ file_path: "x.ts" });
@@ -42,7 +42,7 @@ describe("registry empty write_file guard", () => {
   });
 
   it("still blocks a blank-string file_path via the per-tool guard", async () => {
-    process.env.MUONROI_GSD_NATIVE = "0";
+    process.env.MUONROI_FLOW_NATIVE = "0";
     const tools = createBuiltinTools(new BashTool(process.cwd()), "agent");
     const wf = tools.write_file as unknown as Exec;
     // Every key is PRESENT, so the generic presence guard passes and the
@@ -53,7 +53,7 @@ describe("registry empty write_file guard", () => {
   });
 
   it("still blocks a blank-string file_path in edit_file via the per-tool guard", async () => {
-    process.env.MUONROI_GSD_NATIVE = "0";
+    process.env.MUONROI_FLOW_NATIVE = "0";
     const tools = createBuiltinTools(new BashTool(process.cwd()), "agent");
     const ef = tools.edit_file as unknown as Exec;
     const result = await ef.execute({ file_path: "  ", old_string: "a", new_string: "b" });

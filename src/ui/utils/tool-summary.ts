@@ -26,6 +26,7 @@ const CATEGORIES: Record<string, Category> = {
   read: { gerund: "Reading", past: "read", noun: "file", nounPlural: "files" },
   write: { gerund: "Writing", past: "wrote", noun: "file", nounPlural: "files" },
   edit: { gerund: "Editing", past: "edited", noun: "file", nounPlural: "files" },
+  preview: { gerund: "Previewing", past: "previewed", noun: "file", nounPlural: "files" },
   bash: { gerund: "Running", past: "ran", noun: "shell command", nounPlural: "shell commands" },
   search: { gerund: "Searching", past: "ran", noun: "search", nounPlural: "searches" },
   agent: { gerund: "Exploring", past: "ran", noun: "sub-agent", nounPlural: "sub-agents" },
@@ -33,9 +34,10 @@ const CATEGORIES: Record<string, Category> = {
 };
 
 /** Stable phrase order so the recap doesn't reshuffle as items land. */
-const ORDER = ["read", "write", "edit", "bash", "search", "agent", "other"] as const;
+const ORDER = ["read", "write", "edit", "preview", "bash", "search", "agent", "other"] as const;
 
 export function categoryForTool(name: string): string {
+  if (name === "edit_file_preview") return "preview";
   if (name === "write_file" || /^mcp_+filesystem__write_file$/.test(name)) return "write";
   if (name === "edit_file" || /^mcp_+filesystem__edit_file$/.test(name)) return "edit";
   if (name === "bash") return "bash";

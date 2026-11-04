@@ -30,6 +30,20 @@ function toolResults(...outputs: Array<{ toolName: string; value: string }>): Mi
 }
 
 describe("buildConvergenceMirror — when there's nothing to mirror", () => {
+  it("does not count earlier user turns as work performed in the current turn", () => {
+    const messages: MirrorMessage[] = [
+      { role: "user", content: "Previous investigation" },
+      assistantWithTools({ toolName: "read_file", input: { file_path: "old.ts" } }),
+      toolResults({ toolName: "read_file", value: "previous evidence" }),
+      { role: "user", content: "Current question" },
+      assistantWithTools({ toolName: "grep", input: { pattern: "new evidence" } }),
+      toolResults({ toolName: "grep", value: "current evidence" }),
+    ];
+    const note = buildConvergenceMirror(messages, { stepNumber: 1 });
+    expect(note).toContain("This turn: 1 tool call(s)");
+    expect(note).not.toContain("read_file×");
+  });
+
   it("returns empty for an empty message list", () => {
     expect(buildConvergenceMirror([], { stepNumber: 1 })).toBe("");
   });

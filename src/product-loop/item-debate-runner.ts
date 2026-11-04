@@ -49,8 +49,8 @@ import { runCouncil } from "../council/index.js";
 import { buildItemDebateFocus, buildItemDebateTopic } from "../council/item-debate-topic.js";
 import { resolveLeaderModel } from "../council/leader.js";
 import type { CouncilLLM, CouncilStats, PreflightResponder, QuestionResponder } from "../council/types.js";
-import { isContextRailEnabled } from "../gsd/flags.js";
 import type { CouncilRoundRecord, CouncilStanceMark, CouncilStanceRow, StreamChunk } from "../types/index.js";
+import { isContextRailEnabled } from "../workflow/flags.js";
 import { criterionIdFromText } from "./criteria-seed.js";
 import { type DebatableItem, type SelectDebatableItemsInput, selectDebatableItems } from "./debatable-items.js";
 import {

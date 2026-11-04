@@ -1,5 +1,7 @@
 import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
+import { isCompactedToolOutput, isCompactorElisionMarker } from "../orchestrator/subagent-compactor.js";
+import { WORKING_CONTEXT_TAG } from "../orchestrator/working-context.js";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -70,6 +72,7 @@ function sanitizeBase64InMessageJson(json: string): string {
  * the rendered view filters them out.
  */
 const INTERNAL_COUNCIL_MARKER_PREFIXES = [
+  `${WORKING_CONTEXT_TAG}\n`,
   "[Debate Transcript]",
   "[Council Round ",
   "[Council Outcome]",
@@ -545,6 +548,7 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
     // (loadStoredToolResults would keep only the last anyway, but forensics and
     // row counts must not silently double).
     const deleteToolResults = db.prepare(`DELETE FROM tool_results WHERE tool_call_row_id = ?`);
+    const hasToolResult = db.prepare(`SELECT 1 FROM tool_results WHERE tool_call_row_id = ? LIMIT 1`);
     const updateSession = db.prepare(`
       UPDATE sessions
       SET updated_at = ?
@@ -571,9 +575,13 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
             createdAt,
             createdAt,
           );
+          // Compacted model history is a view, not a replacement for captured evidence.
+          const captured = isCompactorElisionMarker(part.input)
+            ? (selectToolCall.get(sessionId, part.toolCallId) as StoredToolCallRow | undefined)
+            : undefined;
           updateToolCall.run(
-            part.toolName,
-            JSON.stringify(part.input ?? {}),
+            captured?.tool_name ?? part.toolName,
+            captured?.args_json ?? JSON.stringify(part.input ?? {}),
             "completed",
             createdAt,
             sessionId,
@@ -591,6 +599,8 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
             toolCall = selectToolCall.get(sessionId, part.toolCallId) as StoredToolCallRow | undefined;
           }
           if (!toolCall) continue;
+
+          if (isCompactedToolOutput(part.output) && hasToolResult.get(toolCall.id)) continue;
 
           const extracted = extractToolResultFromOutput(part.output);
           deleteToolResults.run(toolCall.id);
@@ -918,7 +928,13 @@ export function markToolCallErrored(sessionId: string, toolCallId: string, error
   }
 }
 
-export function appendCompaction(sessionId: string, firstKeptSeq: number, summary: string, tokensBefore: number): void {
+export function appendCompaction(
+  sessionId: string,
+  firstKeptSeq: number,
+  summary: string,
+  tokensBefore: number,
+  retainedContext?: string,
+): void {
   withTransaction((db) => {
     db.prepare(`
       INSERT INTO compactions (session_id, first_kept_seq, summary, tokens_before, created_at)
@@ -930,6 +946,8 @@ export function appendCompaction(sessionId: string, firstKeptSeq: number, summar
       SET updated_at = ?
       WHERE id = ?
     `).run(new Date().toISOString(), sessionId);
+    // Commit the host-selected working set with the compaction, not only in live memory.
+    if (retainedContext) appendSystemMessage(sessionId, retainedContext);
   });
 }
 
@@ -1124,7 +1142,12 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
           continue;
         }
         if (content) {
-          entries.push({ type: "user", content, timestamp });
+          entries.push({
+            type: "user",
+            content,
+            timestamp,
+            ...(message.providerOptions?.muonroi?.internalActivity === true ? { internal: true } : {}),
+          });
         }
         continue;
       }
@@ -1140,8 +1163,14 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         if (content && !isInternalCouncilMarker(content) && !content.startsWith("[Helper receipt:")) {
           entries.push(
             summaryText !== null
-              ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
-              : { type: "assistant", content, timestamp },
+              ? {
+                  type: "assistant",
+                  content,
+                  timestamp,
+                  internal: true,
+                  sourceLabel: "⋯ context checkpoint (auto-compacted)",
+                }
+              : { type: "assistant", content, timestamp, internal: true },
           );
         }
         continue;
@@ -1344,16 +1373,16 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
 }
 
 /**
- * Did THIS session (or any session in its chain) actually drive a GSD workflow?
+ * Did THIS session (or any session in its chain) actually drive a FLOW workflow?
  *
- * The GSD task list is derived from `.planning/PLAN.md`, which belongs to the
+ * The FLOW task list is derived from `.planning/PLAN.md`, which belongs to the
  * WORKING DIRECTORY, not to a session — every session opened in a repo that
  * once had a plan would otherwise inherit it. That is exactly how resuming a
  * chat that never wrote a todo came back with a pinned checklist of someone
  * else's finished plan. Restoring it is only correct when this conversation is
  * the one running that workflow.
  */
-export function sessionUsedGsdWorkflow(sessionId: string): boolean {
+export function sessionUsedFlowWorkflow(sessionId: string): boolean {
   const chain = getSessionChain(sessionId);
   const db = getDatabase();
   for (const id of chain) {
@@ -1362,13 +1391,13 @@ export function sessionUsedGsdWorkflow(sessionId: string): boolean {
         .prepare(`
           SELECT 1 AS hit
           FROM tool_calls
-          WHERE session_id = ? AND tool_name LIKE 'gsd\\_%' ESCAPE '\\'
+          WHERE session_id = ? AND (tool_name LIKE 'flow\\_%' ESCAPE '\\' OR tool_name LIKE 'gsd\\_%' ESCAPE '\\')
           LIMIT 1
         `)
         .get(id) as { hit: number } | undefined;
       if (row) return true;
     } catch (err) {
-      logger.error("storage", "[transcript] sessionUsedGsdWorkflow query failed", {
+      logger.error("storage", "[transcript] sessionUsedFlowWorkflow query failed", {
         sessionId: id,
         message: (err as Error)?.message,
       });

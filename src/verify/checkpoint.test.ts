@@ -68,6 +68,46 @@ afterEach(() => {
 });
 
 describe("verify checkpoints", () => {
+  it("requests exact bootstrap commands before list/create effects and denial prevents spawn", async () => {
+    const dir = makeTempDir("muonroi-verify-approval-");
+    fs.writeFileSync(
+      path.join(dir, "package.json"),
+      JSON.stringify({ dependencies: { next: "15.0.0" }, scripts: { dev: "next dev" } }),
+    );
+    fs.writeFileSync(path.join(dir, "package-lock.json"), "");
+    const profile = inferVerifyProjectProfile(dir);
+    const denied = vi.fn(async (operation) => {
+      expect(operation).toEqual({ command: "shuru", args: ["checkpoint", "list"], cwd: dir });
+      throw new Error("permission_required: denied list");
+    });
+    await expect(ensureVerifyCheckpoint(dir, profile, profile.sandboxSettings, undefined, denied)).rejects.toThrow(
+      /denied list/,
+    );
+    expect(execFileMock).not.toHaveBeenCalled();
+    expect(spawnMock).not.toHaveBeenCalled();
+    execFileMock.mockImplementation((_command, _args, _options, callback) => {
+      (callback as any)(null, "", "");
+      return {} as never;
+    });
+    const approve = vi.fn(async (operation) => {
+      if (operation.args[1] === "list") {
+        expect(execFileMock).not.toHaveBeenCalled();
+        return;
+      }
+      expect(operation.command).toBe("shuru");
+      expect(operation.cwd).toBe(dir);
+      expect(operation.args.slice(0, 2)).toEqual(["checkpoint", "create"]);
+      expect(operation.args.join(" ")).toContain("--mount");
+      expect(spawnMock).not.toHaveBeenCalled();
+      throw new Error("permission_required: denied create");
+    });
+    await expect(ensureVerifyCheckpoint(dir, profile, profile.sandboxSettings, undefined, approve)).rejects.toThrow(
+      /denied create/,
+    );
+    expect(approve).toHaveBeenCalledTimes(2);
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
   it("skips checkpoint creation when no install commands are needed", async () => {
     const dir = makeTempDir("muonroi-verify-ckpt-go-");
     fs.writeFileSync(path.join(dir, "go.mod"), "module example.com/demo\n");

@@ -87,12 +87,10 @@ describe("injectCheapModelPlaybook", () => {
     expect(CHEAP_MODEL_PLAYBOOK).toMatch(/ERROR/);
   });
 
-  it("rule 1 wording now applies to every bash call (not just retries)", () => {
-    // Live forensics showed cheap models rationalized that the first call
-    // isn't a re-run, so the "NEVER re-run" wording let them skip the rule.
-    // The new wording explicitly says EVERY bash call.
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/EVERY bash call/i);
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/do NOT pipe.*tail/i);
+  it("keeps complete failure evidence without requiring cache reads for sufficient output", () => {
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Use returned output directly when sufficient");
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Keep full build/test/failure output");
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Focused read-only pipes are allowed");
   });
 
   it("steers fix QUALITY: root-cause over masking (rule 5) and read real failure logs (rule 6)", () => {

@@ -1,0 +1,408 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+
+// Host-hermeticity: `resolvePlanCouncilLeader` early-returns the *session* model
+// whenever the session provider is disabled, and `isProviderDisabled` reads the
+// developer's real ~/.muonroi-cli/user-settings.json (there is no settings-path
+// env seam). So on any machine where the user has turned deepseek off — a normal
+// thing to do — the standard-depth leader stayed `deepseek-v4-flash` and this
+// file failed, while passing on hosts that leave it on. The beforeAll below
+// already forces the *key* axis of reachability; this forces the *disabled*
+// axis, which it missed. Production behaviour is deliberately untouched: not
+// promoting into a provider the user disabled is correct.
+vi.mock("../../utils/settings.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../utils/settings.js")>();
+  return { ...actual, isProviderDisabled: vi.fn().mockReturnValue(false) };
+});
+
+import { loadCatalog } from "../../models/registry.js";
+import { ensurePlanningWorkspace } from "../config-bridge.js";
+import { planningArtifact } from "../paths.js";
+import { runPlanCouncil } from "../plan-council.js";
+import { perspectivesForDepth } from "../plan-council-prompts.js";
+import { canExecute, readPlanVerifyVerdict } from "../workflow-engine.js";
+
+const GOOD_PLAN = `# Plan
+
+1. Edit src/foo.ts — add export
+2. Add test in src/foo.test.ts
+3. Acceptance: bun test src/foo.test.ts passes
+`;
+
+const SESSION_MODEL = "deepseek-v4-flash";
+
+describe("plan-council", () => {
+  it("persists a distinct review id with explicit revision provenance and actionable concerns", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "plan-review-id-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN);
+    const runPerspectiveFn = async () =>
+      JSON.stringify({
+        verdict: "revise",
+        concerns: ["Specify the fixture timeout"],
+        evidence: ["Plan inspection"],
+        rationale: "Acceptance command is incomplete",
+      });
+    const first = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn,
+    });
+    const second = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn,
+      revisionCycle: 1,
+    });
+    expect(first.reviewId).toBeTruthy();
+    expect(second.reviewId).not.toBe(first.reviewId);
+    expect(second.concerns).toContain("Specify the fixture timeout");
+    expect(readFileSync(planningArtifact(tmp, "PLAN-VERIFY.md"), "utf8")).toContain(`reviewId: ${second.reviewId}`);
+    expect(readFileSync(planningArtifact(tmp, "PLAN-REVIEW.md"), "utf8")).toContain("Revision cycle: 1");
+    expect(canExecute(tmp, "standard").allowed).toBe(false);
+  });
+  let tmp: string;
+  let priorDeepseekKey: string | undefined;
+
+  beforeAll(async () => {
+    await loadCatalog();
+    // resolvePlanCouncilLeader gates leader promotion on the session provider
+    // being *reachable* (getConfiguredProviders → key/OAuth present). Without a
+    // deepseek credential it returns the session model unchanged (flash) instead
+    // of the catalog leader (deepseek-v4-pro). On a dev box with a stored key the
+    // promotion fires; on clean CI it does not — the exact "works on my machine"
+    // split that made this file's standard-depth assertion fail only on CI.
+    // Force a deterministic, hermetic reachability via env so the leader resolves
+    // to deepseek-v4-pro on every host. This never triggers a network call: the
+    // default perspective path is the offline heuristicReview.
+    priorDeepseekKey = process.env.DEEPSEEK_API_KEY;
+    // A non-secret, obviously-synthetic value that only needs to clear the
+    // length>=20 reachability threshold in getConfiguredProviders. Built from a
+    // repeated char (zero entropy) so the secret scanner does not flag it.
+    process.env.DEEPSEEK_API_KEY = `deepseek-test-reachability-${"x".repeat(20)}`;
+  });
+
+  afterAll(() => {
+    if (priorDeepseekKey === undefined) delete process.env.DEEPSEEK_API_KEY;
+    else process.env.DEEPSEEK_API_KEY = priorDeepseekKey;
+  });
+
+  afterEach(() => {
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("skips council at quick depth", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-"));
+    ensurePlanningWorkspace(tmp, "m");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    const result = await runPlanCouncil({ cwd: tmp, sessionModelId: SESSION_MODEL, depth: "quick" });
+    expect(result.skipped).toBe(true);
+    expect(perspectivesForDepth("quick")).toHaveLength(0);
+  });
+
+  it.each([
+    "returns late",
+    "throws",
+  ])("does not retry or overwrite review artifacts when an aborted debate %s", async (mode) => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-cancel-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    const reviewPath = planningArtifact(tmp, "PLAN-REVIEW.md");
+    const verifyPath = planningArtifact(tmp, "PLAN-VERIFY.md");
+    writeFileSync(reviewPath, "EXISTING_REVIEW", "utf8");
+    writeFileSync(verifyPath, "EXISTING_VERDICT", "utf8");
+    const controller = new AbortController();
+    const runDebate = vi.fn(async () => {
+      controller.abort(new DOMException("Review cancelled", "AbortError"));
+      if (mode === "throws") throw controller.signal.reason;
+      return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+    });
+    await expect(
+      runPlanCouncil({
+        cwd: tmp,
+        sessionModelId: SESSION_MODEL,
+        depth: "standard",
+        runDebate,
+        abortSignal: controller.signal,
+      }),
+    ).rejects.toThrow("Review cancelled");
+    expect(runDebate).toHaveBeenCalledTimes(1);
+    expect(readFileSync(reviewPath, "utf8")).toBe("EXISTING_REVIEW");
+    expect(readFileSync(verifyPath, "utf8")).toBe("EXISTING_VERDICT");
+  });
+
+  it("runs 2 perspectives at standard depth and writes PLAN-VERIFY.md", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    const result = await runPlanCouncil({ cwd: tmp, sessionModelId: SESSION_MODEL, depth: "standard" });
+    expect(result.skipped).toBe(false);
+    expect(result.leaderModelId).toBe("deepseek-v4-pro");
+    expect(result.perspectives).toHaveLength(2);
+    expect(existsSync(planningArtifact(tmp, "PLAN-REVIEW.md"))).toBe(true);
+    expect(existsSync(planningArtifact(tmp, "PLAN-VERIFY.md"))).toBe(true);
+    expect(readPlanVerifyVerdict(tmp)).toBe("pass");
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("runs 5 perspectives at heavy depth", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-"));
+    ensurePlanningWorkspace(tmp, "m");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    const result = await runPlanCouncil({ cwd: tmp, sessionModelId: SESSION_MODEL, depth: "heavy" });
+    expect(result.perspectives.length).toBeGreaterThanOrEqual(3);
+    const review = readFileSync(planningArtifact(tmp, "PLAN-REVIEW.md"), "utf8");
+    expect(review).toContain("Leader:");
+  });
+
+  it("blocks execute when plan is too short", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-"));
+    ensurePlanningWorkspace(tmp, "m");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "fix it", "utf8");
+    const result = await runPlanCouncil({ cwd: tmp, sessionModelId: SESSION_MODEL, depth: "standard" });
+    expect(result.verdict).not.toBe("pass");
+    expect(canExecute(tmp, "standard").allowed).toBe(false);
+  });
+
+  it("surfaces prior PLAN-REVIEW concerns + CONTEXT/RESEARCH to debate topic", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-ctx-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+    writeFileSync(planningArtifact(tmp, "CONTEXT.md"), "Gray area: should we cache at SDK or app layer?", "utf8");
+    writeFileSync(planningArtifact(tmp, "RESEARCH.md"), "Finding: SDK cache hook exists at src/sdk.ts:42", "utf8");
+    writeFileSync(
+      planningArtifact(tmp, "PLAN-REVIEW.md"),
+      "# PLAN-REVIEW\n\n## Concerns\n\n- Plan misses retry path\n- No timeout policy\n",
+      "utf8",
+    );
+
+    const seen = new Set<string>();
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      revisionCycle: 1,
+      runPerspectiveFn: async (prompt) => {
+        // Capture what each perspective actually received.
+        seen.add(prompt);
+        return JSON.stringify({ verdict: "approve", concerns: [], evidence: [] });
+      },
+    });
+
+    // Every perspective prompt must include the FLOW context block + prior concerns directive.
+    for (const prompt of seen) {
+      expect(prompt).toContain("FLOW Context");
+      expect(prompt).toContain("Prior council concerns");
+      expect(prompt).toContain("Plan misses retry path");
+    }
+    expect(result.hadPriorConcerns).toBe(true);
+    expect(result.contextBundleChars ?? 0).toBeGreaterThan(0);
+  });
+
+  it("debate path uses model-first structured verdict (no regex on prose)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () =>
+        [
+          "We considered retry, security, and scope. No blockers.",
+          "```council-verdict",
+          '{"verdict":"approve","concerns":[],"evidence":["PLAN.md covers retry"],"rationale":"plan is complete"}',
+          "```",
+        ].join("\n"),
+    });
+
+    expect(result.skipped).toBe(false);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    expect(result.verdictParseFailed).toBe(false);
+    // Prose containing "block" / "revision" tokens MUST NOT flip the verdict
+    // anymore — only the structured block decides.
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("debate path: prose containing 'block' / 'revision required' does not override structured approve", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-adv-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () =>
+        [
+          "This plan is NOT a block. No revision required. Nothing here should revise.",
+          "```council-verdict",
+          '{"verdict":"approve","concerns":[]}',
+          "```",
+        ].join("\n"),
+    });
+
+    // The adversarial prose used to false-match the old regex; model-first
+    // extraction must ignore the prose entirely.
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+  });
+
+  it("debate path: parse-fail forces conservative revise (never silent approve)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-fail-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () => "The plan looks great, I approve it wholeheartedly. Ship it now!", // no JSON block
+    });
+
+    expect(result.verdict).toBe("revise");
+    expect(result.verdictSource).toBe("parse-failed");
+    expect(result.verdictParseFailed).toBe(true);
+    expect(canExecute(tmp, "standard").allowed).toBe(false);
+    const verify = readFileSync(planningArtifact(tmp, "PLAN-VERIFY.md"), "utf8");
+    expect(verify).toContain("verdictParseFailed: yes");
+  });
+
+  it("debate path: empty synthesis retries then succeeds (transient failure recovery)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-retry-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    let calls = 0;
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      // First attempt fails (empty synthesis — provider hiccup / abort), the
+      // retry succeeds with a valid structured verdict. Default retry budget is 1.
+      runDebate: async () => {
+        calls += 1;
+        if (calls === 1) return "";
+        return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+      },
+    });
+
+    expect(calls).toBe(2);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    expect(result.verdictParseFailed).toBe(false);
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("debate path: persistent empty synthesis falls back to perspective path (never bricks)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-empty-persp-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    let debateCalls = 0;
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      // Debate ALWAYS returns empty — the failure mode that previously wrote a
+      // forced-`revise` brick. It must instead fall back to the perspective path.
+      runDebate: async () => {
+        debateCalls += 1;
+        return "";
+      },
+      runPerspectiveFn: async () => '```council-verdict\n{"verdict":"approve","concerns":[]}\n```',
+    });
+
+    // Retried (default 1 → 2 attempts) then fell through to perspective review.
+    expect(debateCalls).toBe(2);
+    expect(result.perspectives).toHaveLength(2);
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("structured");
+    // The execute gate is UNLOCKED — the run is not bricked.
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+    expect(readPlanVerifyVerdict(tmp)).toBe("pass");
+  });
+
+  it("debate path: persistent empty synthesis + no perspective runner → heuristic verdict, not brick", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-debate-empty-heur-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runDebate: async () => "", // always empty, no runPerspectiveFn → heuristic last resort
+    });
+
+    // A well-structured plan clears the heuristic → pass (not a forced-revise brick).
+    expect(result.verdict).toBe("pass");
+    expect(result.verdictSource).toBe("heuristic-fallback");
+    expect(canExecute(tmp, "standard").allowed).toBe(true);
+  });
+
+  it("perspective path parses structured verdict from each perspective", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-st-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn: async () =>
+        '```council-verdict\n{"verdict":"approve","concerns":[],"evidence":["src/foo.ts:1"]}\n```',
+    });
+
+    expect(result.verdict).toBe("pass");
+    expect(result.perspectives.every((p) => p.source === "structured")).toBe(true);
+    expect(result.perspectives[0]?.evidence).toContain("src/foo.ts:1");
+  });
+
+  it("perspective path falls back to heuristic when perspective emits no JSON", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-st-fail-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard",
+      runPerspectiveFn: async () => "I cannot decide, the plan seems okay to me.",
+    });
+
+    // No structured verdict → heuristic fallback applies (source flag set).
+    expect(result.perspectives.every((p) => p.source === "heuristic-fallback")).toBe(true);
+    expect(result.verdictSource).toBe("heuristic-fallback");
+  });
+
+  it("perspective path runs perspectives in parallel (not serial)", async () => {
+    tmp = mkdtempSync(join(tmpdir(), "pc-par-"));
+    ensurePlanningWorkspace(tmp, SESSION_MODEL);
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), GOOD_PLAN, "utf8");
+
+    const delay = 120;
+    const start = Date.now();
+    const result = await runPlanCouncil({
+      cwd: tmp,
+      sessionModelId: SESSION_MODEL,
+      depth: "standard", // 2 perspectives
+      runPerspectiveFn: async () => {
+        await new Promise((r) => setTimeout(r, delay));
+        return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+      },
+    });
+    const elapsed = Date.now() - start;
+
+    expect(result.perspectives).toHaveLength(2);
+    // Serial would be >= 2*delay. Parallel is ~delay + scheduling slack.
+    // Allow generous headroom for CI scheduling but assert < 1.8x serial.
+    expect(elapsed).toBeLessThan(delay * 2);
+  });
+});

@@ -5,7 +5,7 @@
  * instruct the agent to "Use the ee_query tool with 'tool-artifact id=XXX'" to
  * rehydrate compaction-elided outputs, but the in-CLI agent had no such tool —
  * a dead reference. This verifies the tool now exists in the agent toolset, is
- * absent from non-agent modes, and degrades gracefully on a malformed call
+ * usable in read-only modes, and degrades gracefully on a malformed call
  * (no network).
  */
 
@@ -27,9 +27,14 @@ describe("ee_query builtin tool", () => {
     expect((tools.ee_query as ToolWithExecute).execute).toBeTypeOf("function");
   });
 
-  it("is NOT registered in non-agent modes (plan/ask)", () => {
-    expect(createBuiltinTools(new BashTool(os.tmpdir()), "plan").ee_query).toBeUndefined();
-    expect(createBuiltinTools(new BashTool(os.tmpdir()), "ask").ee_query).toBeUndefined();
+  it("provides read-only recall in plan/ask without granting edits or spawning", () => {
+    for (const mode of ["plan", "ask"] as const) {
+      const tools = createBuiltinTools(new BashTool(os.tmpdir()), mode);
+      expect(tools.ee_query).toBeDefined();
+      expect(tools.write_file).toBeUndefined();
+      expect(tools.edit_file).toBeUndefined();
+      expect(tools.task).toBeUndefined();
+    }
   });
 
   it("returns a corrective error for an empty query (no network)", async () => {

@@ -4,7 +4,7 @@ import { taskTypeToMaxTokens } from "../../pil/task-tier-map.js";
 import { resolveTurnMaxOutputTokens } from "../tool-engine.js";
 
 // Regression for the /ideal sprint-implementation handoff wedge (2026-07-10,
-// gsd-core migration): the impl prompt was classified `analyze`/default → the
+// flow-core migration): the impl prompt was classified `analyze`/default → the
 // output budget capped at 4_096 → deepseek-v4-flash narrated its plan until it
 // hit finishReason:"length" mid-word, produced ZERO code, and the turn wedged.
 // A sprint-execution turn must floor at the build/generate tier regardless of

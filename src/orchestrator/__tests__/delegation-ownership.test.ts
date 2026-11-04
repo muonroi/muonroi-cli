@@ -62,10 +62,67 @@ function seed(overrides: Record<string, unknown> = {}) {
     ...overrides,
   };
   fs.writeFileSync(path.join(dir, "probe.json"), JSON.stringify(record));
+  if (record.status === "complete") fs.writeFileSync(record.outputPath, "Owned completed fixture output");
   return path.join(dir, "probe.json");
 }
 
 describe("parent-owned delegations", () => {
+  it("only the mounted live owner controller can renew/poll/decide worker approvals", async () => {
+    const owner = new mod.DelegationManager(
+      () => cwd,
+      () => "main-a",
+    );
+    expect(await owner.pollApprovals()).toEqual([]);
+    owner.setApprovalController(true);
+    const digest = (owner as any).approvalControllerDigest;
+    const view = {
+      id: "request",
+      jobId: "probe",
+      ownerId: "main-a",
+      toolName: "write_file",
+      toolCallId: "actual-call",
+      inputDigest: "input-digest",
+      preview: "redacted preview",
+      deadlineAt: new Date(Date.now() + 5000).toISOString(),
+    };
+    const job = seed({
+      status: "running",
+      pid: process.pid,
+      approvalController: { digest, pid: process.pid, expiresAt: new Date(Date.now() + 5000).toISOString() },
+      approvals: [{ ...view, state: "pending", controllerDigest: digest, createdAt: new Date().toISOString() }],
+    });
+    expect(await owner.pollApprovals()).toEqual([view]);
+    const other = new mod.DelegationManager(
+      () => cwd,
+      () => "main-a",
+    );
+    other.setApprovalController(true);
+    expect(await other.pollApprovals()).toEqual([]);
+    await expect(other.decideApproval(view, true)).rejects.toThrow(/foreign/);
+    await owner.decideApproval(view, false);
+    expect((await mod.loadDelegation(job)).approvals?.[0]?.state).toBe("denied");
+    owner.setApprovalController(false);
+    await expect(owner.decideApproval(view, true)).rejects.toThrow(/live owning TUI/);
+  });
+
+  it("poll does not revive an expired approval controller lease", async () => {
+    const owner = new mod.DelegationManager(
+      () => cwd,
+      () => "main-a",
+    );
+    owner.setApprovalController(true);
+    const job = seed({
+      status: "running",
+      pid: process.pid,
+      approvalController: {
+        digest: (owner as any).approvalControllerDigest,
+        pid: process.pid,
+        expiresAt: new Date(0).toISOString(),
+      },
+    });
+    expect(await owner.pollApprovals()).toEqual([]);
+    expect((await mod.loadDelegation(job)).approvalController?.expiresAt).toBe(new Date(0).toISOString());
+  });
   it("another session cannot consume the owner's notification", async () => {
     const job = seed();
     const other = new mod.DelegationManager(
@@ -158,6 +215,6 @@ describe("parent-owned delegations", () => {
     expect(result.success).toBe(true);
     await exited;
     expect(() => process.kill(child.pid!, 0)).toThrow();
-    expect((await mod.loadDelegation(job)).status).toBe("error");
+    expect((await mod.loadDelegation(job)).status).toBe("cancelled");
   }, 15_000);
 });

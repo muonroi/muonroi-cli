@@ -1,0 +1,349 @@
+{
+  "capturedAt": "2026-10-17T04:17:03.945Z",
+  "boundary": "Dirty working-tree local build; current native transport trace; not loaded-process or deployment proof",
+  "before": {
+    "startedAt": "2026-10-17T04:07:43.028Z",
+    "boundary": "Official rebuilt native EE tools and configured auth resolver; no settings/server changes or raw lesson/token output",
+    "requests": [
+      {
+        "label": "health",
+        "host": "72.61.127.154:8082",
+        "path": "/health",
+        "status": 200,
+        "elapsedMs": 77
+      },
+      {
+        "label": "consumer-default",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "strict_project": true
+        },
+        "status": 400,
+        "failure": {
+          "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+        },
+        "elapsedMs": 28
+      },
+      {
+        "label": "consumer-explicit",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "project_slug": "muonroi-cli",
+          "strict_project": true
+        },
+        "status": 200,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/extension/ai-dock"
+        },
+        "count": 0,
+        "elapsedMs": 9645
+      },
+      {
+        "label": "cli-explicit",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/muonroi-cli/",
+          "project_slug": "muonroi-cli",
+          "strict_project": true
+        },
+        "status": 200,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli/"
+        },
+        "count": 0,
+        "elapsedMs": 8666
+      }
+    ],
+    "calls": [
+      {
+        "name": "consumer-default",
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "elapsedMs": 29,
+        "unavailable": true,
+        "scopeUnverified": false,
+        "chars": 198
+      },
+      {
+        "name": "consumer-explicit",
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "explicitProject": "muonroi-cli",
+        "elapsedMs": 9647,
+        "unavailable": false,
+        "scopeUnverified": false,
+        "chars": 108
+      },
+      {
+        "name": "cli-explicit",
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "explicitProject": "muonroi-cli",
+        "elapsedMs": 8666,
+        "unavailable": false,
+        "scopeUnverified": false,
+        "chars": 108
+      }
+    ],
+    "health": {
+      "ok": true,
+      "status": 200,
+      "check": "reachability",
+      "endpoint": "http://72.61.127.154:8082/health",
+      "recallReady": "not_checked"
+    },
+    "finishedAt": "2026-10-17T04:08:02.180Z"
+  },
+  "after": {
+    "startedAt": "2026-10-17T04:15:52.984Z",
+    "boundary": "Official rebuilt native EE tools and configured auth resolver; no settings/server changes or raw lesson/token output",
+    "requests": [
+      {
+        "label": "health",
+        "host": "72.61.127.154:8082",
+        "path": "/health",
+        "status": 200,
+        "elapsedMs": 80
+      },
+      {
+        "label": "consumer-default",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "strict_project": true
+        },
+        "status": 400,
+        "failure": {
+          "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+        },
+        "elapsedMs": 29
+      },
+      {
+        "label": "consumer-explicit",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "project_slug": "muonroi-cli",
+          "strict_project": true
+        },
+        "status": 200,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/extension/ai-dock"
+        },
+        "count": 0,
+        "elapsedMs": 8855
+      },
+      {
+        "label": "cli-explicit",
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "scopeRequest": {
+          "cwd": "D:/sources/Core/muonroi-cli/",
+          "project_slug": "muonroi-cli",
+          "strict_project": true
+        },
+        "status": 200,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli/"
+        },
+        "count": 0,
+        "elapsedMs": 8352
+      }
+    ],
+    "calls": [
+      {
+        "name": "consumer-default",
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "elapsedMs": 31,
+        "unavailable": false,
+        "projectRequired": true,
+        "requestRejected": false,
+        "scopeUnverified": false,
+        "chars": 388
+      },
+      {
+        "name": "consumer-explicit",
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "explicitProject": "muonroi-cli",
+        "elapsedMs": 8858,
+        "unavailable": false,
+        "projectRequired": false,
+        "requestRejected": false,
+        "scopeUnverified": false,
+        "chars": 108
+      },
+      {
+        "name": "cli-explicit",
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "explicitProject": "muonroi-cli",
+        "elapsedMs": 8356,
+        "unavailable": false,
+        "projectRequired": false,
+        "requestRejected": false,
+        "scopeUnverified": false,
+        "chars": 108
+      }
+    ],
+    "health": {
+      "ok": true,
+      "status": 200,
+      "check": "reachability",
+      "endpoint": "http://72.61.127.154:8082/health",
+      "recallReady": "not_checked"
+    },
+    "finishedAt": "2026-10-17T04:16:11.027Z"
+  },
+  "sessionCalls": [
+    {
+      "seq": 40,
+      "at": "2026-10-17T02:08:57.010Z",
+      "tool": "ee_health",
+      "id": "chatcmpl-tool-a128fe06f579ac39",
+      "project": null,
+      "querySha8": "e3b0c442"
+    },
+    {
+      "seq": 40,
+      "at": "2026-10-17T02:08:57.010Z",
+      "tool": "ee_query",
+      "id": "chatcmpl-tool-adcf763fbcec09ea",
+      "project": null,
+      "querySha8": "f4095931"
+    },
+    {
+      "seq": 44,
+      "at": "2026-10-17T02:08:57.094Z",
+      "tool": "ee_health",
+      "id": "chatcmpl-tool-a1da9e392df437a8",
+      "project": null,
+      "querySha8": "e3b0c442"
+    },
+    {
+      "seq": 44,
+      "at": "2026-10-17T02:08:57.094Z",
+      "tool": "ee_query",
+      "id": "chatcmpl-tool-9abe96a58f795774",
+      "project": null,
+      "querySha8": "08fb96af"
+    },
+    {
+      "seq": 60,
+      "at": "2026-10-17T02:52:49.604Z",
+      "tool": "ee_health",
+      "id": "chatcmpl-tool-9dda2adb3681b51a",
+      "project": null,
+      "querySha8": "e3b0c442"
+    },
+    {
+      "seq": 60,
+      "at": "2026-10-17T02:52:49.604Z",
+      "tool": "ee_query",
+      "id": "chatcmpl-tool-8e66208d0c28b292",
+      "project": null,
+      "querySha8": "98f32ba4"
+    },
+    {
+      "seq": 75,
+      "at": "2026-10-17T03:35:00.994Z",
+      "tool": "ee_health",
+      "id": "chatcmpl-tool-a52f60f75c336749",
+      "project": null,
+      "querySha8": "e3b0c442"
+    },
+    {
+      "seq": 75,
+      "at": "2026-10-17T03:35:00.994Z",
+      "tool": "ee_query",
+      "id": "chatcmpl-tool-86e9b999c0f113f9",
+      "project": null,
+      "querySha8": "3eb1ee4a"
+    }
+  ],
+  "tests": "\n RUN  v4.1.5 D:/sources/Core/muonroi-cli\n\nWarning: A vi.mock(\"bun:sqlite\") call in \"D:/sources/Core/muonroi-cli/src/__test-stubs__/vitest-setup.ts\" is not at the top level of the module. Although it appears nested, it will be hoisted and executed before any tests run. Move it to the top level to reflect its actual execution order. This will become an error in a future version.\nSee: https://vitest.dev/guide/mocking/modules#how-it-works\n\n Test Files  6 passed (6)\n      Tests  42 passed (42)\n   Start at  11:14:23\n   Duration  5.51s (transform 1.33s, setup 106ms, import 4.24s, tests 248ms, environment 0ms)\n\n",
+  "hashes": [
+    {
+      "file": "src/ee/client.ts",
+      "sha256": "8f429b43de94f859fb7dadcba15843433754c319d3e20924d2ecdea3a8bd919d"
+    },
+    {
+      "file": "src/ee/types.ts",
+      "sha256": "a44b87356fbecfa13bc3b3c9532d599089638a459f2c759d55dcc13ff88f1f45"
+    },
+    {
+      "file": "src/ee/search.ts",
+      "sha256": "7a920f394d61f87e4a21dead20918a02b3e90cdb5f5607a3a587b00dde210907"
+    },
+    {
+      "file": "src/tools/registry.ts",
+      "sha256": "e6c34097f49877981985daa6824b12a3253d18d48bd41bac0905005c3179d243"
+    },
+    {
+      "file": "src/ee/recall-http-diagnostic.test.ts",
+      "sha256": "2212e7646be7074c42d217bbc7abf0c634c170a830e104fe5a6593bc710e4425"
+    },
+    {
+      "file": "dist/src/ee/client.js",
+      "sha256": "d55b2d41ddab8ba9afdafacfb0832c55f8015e44deec81cefecfa94a53d6254d"
+    },
+    {
+      "file": "dist/src/ee/types.js",
+      "sha256": "241bb59ec4354f1328da08cdc4328ae63c7a60849daebae597ce5a75839413ff"
+    },
+    {
+      "file": "dist/src/ee/search.js",
+      "sha256": "73be9ebef8d53e0ceb600c296aafcd9e9df14fe065dfba85f6fd1368bd98174e"
+    },
+    {
+      "file": "dist/src/tools/registry.js",
+      "sha256": "5e9253f8bc9ff1ff67ad232aba62f62d36b9fdc84dbbb684c24e1533993a68a8"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/db-ee.py",
+      "sha256": "27a56c6c2f75ecc952760db76ade7901c9d9cc9a411feb5bd08201fb2e7a0d06"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/db-ee.json",
+      "sha256": "725ea2c475a4752f535a320fc87fbca00a46a1edb660b2b1b1bf6cb958ef3266"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/trace.mjs",
+      "sha256": "e73f3e90cf7b7efb39c3a4b299a46f727e5aa3478377faaab2ec331e2ed5bce1"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/trace.json",
+      "sha256": "111ad9bbf5004c9cd5f807b6cfdbb1ce43eec798804adf2b419692fe9344a99b"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/trace-after.json",
+      "sha256": "ea5a6fb93dc58608ed0493425822d43cb245961b6d183116f024e844fa7fb606"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/red.log",
+      "sha256": "2419f54a420e2bee8611f5328ad59f6f34e81696f1bb1c7d19ee0d6008b62d2e"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/tests.log",
+      "sha256": "a4649d808fc0e8e2b45e6f76da3048c65f5bf78599a69dbec6c9c1c9c2f6e5e2"
+    },
+    {
+      "file": ".scratch/session-81-ee-recall/build.log",
+      "sha256": "71b945fcbbb187de0f3158e1321ee9069624ee1e90fc0322285e7e72763e2d31"
+    }
+  ]
+}

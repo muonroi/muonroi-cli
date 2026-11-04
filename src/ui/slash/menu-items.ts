@@ -40,6 +40,11 @@ export interface SlashMenuItem {
  * `registerSlash` (parity test enforces this).
  */
 export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
+  {
+    id: "permissions",
+    label: "permissions safe|auto|yolo",
+    description: "Choose and save tool approval mode; applies to owned workers",
+  },
   // ── Primary surface ────────────────────────────────────────────────────
   { id: "exit", label: "exit", description: "Quit the CLI" },
   {
@@ -50,7 +55,7 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "compact", label: "compact", description: "Compact conversation context" },
   { id: "clear", label: "clear", description: "Clear conversation and start fresh" },
   { id: "ideal", label: "ideal", description: "Product Ideal Loop — from idea to shipped product, autonomously" },
-  { id: "council", label: "council", description: "Multi-model adversarial debate" },
+  { id: "council", label: "council", description: "Start a background council; results appear in jobs" },
   // ── Hidden (still functional when typed in full) ───────────────────────
   { id: "help", label: "help", description: "Show available commands", hidden: true },
   { id: "remote-control", label: "remote-control", description: "Remote control", hidden: true },
@@ -83,9 +88,9 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
     label: "lsp",
     description: "Language servers — /lsp setup picks & installs LSPs for your languages",
   },
-  { id: "route", label: "route", description: "Show current model routing info", hidden: true },
-  { id: "plan", label: "plan", description: "Show active GSD plan", hidden: true },
-  { id: "execute", label: "execute", description: "Execute active GSD plan", hidden: true },
+  { id: "route", label: "route", description: "Main flagship and worker routing preferences", hidden: true },
+  { id: "plan", label: "plan", description: "Show active FLOW plan", hidden: true },
+  { id: "execute", label: "execute", description: "Execute active FLOW plan", hidden: true },
   { id: "discuss", label: "discuss", description: "Discuss phase gray areas", hidden: true },
   { id: "expand", label: "expand", description: "Expand last compacted context", hidden: true },
   { id: "optimize", label: "optimize", description: "Optimize prompt for token savings", hidden: true },

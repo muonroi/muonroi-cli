@@ -67,11 +67,11 @@ describe("detectExistingPlanTargets (Wave 3)", () => {
     await fs.mkdir(path.join(cwd, "src/council"), { recursive: true });
     await fs.writeFile(path.join(cwd, "src/council/engine.ts"), "export const x = 1;\n", "utf8");
     const plan =
-      "Implement `src/council/engine.ts` and create src/council/adapters/gsdAdapter.ts plus tests/parity.test.ts.";
+      "Implement `src/council/engine.ts` and create src/council/adapters/flowAdapter.ts plus tests/parity.test.ts.";
     const found = await detectExistingPlanTargets(plan, cwd);
     // engine.ts exists → returned; the not-yet-created files are excluded.
     expect(found).toContain("src/council/engine.ts");
-    expect(found).not.toContain("src/council/adapters/gsdAdapter.ts");
+    expect(found).not.toContain("src/council/adapters/flowAdapter.ts");
     expect(found).not.toContain("tests/parity.test.ts");
   });
 

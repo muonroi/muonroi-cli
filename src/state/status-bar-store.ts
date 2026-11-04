@@ -42,6 +42,9 @@ export interface StatusBarState {
   current_pct: number;
   degraded: boolean;
   routed_from: string | null;
+  routing_mode?: import("../utils/settings.js").RoutingMode;
+  permission_mode?: import("../utils/permission-mode.js").PermissionMode;
+  suggested_model?: string;
   /**
    * EE dot state. "off" = NOT CONFIGURED (no serverBaseUrl and the localhost
    * fallback doesn't answer) — visually distinct from "down" (configured but
@@ -101,7 +104,7 @@ let wired = false;
  * Returns an unsubscribe-all function.
  * Idempotent -- second call is a no-op until the returned cleanup runs.
  */
-export function wireStatusBar(): () => void {
+export function wireStatusBar(orchestratorIdentity?: () => Pick<StatusBarState, "provider" | "model">): () => void {
   if (wired) return () => {};
   wired = true;
 
@@ -111,6 +114,9 @@ export function wireStatusBar(): () => void {
       degraded: rs.degraded,
       provider: rs.lastDecision?.provider ?? statusBarStore.getState().provider,
       model: rs.lastDecision?.model ?? statusBarStore.getState().model,
+      // Router events also cover auxiliary calls. A mounted root owns its
+      // displayed identity; read it live so explicit model changes still show.
+      ...orchestratorIdentity?.(),
     });
   });
 
@@ -126,6 +132,7 @@ export function wireStatusBar(): () => void {
     statusBarStore.setState({
       model: ev.toModel,
       current_pct: ev.pct,
+      ...orchestratorIdentity?.(),
     });
   });
 
@@ -338,6 +345,8 @@ export function wireStatusBar(): () => void {
 /** Test helper: reset store to default state. */
 export function __resetStatusBarStoreForTests(): void {
   statusBarStore.setState({
+    routing_mode: undefined,
+    suggested_model: undefined,
     provider: "",
     model: "",
     tier: "hot",

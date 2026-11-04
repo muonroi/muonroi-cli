@@ -1,0 +1,17 @@
+# Main and worker messages
+
+Main can call `delegation_send({id, message, replyTo?})` for an owned running task or research worker. Omit `replyTo` for an instruction. To answer a question, use its exact `messageId` as `replyTo`. Interactive sends queue promptly. In headless execution a correlated reply host-waits for the next question or terminal result, so an exchange can finish in one root run. A foreground task can return an interim `status=running messageId=...` question receipt; this is not completed execution.
+
+Proactive instructions require no earlier worker question. Empty/whitespace optional `replyTo` is normalized to an instruction; a nonempty value remains an exact correlation ID and must match a live question. Queued receipts identify `kind=instruction` or `kind=reply`. A correlation error does not establish that the instruction channel is unavailable: omit `replyTo` when issuing a correction. Normalization does not answer a pending question, renew its deadline or change permissions, scope or budgets.
+
+Workers have `worker_message({kind, message, waitForReply?, timeoutMs?})`. `kind` is `progress` or `question`. Progress returns promptly. Questions wait for the correlated main reply by default; `waitForReply:false` sends without waiting. `timeoutMs` is 1–300000 milliseconds, default 300000. There is no recipient parameter: the host binds the tool to that worker's saved job. Main instructions enter the next safe model step, including after compaction. Messages cannot interrupt an in-flight provider request.
+
+Intentional question and foreground waits pause idle/stall detection, with the existing cancellation signals, question deadline and hard execution/token/step limits still in force. Waiting holds no job file lock. A reply does not renew any execution budget. Dead processes reconcile through the existing failed-job path; saved questions do not restore a worker process.
+
+Job JSON declares `messagingProtocol:1`. Legacy live workers and council jobs have no supported receiver and reject sends explicitly. Restarting main does not hot-reload a legacy worker.
+
+`mailbox.messages` stores stable `id`, monotonic `sequence`, `sender` (`main` or `worker`), `kind`, `text`, actual SDK `toolCallId`, `createdAt`, and optional `replyTo`, `deadlineAt`, `replyTimeoutMs`, `closedAt`, `ownerDeliveredAt`, `workerDeliveredAt`. `nextSequence` and `totalBytes` belong to the mailbox. A job permits 128 messages, 8000 UTF-8 bytes per text, and 128000 total text bytes over its lifetime; delivery does not clear history or replenish capacity.
+
+Retrying the same sender/toolCallId and exact input reuses its saved message. Changed input with that identity, stale/missing/expired correlation, conflicting second replies, new terminal sends, and foreign owners are refused. Main transcript persistence uses stable per-message markers before recording owner delivery. Pending progress is coalesced into a wake notice while retaining each saved message. This provides durable deduplication for these identities, not transactional exactly-once execution across the model, transcript, callback and job files.
+
+`workerDeliveredAt` means the message was attached at safe prompt preparation; it is not a provider receipt. Message delivery is independent of terminal `notifiedAt`/`deliveredVersion`, result acknowledgement and independent acceptance. A question, progress report or answer never verifies or accepts worker claims. Review workers retain their read/test-only tools; communication supplies no source repair permission.

@@ -204,7 +204,7 @@ export function getModelsForProvider(providerId: string): ModelInfo[] {
  * The provider's models that can serve a text request, in catalog order.
  *
  * This is the accessor for every text-task selector — council panels, role
- * assignment, router fallbacks, GSD tier promotion. Filtering only removes
+ * assignment, router fallbacks, FLOW tier promotion. Filtering only removes
  * candidates that cannot answer a text prompt at all; relative order and every
  * text model's eligibility are untouched, so existing fallback behaviour for
  * text models is unchanged.

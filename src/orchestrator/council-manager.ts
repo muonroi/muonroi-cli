@@ -14,10 +14,11 @@
 import { type ModelMessage, stepCountIs } from "ai";
 import type { IntentKind, QuestionResponder } from "../council/types.js";
 import { getTextModelsForProvider } from "../models/registry.js";
-import { loadKeyForProvider } from "../providers/keychain.js";
+import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keychain.js";
 import {
-  createProviderFactory,
+  createProviderFactoryAsync,
   detectProviderForModel,
+  hasProviderFactory,
   resolveMaxOutputTokensParam,
   resolveModelRuntime,
   resolveTemperatureParam,
@@ -238,7 +239,7 @@ export class CouncilManager {
       resolver(answer);
       this._questionResolvers.delete(questionId);
       if (questionText) {
-        import("../gsd/phase-sync.js")
+        import("../workflow/phase-sync.js")
           .then(({ appendClarificationToContext }) => {
             const cwd = this.deps.getBash().getCwd();
             appendClarificationToContext(cwd, questionText, answer);
@@ -420,8 +421,7 @@ export class CouncilManager {
    */
   async generate(modelId: string, system: string, prompt: string, maxTokens = 2048): Promise<string> {
     const providerId = detectProviderForModel(modelId);
-    const key = await loadKeyForProvider(providerId);
-    ensureCouncilProvider(providerId, key);
+    await ensureCouncilProvider(providerId);
     const runtime = resolveModelRuntime(modelId);
     const { text } = await generateTextStreamed({
       model: runtime.model,
@@ -446,8 +446,7 @@ export class CouncilManager {
    */
   async research(modelId: string, topic: string, conversationContext: string, signal?: AbortSignal): Promise<string> {
     const providerId = detectProviderForModel(modelId);
-    const key = await loadKeyForProvider(providerId);
-    ensureCouncilProvider(providerId, key);
+    await ensureCouncilProvider(providerId);
     const runtime = resolveModelRuntime(modelId);
 
     // Build tool set with bash, grep, read_file for codebase research
@@ -842,6 +841,14 @@ export class CouncilManager {
  * Mirrors `createProvider` in orchestrator.ts to keep council sub-calls
  * decoupled from Agent state.
  */
-function ensureCouncilProvider(providerId: ProviderId, apiKey: string, baseURL?: string): void {
-  createProviderFactory(providerId, { apiKey, baseURL });
+async function ensureCouncilProvider(providerId: ProviderId): Promise<void> {
+  if (hasProviderFactory(providerId)) return;
+  let apiKey: string | undefined;
+  try {
+    apiKey = await loadKeyForProvider(providerId);
+  } catch (error) {
+    logger.file("debug", "orchestrator", `[council] key lookup for ${providerId}: ${(error as Error).message}`);
+    if (!(error instanceof ProviderKeyMissingError)) throw error;
+  }
+  await createProviderFactoryAsync(providerId, { apiKey });
 }

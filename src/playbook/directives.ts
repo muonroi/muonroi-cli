@@ -2,11 +2,11 @@
  * src/playbook/directives.ts
  *
  * Builds the system-prompt directive block injected per turn by layer4
- * (`src/pil/layer4-gsd.ts`). The directive is what actually changes the agent's
+ * (`src/pil/layer4-flow.ts`). The directive is what actually changes the agent's
  * behaviour: it injects a HYBRID rubric for the work-depth tier the model chose
  * — the system recommends a depth, the agent declares its path and may
  * escalate/de-escalate. This is the "[playbook]" mindset layer (NOT the real
- * GSD framework / `/gsd:*` skills — it only borrows the discuss→plan→execute
+ * FLOW framework / `/flow:*` skills — it only borrows the discuss→plan→execute
  * mindset).
  *
  * Three tiers:
@@ -18,15 +18,15 @@
  * user-facing prompts into the user's language at render time.
  */
 
-import type { GsdPhase } from "../gsd/types.js";
+import type { FlowPhase } from "../workflow/types.js";
 import type { ComplexityTier } from "./complexity.js";
 
-/** When true and tier is standard/heavy, CHECK-PLAN points to gsd_plan_review tool. */
+/** When true and tier is standard/heavy, CHECK-PLAN points to flow_plan_review tool. */
 export function buildNativeCheckPlanHint(): string {
   return (
-    "  4. CHECK-PLAN — call gsd_plan_review (native council) BEFORE executing. " +
+    "  4. CHECK-PLAN — call flow_plan_review (native council) BEFORE executing. " +
     "Multi-perspective review spawns research/skeptic/architect sub-agents; leader synthesizes PLAN-VERIFY.md. " +
-    "gsd_execute is blocked until verdict: pass."
+    "flow_execute is blocked until verdict: pass."
   );
 }
 
@@ -38,7 +38,7 @@ export interface DirectiveInput {
    * out bigger or smaller than it read.
    */
   tier: ComplexityTier;
-  phase: GsdPhase | null;
+  phase: FlowPhase | null;
   /**
    * True when the prompt is informational/explanatory (a question or a
    * self/meta analysis) rather than a request to change code. The deliverable
@@ -67,14 +67,14 @@ export interface DirectiveInput {
   /**
    * User's reply language (heuristic — Vietnamese|undefined). When set, the
    * directive appends an explicit language nudge so the rule survives the
-   * personality/GSD instructions stacking on top of it (storyflow_ui session
+   * personality/FLOW instructions stacking on top of it (storyflow_ui session
    * 22661c8de9f2: user wrote Vietnamese, layered directives + a stalled
    * forced-finalize drowned out the base "reply in user's language" rule and
    * the agent answered in English).
    */
   replyLanguage?: string;
-  /** When MUONROI_GSD_NATIVE=1, heavy/standard rubrics reference native tools. */
-  nativeGsd?: boolean;
+  /** When MUONROI_FLOW_NATIVE=1, heavy/standard rubrics reference native tools. */
+  nativeFlow?: boolean;
 }
 
 export interface DirectiveOutput {
@@ -114,7 +114,7 @@ export const ECOSYSTEM_DOCS_NUDGE = [
 /**
  * Appended to any directive when the user's reply language is non-English.
  * The base system prompt's "reply in user's language" rule normally suffices,
- * but `concise` / `FIX-FIRST` / GSD-debug directive bodies stack on top of it
+ * but `concise` / `FIX-FIRST` / FLOW-debug directive bodies stack on top of it
  * with strong "be terse / code over prose" language that crowds the rule out
  * — observed live (storyflow_ui 22661c8de9f2). This NUDGE re-anchors the rule
  * inside the directive itself so brevity preferences cannot override it.
@@ -134,14 +134,14 @@ export function buildLanguageNudge(lang: string): string {
 
 function buildHeavy(input: DirectiveInput): string {
   const phaseHint = input.phase ? ` (hint: this reads like a "${input.phase}" task)` : "";
-  const checkPlan = input.nativeGsd
+  const checkPlan = input.nativeFlow
     ? buildNativeCheckPlanHint()
     : "  4. CHECK-PLAN — review your own plan BEFORE executing: does it cover the acceptance criteria, handle the edge cases, and match what the user actually asked? Revise until it does (update the todo_write list if steps change). Confirm with the user only if the plan diverges from their intent.";
   return [
     `${HEADER} This reads like a HEAVY task${phaseHint} — architectural, cross-cutting, multi-file, or with real unresolved design choices. Don't start editing yet; work through these phases:`,
     "  1. DISCUSS — surface the decisions/ambiguities that actually change the design. For the ones the prompt doesn't already answer, ask up front with AskUserQuestion (put your recommended option first; write the question text in the user's language). Skip questions the prompt already settles — don't interrogate.",
     "  2. RESEARCH — gather the codebase facts the task depends on: read/grep the relevant modules, and dispatch parallel research Agents when the areas are independent. When you delegate (via `delegate`), give each sub-agent a NON-overlapping scope and tell it the exact return shape you need. Regularly check background tasks and subagents using `delegation_list` / `delegation_read` (or `process_list` / `process_logs` for shell processes) to monitor progress, and terminate them with `delegation_kill` / `process_stop` if they are no longer needed.",
-    "  3. PLAN — write a concrete, numbered plan via gsd_plan (or PLAN.md): the change per file, the order, and the acceptance criteria (how you'll know it's done). Then record the plan as a todo_write checklist (one item per step) so the user sees a live progress list.",
+    "  3. PLAN — write a concrete, numbered plan via flow_plan (or PLAN.md): the change per file, the order, and the acceptance criteria (how you'll know it's done). Then record the plan as a todo_write checklist (one item per step) so the user sees a live progress list.",
     checkPlan,
     "  5. IMPLEMENT — execute in atomic steps; parallelize independent work. Keep the todo_write list accurate: mark each item in_progress before you start it and completed when it lands (exactly ONE item in_progress at a time). When you're in a git repo, COMMIT each completed chunk before starting the next one (small, logically-scoped commits; message ends with the mandatory attribution line) — do NOT pile the whole task into one commit at the end.",
     "  6. VERIFY — run the relevant tests / lint / type-check and report evidence (command + result) before claiming done.",
@@ -170,12 +170,12 @@ function buildStandard(input: DirectiveInput): string {
       "If the limits are blown and you still have no fix, STOP and report what you tried + why you're stuck.",
     ].join("\n");
   }
-  const checkStep = input.nativeGsd
-    ? "  2. CHECK — call gsd_plan_review (lightweight council: research + skeptic perspectives) before editing files."
+  const checkStep = input.nativeFlow
+    ? "  2. CHECK — call flow_plan_review (lightweight council: research + skeptic perspectives) before editing files."
     : "  2. CHECK — sanity-check that plan against the real code (read the key files you named) and against the user's intent; fix the plan if reality differs. If a genuine ambiguity blocks you, ask ONE focused question via AskUserQuestion instead of guessing.";
   return [
     `${HEADER} This reads like a STANDARD task${phaseHint} — work like a senior engineer, but keep it lightweight:`,
-    "  1. PLAN — state a short, concrete plan via gsd_plan: the files/functions you'll touch and in what order. A few bullets in your reply, not an essay. If it breaks into ≥3 steps, also record them with todo_write so the user gets a live checklist.",
+    "  1. PLAN — state a short, concrete plan via flow_plan: the files/functions you'll touch and in what order. A few bullets in your reply, not an essay. If it breaks into ≥3 steps, also record them with todo_write so the user gets a live checklist.",
     checkStep,
     "  3. IMPLEMENT — execute the plan in small steps with the appropriate tools. If you made a todo_write checklist, keep it updated as you go (exactly one item in_progress at a time). When you're in a git repo, COMMIT each cohesive chunk as it lands (small commits; message ends with the mandatory attribution line) rather than batching everything into one final commit.",
     "  4. VERIFY — run the relevant tests / type-check / quick smoke and report evidence before claiming done.",

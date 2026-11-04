@@ -17,11 +17,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-const decideSpy = vi.fn(async (_prompt: string, _opts: { forcedModel?: string }) => ({
-  model: "deepseek-v4-flash",
-  tier: "fast",
-  reason: "pil:trivial(0.9)",
-}));
+const decideSpy = vi.fn(
+  async (_prompt: string, _opts: { forcedModel?: string; routingMode?: string; forcedReason?: string }) => ({
+    model: "deepseek-v4-flash",
+    tier: "fast",
+    reason: "pil:trivial(0.9)",
+  }),
+);
 
 vi.mock("../../router/decide.js", () => ({
   decide: decideSpy,
@@ -180,5 +182,57 @@ describe("MessageProcessor — project model pin skips per-turn downgrade routin
     expect(decideSpy).toHaveBeenCalled();
     const opts = decideSpy.mock.calls.at(-1)?.[1];
     expect(opts?.forcedModel).toBe("deepseek-v4-pro");
+  });
+
+  it.each([
+    "auto",
+    "suggest",
+  ])("explicit project %s admits routing without removing its baseline model", async (routingMode) => {
+    fs.mkdirSync(path.join(dir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, ".muonroi-cli/settings.json"),
+      JSON.stringify({ model: "deepseek-v4-pro", routingMode }),
+    );
+    // Effective Bash cwd owns the policy even if process.cwd belongs elsewhere.
+    const processor = new MessageProcessor(makeDeps());
+    for await (const _c of processor.run("check the weather")) {
+      /* drain */
+    }
+    expect(decideSpy).toHaveBeenCalled();
+    expect(decideSpy.mock.calls.at(-1)?.[1]).toMatchObject({ routingMode });
+    expect(decideSpy.mock.calls.at(-1)?.[1].forcedModel).toBeUndefined();
+  });
+
+  it("retainModel overrides an explicit auto project policy", async () => {
+    fs.mkdirSync(path.join(dir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".muonroi-cli/settings.json"), JSON.stringify({ routingMode: "auto" }));
+    const processor = new MessageProcessor(makeDeps());
+    for await (const _c of processor.run("check the weather", undefined, undefined, { retainModel: true })) {
+      /* drain */
+    }
+    expect(decideSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+      routingMode: "fixed",
+      forcedModel: "deepseek-v4-pro",
+      forcedReason: "routing-fixed:retain-model",
+    });
+  });
+  it("orchestrator ownership forces fixed requested model with refusal instead of cap downgrade even in project auto", async () => {
+    fs.mkdirSync(path.join(dir, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".muonroi-cli/settings.json"), JSON.stringify({ routingMode: "auto" }));
+    const settings = await import("../../utils/settings.js");
+    const enabled = vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    const processor = new MessageProcessor(makeDeps({ executionRole: "orchestrator" }));
+    try {
+      for await (const _c of processor.run("inspect the task")) {
+        /* drain */
+      }
+    } finally {
+      enabled.mockRestore();
+    }
+    expect(decideSpy.mock.calls.at(-1)?.[1]).toMatchObject({
+      routingMode: "fixed",
+      forcedModel: "deepseek-v4-pro",
+      refuseModelSubstitution: true,
+    });
   });
 });

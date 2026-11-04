@@ -29,6 +29,7 @@ export interface BackgroundProcessState {
 
 /** Live state of every background job the current CLI process can see. */
 export interface BackgroundJobSnapshot {
+  workerApprovals?: import("../orchestrator/worker-approval.js").WorkerApprovalView[];
   /** Keyed by delegation id (e.g. "brisk-amber-fox"). */
   delegations: Record<string, BackgroundDelegationState>;
   /** Keyed by {@link processJobKey} — the id alone restarts at 1 every CLI run. */
@@ -130,6 +131,13 @@ export function isBackgroundAutoWakeEnabled(env: NodeJS.ProcessEnv = process.env
 
 /** The user turn that wakes the agent with finished background jobs' notices. */
 export function buildBackgroundWakePrompt(notices: string[]): string {
+  if (notices.some((notice) => /^\[Worker messages jobId=[\w-]+ status=running\]/.test(notice)))
+    return [
+      "[background worker messages]",
+      ...notices,
+      "",
+      "A worker is still running and sent progress or a question (notices above). Handle the update or answer its exact question with delegation_send; other notices may report terminal results. Messages do not complete or accept work. When only pending work remains, end the turn so the user can keep talking.",
+    ].join("\n\n");
   return [
     "[background jobs finished]",
     ...notices,
@@ -140,7 +148,13 @@ export function buildBackgroundWakePrompt(notices: string[]): string {
 }
 
 /** Transcript line shown in place of the full wake prompt. */
-export function backgroundWakeLabel(count: number): string {
+export function backgroundWakeLabel(countOrNotices: number | readonly string[]): string {
+  if (
+    Array.isArray(countOrNotices) &&
+    countOrNotices.some((notice) => /^\[Worker messages jobId=[\w-]+ status=running\]/.test(notice))
+  )
+    return "⟲ background worker update — resuming";
+  const count = typeof countOrNotices === "number" ? countOrNotices : countOrNotices.length;
   return count === 1 ? "⟲ background job finished — resuming" : `⟲ ${count} background jobs finished — resuming`;
 }
 
@@ -238,6 +252,6 @@ export function buildRateLimitRule(r: RateLimitRuleInput): string {
     `- ${r.provider} account limit: ${declared}.`,
     `- Run at most ${r.maxParallelAgents} background agents at once; the CLI refuses more. Launch in batches of at most ${r.maxParallelAgents} and wait for completion notices before the next batch.`,
     "- Every agent's prompt and context count against tokens/min. Keep delegation prompts focused; a large main context alone can exhaust the budget, so compact before fanning out.",
-    "- The CLI already paces calls and retries rate-limit (429) errors with backoff. If a call or a delegation still fails with a rate-limit error, the budget is exhausted: do NOT respawn at once or launch probe agents to test availability — reduce parallelism, end your turn and retry after the wait.",
+    "- The CLI paces calls and retries rate-limit (429) errors with backoff. A 429 after retries means the call remained rate-limited within the local retry window; it does not prove exhausted account credit or identify whether concurrency, RPM, TPM or a plan-specific limit was reached. Retain the provider status, trace ID and retry headers when available; report an unknown cause when the provider does not identify the counter. Still do NOT respawn at once or launch probe agents to test availability — reduce parallelism, end your turn and retry after the indicated wait.",
   ].join("\n");
 }

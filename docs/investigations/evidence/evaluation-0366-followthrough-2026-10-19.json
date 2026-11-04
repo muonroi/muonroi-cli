@@ -1,0 +1,222 @@
+﻿{
+  "capturedAt": "2026-10-18T17:06:49.3065368Z",
+  "sessionId": "0366c5a9d7b3",
+  "report": "docs/investigations/evaluation-0366-followthrough-2026-10-19.md",
+  "originalReport": {
+    "path": "D:/sources/Core/extension/ai-dock/MUONROI-CLI-EVALUATION.md",
+    "sha256": "336b6d1ddd19e5524c446c91dde88f466a49864ef8592a305cc9d467f8a80398",
+    "unchanged": true
+  },
+  "historical": {
+    "inspection": "Read-only job metadata and SQLite interaction_logs",
+    "privateArtifact": ".scratch/evaluation-0366/incident.json",
+    "allThreeJobsHadSameExplicitGrants": true,
+    "planReviewResultRows": [63506, 63782],
+    "export985bExistsAtWorkspaceRoot": true,
+    "correctGlobalLedgerCouncilPercent": 29.128859771213804,
+    "notProviderInvoice": true
+  },
+  "regression": {
+    "tests": 199,
+    "files": 18,
+    "exitCode": 0,
+    "artifact": ".scratch/evaluation-0366/regression.log",
+    "isolation": "Private HOME/USERPROFILE/CLI/auth/env; NODE_ENV=test",
+    "warnings": "Existing Vitest bun:sqlite hoisting warning and nongit fixture hook output; no failed tests"
+  },
+  "cli": {
+    "startedAt": "2026-10-18T17:04:34.927Z",
+    "boundary": "Fresh built Bun CLI subprocesses; private HOME/auth/env; no paid models/workers",
+    "baseline": false,
+    "cases": [
+      {
+        "args": ["usage"],
+        "exit": 0,
+        "stdout": "Usage: muonroi-cli usage [options] [command]\n\nInspect cost ledger and find spend bloat\n\nOptions:\n  -h, --help                           display help for command\n\nCommands:\n  report [options]                     Aggregate per-call cost log + product\n                                       ledger to find where spend grew\n  pil [options]                        Attribute system-prompt size growth to\n                                       PIL layers\n                                       (intent/personality/EE/FLOW/context)\n  forensics [options] \u003csessionPrefix\u003e  Per-event token + cache breakdown for a\n                                       session (joins usage_events âˆª\n                                       interaction_logs). Use to verify Phase\n                                       A/B/C cost-optimization caps.\n  experience [options]                 Cross-session anti-mÃ¹ telemetry: how\n                                       often compaction elides tool outputs and\n                                       whether the agent recovers them (gates\n                                       the deferred auto-protect\n                                       re-architecture).\n  security-audit [options]             Security posture: yolo/permission\n                                       overrides, high-risk cmds, shuru audits\n                                       + cost (from decision-log events)\n  perf-regression [options]            Perf snapshot + estimator drift (compare\n                                       baseline stub for later)\n",
+        "stderr": ""
+      },
+      {
+        "args": ["--help"],
+        "exit": 0,
+        "stdout": "Usage: muonroi-cli [options] [command] [message...]\n\nAI coding agent â€” built with Bun and OpenTUI\n\nArguments:\n  message                        Initial message to send\n\nOptions:\n  -V, --version                  output the version number\n  -k, --api-key \u003ckey\u003e            API key\n  -u, --base-url \u003curl\u003e           API base URL\n  -m, --model \u003cmodel\u003e            Model to use\n  -d, --directory \u003cdir\u003e          Working directory (default:\n                                 \"D:\\\\sources\\\\Core\\\\muonroi-cli\\\\.scratch\\\\evaluation-0366\\\\cli-home-I1AXCb\")\n  -p, --prompt \u003cprompt\u003e          Run a single prompt headlessly\n  --verify                       Run the built-in verify flow headlessly\n  --format \u003cformat\u003e              Headless output format: text or json (default:\n                                 \"text\")\n  -s, --session \u003cid\u003e             Continue a saved session by id, or use\n                                 \u0027latest\u0027\n  --background-task-file \u003cpath\u003e  Run a persisted background delegation\n  --max-tool-rounds \u003cn\u003e          Max tool execution rounds (ultimate runaway\n                                 safety net) (default: \"120\")\n  --batch-api                    Use xAI Batch API for model calls (async,\n                                 lower cost)\n  --permission \u003cmode\u003e            Permission mode: safe, auto (auto-edit), yolo;\n                                 overrides the saved user choice\n  -y, --yes                      Headless: auto-answer council askcards with\n                                 their default option and approve preflights\n  --council-answers \u003cfile\u003e       Headless: JSON file with scripted council\n                                 answers per phase (FIFO)\n  --update                       Update muonroi-cli to the latest version and\n                                 exit\n  --smoke-boot-only              CI smoke: validate loadConfig + loadUsage and\n                                 exit 0 â€” no keychain access\n  --agent-mode                   Enable agent harness mode (JSONL sidechannel)\n  --agent-cols \u003cn\u003e               Terminal columns in agent-mode (default: 120)\n  --agent-rows \u003cn\u003e               Terminal rows in agent-mode (default: 40)\n  --agent-idle-ms \u003cn\u003e            Idle quiescence window (ms) (default: 50)\n  --agent-fake-clock             Use deterministic frame-counter clock\n  --mock-llm \u003cdir\u003e               Use fixture-based mock LLM from \u003cdir\u003e instead\n                                 of real provider (E2E testing)\n  --inject-halt                  TEST SEAM: render a synthetic halt recovery\n                                 card after boot (harness E2E only)\n  --inject-halt-sprint           TEST SEAM: render a synthetic sprint-failed\n                                 recovery card after boot (harness E2E only)\n  -h, --help                     display help for command\n\nCommands:\n  models                         List available models\n  update                         Update muonroi-cli to the latest release\n  uninstall [options]            Remove a script-installed muonroi-cli binary\n                                 and optional data\n  daemon [options]               Start the schedule daemon to run scheduled\n                                 tasks\n  doctor                         Run health checks for muonroi-cli dependencies\n                                 and services\n  bug-report                     Generate anonymized diagnostic bundle for\n                                 issue submission\n  keys                           Manage provider API keys as environment\n                                 variables (set, list, delete)\n  features [feature]             Discover TUI slash commands and native\n                                 features without running them\n  usage                          Inspect cost ledger and find spend bloat\n  mcp                            Manage MCP server configuration\n  mcp-driver                     Run the agent-harness MCP driver over stdio\n  tools-mcp                      Run the muonroi native-tools MCP server over\n                                 stdio (self-verify; more tools later)\n  self-verify [options]          Harness-Verified Self-QA: spawn a child\n                                 muonroi-cli, drive it through scenarios\n                                 derived from git diff, and emit regression\n                                 specs for every passing run\n  export-transcripts [options]   One-shot dump of SQLite session history â†’\n                                 ~/.experience/muonroi-cli-sessions/ for EE\n                                 backfill\n  share [options] \u003cuser\u003e         Add a stakeholder to the current product\u0027s\n                                 Discord channel\n  reporter [options]             Run the P8 reporter agent â€” polls Discord and\n                                 serves progress queries\n\nIn-session features: /council and /ideal. Run `muonroi-cli features [council|ideal]` for entry points. Positional words are prompt text, not command discovery.\n",
+        "stderr": ""
+      },
+      {
+        "args": ["features"],
+        "exit": 0,
+        "stdout": "In-session features (discovery only; this command starts no models or workers):\nStart muonroi-cli interactively, then enter the slash command.\n/council [rounds] \u003ctopic\u003e â€” multi-model discussion inside the TUI. The agent can also use native convene_council. /council inspect \u003csession-id\u003e inspects a saved discussion.\n/ideal \u003cidea\u003e â€” start the product loop inside the TUI. /ideal status, /ideal resume [runId], and /ideal abort \u003crunId\u003e manage runs.\nThese are TUI slash commands/native tools, not executable top-level CLI subcommands.\nUnrecognized positional words are initial prompt text; global --help describes the root CLI, not proof of a named feature.\n",
+        "stderr": ""
+      },
+      {
+        "args": ["features", "ideal"],
+        "exit": 0,
+        "stdout": "In-session features (discovery only; this command starts no models or workers):\nStart muonroi-cli interactively, then enter the slash command.\n/ideal \u003cidea\u003e â€” start the product loop inside the TUI. /ideal status, /ideal resume [runId], and /ideal abort \u003crunId\u003e manage runs.\nThese are TUI slash commands/native tools, not executable top-level CLI subcommands.\nUnrecognized positional words are initial prompt text; global --help describes the root CLI, not proof of a named feature.\n",
+        "stderr": ""
+      },
+      {
+        "args": ["features", "council"],
+        "exit": 0,
+        "stdout": "In-session features (discovery only; this command starts no models or workers):\nStart muonroi-cli interactively, then enter the slash command.\n/council [rounds] \u003ctopic\u003e â€” multi-model discussion inside the TUI. The agent can also use native convene_council. /council inspect \u003csession-id\u003e inspects a saved discussion.\nThese are TUI slash commands/native tools, not executable top-level CLI subcommands.\nUnrecognized positional words are initial prompt text; global --help describes the root CLI, not proof of a named feature.\n",
+        "stderr": ""
+      },
+      {
+        "args": ["features", "constructor"],
+        "exit": 1,
+        "stdout": "",
+        "stderr": "Unknown feature: constructor. Choose council or ideal.\n"
+      },
+      {
+        "args": ["usage", "report"],
+        "exit": 0,
+        "stdout": "Loaded 0 entries (source=both)\nScope: all recorded dates. Costs are CLI ledger estimates, not provider invoices.\nCombined ledgers are not a deduplicated provider invoice; use --source cost-log or --source product to inspect provenance.\nDrift compares logged input tokens with the initial prompt estimate; tool/system expansion and multi-step calls are not a per-request estimator accuracy measurement.\n  (no entries)\n\n[agent-self] comfort snapshot (run with --breakdown for full per-turn numbers)\n  batch independent system checks; preserve full build/test logs and failure exit codes. Use sufficient returned output directly; fetch missing slices with bash_output_get(run_id, mode=...).\n  prefer read_file + grep over bash cat/grep/find for source; read-path budget defaults to 0 (unlimited after write/edit thanks to notifyWrite).\n  high avg tools or system chars = use sub-agent compaction or cheaper model for research/verify roles; watch the drift table above.\n",
+        "stderr": ""
+      }
+    ],
+    "checks": {
+      "bareUsageExpectedExit": true,
+      "bareUsageStillShowsSubcommands": true,
+      "rootDiscoversActualTuiFeatures": true,
+      "featuresAreReadOnlyGuide": true,
+      "idealEntryPointDescribed": true,
+      "councilToolAndSlashDescribed": true,
+      "invalidFeatureRefused": true,
+      "costScopeAndEstimateBoundaries": true
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T17:04:41.933Z"
+  },
+  "flow": {
+    "startedAt": "2026-10-18T17:04:35.851Z",
+    "boundary": "Fresh built native flow tools/loop host/private SQLite with scripted local perspective callbacks; no actual model/worker/council requests",
+    "checks": {
+      "databaseIsPrivate": true,
+      "reviewReturnsStructuredRecovery": true,
+      "gateStaysClosed": true,
+      "localPerspectiveCallbacksUsed": true,
+      "statusCarriesSameAttemptId": true,
+      "statusDoesNotWriteState": true,
+      "resolvedLeaderAndDurationStored": true,
+      "verdictConcernAndArtifactProvenanceStored": true
+    },
+    "measurement": {
+      "model": "deepseek-v4-flash",
+      "durationMs": 22,
+      "reviewId": "3552e280-1040-4490-bed3-09d60b761e5f",
+      "concernCount": 2
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T17:04:35.949Z"
+  },
+  "mcpInitialize": {
+    "startedAt": "2026-10-18T16:55:43.661Z",
+    "boundary": "Cold built MCP initialization and advertised tool inventory only, explicit historical grants/current configuration; no tool/model calls or credential/config changes",
+    "serverIds": ["muonroi-docs"],
+    "elapsedMs": 1146,
+    "advertisedToolNames": [
+      "mcp_muonroi-docs__docs_search",
+      "mcp_muonroi-docs__docs_read",
+      "mcp_muonroi-docs__bb_template_describe",
+      "mcp_muonroi-docs__bb_package_describe",
+      "mcp_muonroi-docs__bb_recipe_list",
+      "mcp_muonroi-docs__setup_guide"
+    ],
+    "requiredToolsPresent": true,
+    "errorCount": 0,
+    "pass": true,
+    "finishedAt": "2026-10-18T16:55:44.884Z"
+  },
+  "nativeSelfverify": {
+    "pass": true,
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "artifact": ".scratch/evaluation-0366/native-selfverify.json"
+  },
+  "buildExitCode": 0,
+  "typecheckExitCode": 0,
+  "sourceAndBuildHashes": [
+    {
+      "path": "src/index.ts",
+      "sha256": "df3a290a2736a9b32e414199d1c70ec0ad782872448fce55650fa1768171c578"
+    },
+    {
+      "path": "src/cli/features.ts",
+      "sha256": "cf0f795938ab2e7a39acdcf56a7d204da0812ae4ddf51f7d58a5fa5db9a93719"
+    },
+    {
+      "path": "src/cli/usage-report.ts",
+      "sha256": "8174e66f6eb6c24283385a21c7112dbf987ab6cf7754ec17750b101509fc529c"
+    },
+    {
+      "path": "src/ops/doctor.ts",
+      "sha256": "ebea1e75417cc3c3d50c290b0fa0637c43c077488cdd1486665c47616b1fa340"
+    },
+    {
+      "path": "src/mcp/runtime.ts",
+      "sha256": "f0743ae9a9ae3d8fc50dfb82b24355e48761b890dd24969b17850ecb9e848677"
+    },
+    {
+      "path": "src/mcp/client-pool.ts",
+      "sha256": "f3a0cb6341141819ddfec381b6892ce0f66c2227d8592b2e2a7e765a1aa2e621"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "a5b438c500e9b99ec69376aa2afdbc9ca6cf0fe753b141ee9b373011af538571"
+    },
+    {
+      "path": "src/orchestrator/preprocessor.ts",
+      "sha256": "4909cb571c87ac9d80fd0ace0f30ae416aa0db5c0c14fcaa450311b21f882644"
+    },
+    {
+      "path": "src/pil/types.ts",
+      "sha256": "87ca7fe7135887ffe6bcfe416a9c36f42c6aa17c4c29851bf3d74c75ab1c2a52"
+    },
+    {
+      "path": "src/pil/schema.ts",
+      "sha256": "de16d77d561ae91a320daa0b68923b0e3a7e9251f6dd51528efe37686097b88e"
+    },
+    {
+      "path": "src/pil/pipeline.ts",
+      "sha256": "2b7ea0c603b3940a104641a2509ae5fefff019210391329d04603b2a557f1882"
+    },
+    {
+      "path": "src/utils/integration-health.ts",
+      "sha256": "2cd2f3f014cc5463da56d4ef694e6a268d6846c072035dcb5ffabd8b5cff4711"
+    },
+    {
+      "path": "src/workflow/workflow-engine.ts",
+      "sha256": "a88dccc1dda72d8f5bd8b2956f68ac6af364933c4843a481b0c2812e729f9248"
+    },
+    {
+      "path": "src/workflow/workflow-tools.ts",
+      "sha256": "91040999517653526b5c4e9d1ead3ab289eb07124fe6a725b9099e2f5c034d24"
+    },
+    {
+      "path": "src/workflow/plan-council.ts",
+      "sha256": "00af38cdf54f926ded272af173f1b5857be1b786b000e49c4d5c4b28212fbdbe"
+    },
+    {
+      "path": "src/workflow/loop-host.ts",
+      "sha256": "890db7c387e993c76bf0074c122a4d14599b2257527522d154a291373b27a9ed"
+    },
+    {
+      "path": "src/workflow/ee-closure.ts",
+      "sha256": "c24f222d0a014e3e1f1bb2a52f7069396e16c24501f8de831418a9518c627d99"
+    },
+    {
+      "path": "dist/src/index.js",
+      "sha256": "c17bbeaa3882e0bb5e35269fc686828c872fbc2a9dcf4a69c68ecfd1c58ed560"
+    }
+  ],
+  "limits": [
+    "MCP live check is initialize/inventory only, not tool execution",
+    "Local Flow callbacks are fixtures, no paid model/council replay",
+    "StealthGPT authorization requires valid external credentials",
+    "Historical PIL timeout root cause unproven; new phase/timing diagnostics added",
+    "No full suite/push/deployment, user job/acceptance mutation or historical ledger rewrite"
+  ]
+}

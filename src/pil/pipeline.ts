@@ -21,7 +21,7 @@ import { layer1Intent } from "./layer1-intent.js";
 import { layer2_5Ponytail } from "./layer2_5-ponytail.js";
 import { layer2Personality } from "./layer2-personality.js";
 import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injection.js";
-import { layer4Gsd } from "./layer4-gsd.js";
+import { layer4Flow } from "./layer4-flow.js";
 import { layer5Context } from "./layer5-context.js";
 import { isMetaAnalysisPrompt, isPlanExecution, layer6Output } from "./layer6-output.js";
 import { getRepoStructureHints } from "./repo-structure-hints.js";
@@ -76,7 +76,7 @@ const SKIPPED_LAYERS: Array<{ timingName: string; deltaName: string }> = [
   { timingName: "layer2-personality", deltaName: "personality-adaptation" },
   { timingName: "layer2_5-ponytail", deltaName: "ponytail-mode" },
   { timingName: "layer3-ee-injection", deltaName: "ee-experience-injection" },
-  { timingName: "layer4-gsd-structuring", deltaName: "gsd-workflow-structuring" },
+  { timingName: "layer4-flow-structuring", deltaName: "flow-workflow-structuring" },
   { timingName: "layer5-context-enrichment", deltaName: "context-enrichment" },
 ];
 
@@ -173,7 +173,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   // The council's own per-phase execution envelope (plan-execution.ts) hits the
   // same branch via COUNCIL_PLAN_EXECUTION_MARKER — see its module doc. Both
   // sources go through the shared `isPlanExecution` predicate (layer6-output.ts)
-  // that tool-engine's output-budget floor and layer4's GSD directive also use.
+  // that tool-engine's output-budget floor and layer4's FLOW directive also use.
   const planExecution = isPlanExecution(ctx.raw);
   if (planExecution) {
     ctx = {
@@ -181,7 +181,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
       directAnswer: false,
       deliverableKind: "code",
       // Ensure we do not silently downgrade to quick; standard keeps the full
-      // toolset and advisory GSD directive, heavy would force a plan-review gate
+      // toolset and advisory FLOW directive, heavy would force a plan-review gate
       // that conflicts with executing an already-reviewed sprint plan.
       modelDepthTier: ctx.modelDepthTier ?? "standard",
     };
@@ -263,7 +263,7 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
     // internally timeout-bounded, so meta turns just carry the same EE budget as
     // a normal turn.
     await timed("layer3-ee-injection", layer3EeInjection);
-    await timed("layer4-gsd-structuring", layer4Gsd);
+    await timed("layer4-flow-structuring", layer4Flow);
     await timed("layer5-context-enrichment", layer5Context);
     if (isMetaAnalysisPrompt(ctx.raw)) {
       // Issue #4 (targeted complement): surface the elided tool-artifacts
@@ -346,7 +346,7 @@ export interface PipelineOptions {
   signal?: AbortSignal;
   /** Layer boundaries/failures for the caller's progress and durable breadcrumbs. */
   onPhase?: (name: string, state: "start" | "end" | "error", error?: string) => void;
-  gsdPhase?: string | null;
+  flowPhase?: string | null;
   resumeDigest?: string | null;
   activeRunId?: string | null;
   sessionId?: string | null;
@@ -372,7 +372,7 @@ export interface PipelineOptions {
    */
   recentTurnsSummary?: string | null;
   /**
-   * Depth of the run already in flight (GSD STATE.md → Depth), supplied by the
+   * Depth of the run already in flight (FLOW STATE.md → Depth), supplied by the
    * orchestrator. Forwarded to layer1 so a continuation utterance inherits the
    * in-flight depth instead of being re-scored in isolation.
    */
@@ -395,12 +395,13 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
     tokenBudget: DEFAULT_TOKEN_BUDGET,
     metrics: null,
     layers: [],
-    gsdPhase: options?.gsdPhase ?? null,
+    flowPhase: options?.flowPhase ?? null,
     resumeDigest: options?.resumeDigest ?? null,
     activeRunId: options?.activeRunId ?? null,
     sessionId: options?.sessionId ?? null,
     fallbackReason: null,
   };
+  const startedAt = Date.now();
   const phases: string[] = [];
   let finished = false;
   const onPhase: NonNullable<PipelineOptions["onPhase"]> = (name, state, error) => {
@@ -472,7 +473,12 @@ export async function runPipeline(raw: string, options?: PipelineOptions): Promi
         : err instanceof Error
           ? `exception:${err.name}`
           : "exception:unknown";
-    const failed = { ...fallback, fallbackReason: reason } as PipelineContext;
+    const failed = {
+      ...fallback,
+      fallbackReason: reason,
+      fallbackPhase: activePhase ?? "setup",
+      fallbackDurationMs: Math.max(0, Date.now() - startedAt),
+    } as PipelineContext;
     setPilLastResult(failed);
     return failed;
   } finally {

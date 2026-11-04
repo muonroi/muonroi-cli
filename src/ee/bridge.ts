@@ -13,6 +13,7 @@ import * as path from "node:path";
 import { type PilContextResponse, PilContextResponseSchema } from "../pil/schema.js";
 import { isEETier } from "../pil/task-tier-map.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv, withEeTimeout } from "../utils/ee-logger.js";
+import { logger } from "../utils/logger.js";
 
 export type { WhoAmIDim, WhoAmIDimName, WhoAmIProfile } from "./who-am-i.js";
 // "Who Am I" v4.0 profile access. Re-exported through the bridge so PIL layers
@@ -169,7 +170,9 @@ async function getEECore(): Promise<EECore | null> {
   try {
     const corePath = await resolveCorePath();
     if (!corePath) {
-      console.warn(
+      logger.file(
+        "info",
+        "ee",
         "[muonroi-cli] EE bridge: experience-core.js not found — direct bridge inactive, HTTP fallback active",
       );
       return null;
@@ -178,7 +181,12 @@ async function getEECore(): Promise<EECore | null> {
     const _require = createRequire(import.meta.url);
     _core = _require(corePath) as EECore;
   } catch (err) {
-    console.warn(`[muonroi-cli] EE bridge: failed to load experience-core.js — ${(err as Error).message}`);
+    logger.file(
+      "warn",
+      "ee",
+      `[muonroi-cli] EE bridge: failed to load experience-core.js — ${(err as Error).message}`,
+      { error: err },
+    );
     _core = null;
   }
 

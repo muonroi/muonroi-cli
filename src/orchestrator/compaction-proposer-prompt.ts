@@ -22,6 +22,8 @@ Rules:
 - Long search/grep outputs should be SUMMARIZED to preserve which files matched, not the full content.
 
 Output format — strict JSON, no markdown fences, no extra text:
+If compaction is not needed, return only {"shouldCompact":false,"reason":"brief reason","actions":[]}.
+Do not enumerate actions for a no-compaction decision. Keep reasons brief and finish the JSON object within the output budget.
 {
   "shouldCompact": boolean,
   "reason": "short explanation why compact or not",

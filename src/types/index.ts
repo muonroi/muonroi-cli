@@ -40,12 +40,26 @@ export type BuiltinSubagentId =
   | "computer";
 
 export interface TaskRequest {
+  /** Host-only durable evidence sink; never exposed in model tool schemas. */
+  artifactJobPath?: string;
+  /** A fresh, host-constrained independent verification of this exact saved result. */
+  reviewOf?: { jobId: string; resultVersion: string };
   agent: BuiltinSubagentId | string;
   description: string;
   prompt: string;
+  /** Explicit execution workspace; never infer a directory from prose. */
+  cwd?: string;
   maxToolRounds?: number;
   /** When set, bypasses parent-tier cap and uses this model for the sub-agent. */
   modelId?: string;
+  /** Explicit worker effort; omitted uses the selected model's saved/catalog default. */
+  reasoningEffort?: ReasoningEffort;
+  /** Exact MCP capability grants for this worker; never grants orchestration tools. */
+  allowedMcpTools?: string[];
+  /** Workspace-relative file names, or recursive directories ending in '/'; [] is read-only. */
+  writeScope?: string[];
+  /** Return a durable background-worker receipt instead of waiting for completion. */
+  background?: boolean;
 }
 
 export interface TaskRun {
@@ -55,7 +69,7 @@ export interface TaskRun {
   activity?: string;
 }
 
-export type DelegationStatus = "running" | "complete" | "error";
+export type DelegationStatus = "running" | "complete" | "error" | "cancelled";
 
 /**
  * Known, actionable failure cause of a background delegation.
@@ -65,14 +79,31 @@ export type DelegationStatus = "running" | "complete" | "error";
  */
 export type DelegationFailureKind = "rate-limited";
 
+/** Host observations, never a diagnosis of why a provider/harness failed. */
+export interface DelegationFailureRecovery {
+  symptom: "missing-final-answer" | "output-limit" | "model-message-schema" | "unclassified";
+  rootCause: "not-established";
+  capturedToolCalls: number;
+  mutationToolCalls: number;
+  commandToolCalls: number;
+  artifactError?: string;
+  /** Last bounded mutation/command references; the full manifest remains authoritative. */
+  inspect: Array<{ toolCallId: string; toolName: string; digest: string }>;
+}
+
 export interface DelegationRun {
+  writeScope?: string[];
+  writeScopeVersion?: number;
   id: string;
-  agent: "explore";
+  agent: string;
   description: string;
   summary: string;
   status: DelegationStatus;
+  resultVersion?: string;
+  deliveryStatus?: "pending" | "delivered" | "acknowledged";
   /** Set on a failed delegation whose cause is known (see {@link DelegationFailureKind}). */
   failureKind?: DelegationFailureKind;
+  failureRecovery?: DelegationFailureRecovery;
 }
 
 export interface SubagentStatus {
@@ -210,7 +241,11 @@ export interface VerifyArtifact {
 }
 
 export interface ToolResult {
+  /** Host collected; never parsed from model claims. */
+  reviewEvidence?: ReviewToolEvidence[];
   success: boolean;
+  /** Validated file diff only; no mutation was applied. */
+  preview?: boolean;
   output?: string;
   error?: string;
   diff?: FileDiff;
@@ -231,6 +266,44 @@ export interface ToolResult {
   bashRunId?: string;
   /** Total chars of cached stdout+stderr for this bashRunId, pre-truncation. */
   bashTotalChars?: number;
+}
+
+export interface ReviewToolEvidence {
+  tool: "verification_run" | "read_file" | "grep" | "lsp_query" | "retrieve_tool_result";
+  success: boolean;
+  input: unknown;
+  outputDigest: string;
+  completedAt: string;
+  cwd?: string;
+  exitCode?: number | null;
+  outputPreview?: string;
+  scope?: "workspace" | "external" | "unknown" | "worker-artifact";
+  artifact?: {
+    jobId: string;
+    resultVersion: string;
+    toolCallId: string;
+    digest: string;
+    offset: number;
+    chars: number;
+    totalChars: number;
+  };
+  resolvedPaths?: string[];
+}
+export interface ReviewVerdict {
+  verdict: "pass" | "fail";
+  evidence: string[];
+}
+export interface DelegationAcceptanceInput {
+  jobId: string;
+  resultVersion: string;
+  reviewJobId: string;
+  reviewResultVersion: string;
+}
+export interface DelegationArtifactReadInput {
+  toolCallId: string;
+  resultVersion?: string;
+  offset?: number;
+  maxChars?: number;
 }
 
 export interface ToolCall {
@@ -270,6 +343,8 @@ export interface ToolGroup {
 export interface ChatEntry {
   type: "user" | "assistant" | "tool_call" | "tool_result" | "structured_response" | "tool_group";
   content: string;
+  /** Host-owned display metadata; raw content remains available to main/export. */
+  internal?: boolean;
   timestamp: Date;
   modeColor?: string;
   remoteKey?: string;

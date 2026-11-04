@@ -1,5 +1,28 @@
 import { describe, expect, it } from "vitest";
-import { stripInvisibleChars, stripStrayModelMacros } from "./text.js";
+import { hideLegacyCompletionReceipts, sanitizeContent, stripInvisibleChars, stripStrayModelMacros } from "./text.js";
+
+describe("legacy internal completion receipt display", () => {
+  const receipt =
+    "[Native Flow evidence: plan-review=pass; implementation-verification=missing; whole-task completion=unverified. These artifact facts do not certify the model's completion claim.]";
+  it("hides repeated trailing host receipts in historical and live assistant display", () => {
+    const raw = `Actual progress.\nPRESERVE\n\n${receipt}\n\n${receipt}\n${receipt}`;
+    expect(hideLegacyCompletionReceipts(raw)).toBe("Actual progress.\nPRESERVE");
+    expect(sanitizeContent(raw)).toBe("Actual progress.\nPRESERVE");
+    expect(raw).toContain(receipt);
+    expect(hideLegacyCompletionReceipts(receipt)).toBe("");
+  });
+  it("retains prose, quoted examples, incomplete receipts and unrelated bracketed text", () => {
+    for (const raw of [
+      "Actual progress.\n",
+      `[Native Flow evidence: incomplete]`,
+      `Quoted: ${receipt}`,
+      `\`\`\`text\n${receipt}\n\`\`\``,
+      `${receipt}\nThe user asked about this text.`,
+    ]) {
+      expect(hideLegacyCompletionReceipts(raw)).toBe(raw);
+    }
+  });
+});
 
 describe("stripStrayModelMacros", () => {
   it("strips a trailing \\confidence{NN} macro and the blank line before it", () => {

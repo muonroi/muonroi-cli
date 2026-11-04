@@ -269,6 +269,7 @@ async function spawnProcess(launch: LspLaunchSpec, cwd: string): Promise<ChildPr
   const target = resolveSpawnTarget(launch.command, launch.args ?? []);
   const child = spawn(target.command, target.args, {
     cwd,
+    windowsHide: true,
     env: {
       ...globalThis.process.env,
       ...launch.env,

@@ -4,6 +4,7 @@ import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from ".
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
+import { parseCompactionProposal } from "./compaction-proposal.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { markProposerStalled } from "./compaction-stall-notice.js";
 import { containsEncryptedReasoning } from "./reasoning";
@@ -75,11 +76,13 @@ export async function proposeCompaction(
   messages: ModelMessage[],
   signal?: AbortSignal,
 ): Promise<CompactionProposal | null> {
-  const runtime = resolveModelRuntime(modelId);
+  const runtime = resolveModelRuntime(modelId, { stage: "compaction" });
   const serialized = serializeConversation(messages);
   const deadlineMs = getProposerDeadlineMs();
 
   for (let attempt = 1; attempt <= PROPOSER_MAX_ATTEMPTS; attempt++) {
+    signal?.throwIfAborted();
+    const attemptController = new AbortController();
     pingTurnProgress();
     // The abort-signal's OWN timer is armed slightly LATER than the race
     // below — it exists only for clean HTTP-level cancellation, not as the
@@ -88,8 +91,12 @@ export async function proposeCompaction(
     // window ensures the race's own, deterministically-worded timeout error
     // (matched by `isTimeout` below) is always what wins and gets thrown,
     // instead of racing two same-length timers against each other.
-    const { signal: timedSignal, cleanup } = withTimeoutSignal(signal, deadlineMs + 2_000);
+    const attemptSignal = signal ? AbortSignal.any([signal, attemptController.signal]) : attemptController.signal;
+    const { signal: timedSignal, cleanup } = withTimeoutSignal(attemptSignal, deadlineMs + 2_000);
     let text: string;
+    let finishReason: string | undefined;
+    let reasoningChars = 0;
+    let outputTokens: number | undefined;
     try {
       const result = await withDeadlineRace(
         () =>
@@ -113,8 +120,24 @@ export async function proposeCompaction(
         "compaction proposer",
         signal,
       );
+      // AI SDK may finish an aborted stream without yielding an error part.
+      signal?.throwIfAborted();
       text = result.text.trim();
+      finishReason = result.finishReason;
+      reasoningChars = result.reasoningText?.length ?? 0;
+      outputTokens = result.usage?.outputTokens;
     } catch (err) {
+      // Losing the deadline race does not stop the provider's pending retry loop.
+      // Abort its owner before removing the timer/listener or starting a retry.
+      attemptController.abort(err);
+      if (signal?.aborted) {
+        cleanup();
+        logger.debug("orchestrator", "Compaction proposer cancelled", {
+          error: err instanceof Error ? err.message : String(err),
+          attempt,
+        });
+        signal.throwIfAborted();
+      }
       const isTimeout = err instanceof Error && /deadline|timeout/i.test(err.message);
       if (isTimeout && attempt < PROPOSER_MAX_ATTEMPTS) {
         logger.warn("orchestrator", "Compaction proposer stalled — bounded retry", { attempt, deadlineMs });
@@ -138,47 +161,22 @@ export async function proposeCompaction(
     }
     cleanup();
 
-    // Attempt to parse JSON object robustly, even if the model wraps it in conversational text or markdown fences.
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn("orchestrator", "Failed to extract JSON from proposer output", { text });
-      return null;
-    }
-
-    // Contract (see this function's docstring): ANY failure must yield `null`,
-    // never throw — the caller (`compactForContext`, orchestrator.ts:2074) has
-    // no try/catch of its own around this call, and ITS caller
-    // (tool-engine.ts:1221) only wraps it in the whole-turn catch, which
-    // surfaces a raw, uncustomized error instead of the documented graceful
-    // fallback. Measured failure mode: the greedy `/\{[\s\S]*\}/` regex above
-    // matches from the first `{` to the LAST `}` in the text, so prose like
-    // "I'll keep {message 1} and drop {message 2}" produces a non-JSON
-    // substring and `JSON.parse` throws a `SyntaxError` — previously bare,
-    // uncaught, here. Wrapping the shape-validation loop too, since a
-    // malformed-but-parseable payload (e.g. a null entry in `actions`) can
-    // throw a TypeError on property access the same way.
-    try {
-      const parsed: CompactionProposal = JSON.parse(jsonMatch[0]);
-
-      // Validate shape
-      if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
-        logger.warn("orchestrator", "Invalid JSON shape from proposer", { parsed });
-        return null;
-      }
-      // Validate each action
-      for (const action of parsed.actions) {
-        if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
-          logger.warn("orchestrator", "Invalid action shape from proposer", { action });
-          return null;
-        }
-      }
-
-      return parsed;
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      logger.warn("orchestrator", "Failed to parse or validate proposer JSON", { error: errMessage, text });
-      return null;
-    }
+    const proposal = parseCompactionProposal(text, messages.length);
+    if (!proposal)
+      logger.file("warn", "orchestrator", "Compaction proposer rejected; using heuristic fallback", {
+        reason:
+          text.length === 0
+            ? "empty-output"
+            : finishReason === "length"
+              ? "output-limit"
+              : "invalid-or-ambiguous-proposal",
+        textChars: text.length,
+        reasoningChars,
+        finishReason,
+        outputTokens,
+        attempt,
+      });
+    return proposal;
   }
   // Unreachable — every loop iteration either `return`s or `continue`s into
   // the next attempt, and the last attempt cannot `continue`.
@@ -247,7 +245,7 @@ Use this exact format:
 ## Active Plan
 - **Plan file**: [path to PLAN.md or plan document being followed, or "(none)" if no explicit plan]
 - **Plan step**: [current step number and description, e.g. "Step 3/7: implement layer6-output.ts", or "(none)"]
-- **Plan source**: [e.g. "/gsd:execute-phase", "/gsd:quick", "manual", or "(none)"]
+- **Plan source**: [e.g. "/flow:execute-phase", "/flow:quick", "manual", or "(none)"]
 
 ## Constraints & Preferences
 - [Requirements, preferences, or constraints]
@@ -283,15 +281,17 @@ Use this exact format:
 - **Error messages**: [copy verbatim any error messages]
 - **Key numbers/results**: [list important numbers, query results, or metrics]
 
-## Kept Artifacts (high-fidelity tool outputs preserved verbatim across B3/B4 compaction per anti-mù; agent can query the ee_query tool with "tool-artifact id=..." or "full tool result id=..." for full content later)
+## Kept Artifacts (recover exact local contents with retrieve_tool_result; if an ID is unknown, use retrieve_tool_result({view:"index",query:"relevant path or tool name"}); EE availability is independent)
 - toolCallId | toolName | first120chars | reason (high-value|KEEP_TOOL_IDS|recent-turn|error)
+- Preserve the original user goal, outstanding deliverables and acceptance criteria separately from completed helper/preflight scope. A plan pass or a partial result is not whole-task completion.
 
-Keep it concise, but preserve exact file paths, function names, and error messages.`;
+Keep opaque toolCallId, jobId and resultVersion values complete and byte-for-byte unchanged; never abbreviate IDs or replace them with prefixes. Keep it concise, but preserve exact file paths, function names, and error messages.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are new conversation messages to incorporate into the existing summary provided below.
 
 Update the existing structured summary with new information. Rules:
 - Preserve still-relevant information from the previous summary
+- Preserve the original user goal, remaining deliverables, acceptance criteria and next action separately from completed helper/preflight scope; a plan pass is not implementation completion.
 - Add new progress, decisions, and critical context
 - Move completed items from "In Progress" to "Done" (✅ DONE — DO NOT REDO) when appropriate
 - Update "Active Plan" step if the current step has advanced
@@ -304,6 +304,7 @@ Update the existing structured summary with new information. Rules:
 
 ## Kept Artifacts
 - (carry forward or add new high-fidelity toolCallId | tool | reason from this increment)
+- Preserve complete opaque toolCallId/jobId/resultVersion values without shortening. Unknown IDs are discoverable locally with retrieve_tool_result({view:"index"}); an exact-ID miss does not mean evidence was deleted. EE is not required for this recovery.
 
 Use the exact same section structure as the existing summary format.`;
 
@@ -322,9 +323,11 @@ Use this exact format:
 
 ## Current State
 - [Exact state at the cut point: what was just done, what variable/file is mid-edit]
+- [Keep the full user goal, completed partial scope, remaining deliverables and next acceptance check distinct]
 
 ## Context For Suffix
-- [Information needed to understand the kept recent messages]`;
+- [Information needed to understand the kept recent messages]
+- Preserve full opaque toolCallId/jobId/resultVersion references byte-for-byte. Recover unknown IDs with retrieve_tool_result({view:"index"}); EE is not required.`;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -560,7 +563,11 @@ function messageToString(message: ModelMessage): string {
 }
 
 export function estimateMessageTokens(message: ModelMessage): number {
-  return countTokens(messageToString(message));
+  if (typeof message.content === "string") return countTokens(message.content);
+  // Sizing must use full structured text, never the shortened summarizer view.
+  // Binary media uses provider-specific accounting; do not tokenize base64 as text.
+  const parts = message.content.filter((part) => part.type !== "image" && part.type !== "file");
+  return countTokens(JSON.stringify(parts));
 }
 
 export function estimateConversationTokens(systemPrompt: string, messages: ModelMessage[], inFlightText = ""): number {

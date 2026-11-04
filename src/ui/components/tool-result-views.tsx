@@ -5,6 +5,8 @@ import { LOADING_SPINNER_FRAMES } from "../constants.js";
 import { Markdown } from "../markdown";
 import type { Theme } from "../theme";
 import { compactTaskLabel, truncateBlock, truncateLine } from "../utils/text.js";
+import { parseDelegationList } from "../utils/delegation-display.js";
+export { parseDelegationList } from "../utils/delegation-display.js";
 
 export function LoadingSpinner() {
   const [frame, setFrame] = useState(0);
@@ -152,17 +154,6 @@ export function DelegationResultView({ t, entry }: { t: Theme; entry: ChatEntry 
   return <DelegationTaskLine t={t} label={delegation.description} pending={false} id={delegation.id} />;
 }
 
-export function parseDelegationList(content: string): { id: string; status: string; label: string }[] {
-  const items: { id: string; status: string; label: string }[] = [];
-  for (const line of content.split("\n")) {
-    const match = line.match(/`([^`]+)`\s+\[(\w+)]\s+(.*)/);
-    if (match) {
-      items.push({ id: match[1], status: match[2], label: match[3].trim() });
-    }
-  }
-  return items;
-}
-
 export function DelegationListView({ t, content }: { t: Theme; content: string }) {
   const items = parseDelegationList(content);
 
@@ -192,6 +183,8 @@ export function DelegationListView({ t, content }: { t: Theme; content: string }
               <span style={{ fg: statusColor }}>{"◆ "}</span>
               <span style={{ fg: t.text }}>{item.id}</span>
               <span style={{ fg: statusColor }}>{` ${item.status}`}</span>
+              {item.delivery ? <span style={{ fg: t.textDim }}>{` · delivery: ${item.delivery}`}</span> : null}
+              {item.acknowledgement ? <span style={{ fg: t.textDim }}>{` · ACK: ${item.acknowledgement}`}</span> : null}
               <span style={{ fg: t.textMuted }}>
                 {" — "}
                 {truncateLine(item.label, 60)}

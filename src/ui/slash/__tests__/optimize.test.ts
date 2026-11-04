@@ -38,7 +38,7 @@ const makePipelineContext = (): PipelineContext => ({
       { name: "layer1-intent", ms: 1 },
       { name: "layer2-personality", ms: 0 },
       { name: "layer3-ee-injection", ms: 0 },
-      { name: "layer4-gsd-structuring", ms: 0 },
+      { name: "layer4-flow-structuring", ms: 0 },
       { name: "layer5-context-enrichment", ms: 0 },
       { name: "layer6-output", ms: 1 },
     ],

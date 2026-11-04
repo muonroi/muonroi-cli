@@ -11,6 +11,8 @@
  * orchestrator code. Only the model, the router classifier, and MessageProcessor
  * (the turn body) are mocked — the session forking + absorption paths are real.
  */
+
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -19,7 +21,9 @@ import { installMockModel, textOnlyStream } from "../../agent-harness/mock-model
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
 import { SessionStore } from "../../storage/sessions.js";
-import { appendMessages, buildChatEntries } from "../../storage/transcript.js";
+import { appendMessages, buildChatEntries, loadRawTranscript } from "../../storage/transcript.js";
+import type { ChatEntry } from "../../types/index.js";
+import { collectAgentActivities, partitionForRail } from "../../ui/utils/agent-activities.js";
 import { Agent } from "../orchestrator.js";
 import type { ModelTaskKind } from "../sub-agent-model-tier.js";
 
@@ -86,6 +90,7 @@ let reportedLoad = 0;
 // test can assert a project model pin propagates into the CHILD session's
 // own turn, not just its `sessions` table row. Reset per test in beforeEach.
 const capturedTurnModelIds: Array<{ sessionId: string | undefined; modelId: string | undefined }> = [];
+const capturedHelperPrompts: string[][] = [];
 
 // Round 9 (G13): when set, the mocked turn simulates the child's own
 // `cd` into a subdirectory — the REAL `this.bash` is shared across the
@@ -94,6 +99,8 @@ const capturedTurnModelIds: Array<{ sessionId: string | undefined; modelId: stri
 let simulatedCdTo: string | null = null;
 let cancelHelper = false;
 let failHelper = false;
+let helperDelegationFixture: { id: string; jobPath: string; abortAfterRead: boolean } | null = null;
+let helperReadObservation: { deliveredVersion?: string; ackAllowed?: boolean } = {};
 
 // Simulate a read-heavy turn: write intermediate clutter to the CHILD session
 // (real DB), and leave [.., final assistant, final tool] in the in-memory working
@@ -107,6 +114,8 @@ vi.mock("../message-processor.js", () => ({
       modelId?: string;
       bash?: { setCwd: (p: string) => void; getCwd: () => string };
       getAbortController?: () => AbortController | null;
+      readDelegation?: (id: string) => Promise<{ output?: string }>;
+      acknowledgeDelegation?: (id: string, version: string) => Promise<{ success: boolean }>;
     };
     constructor(deps: {
       messages: unknown[];
@@ -115,9 +124,21 @@ vi.mock("../message-processor.js", () => ({
       modelId?: string;
       bash?: { setCwd: (p: string) => void; getCwd: () => string };
       getAbortController?: () => AbortController | null;
+      readDelegation?: (id: string) => Promise<{ output?: string }>;
+      acknowledgeDelegation?: (id: string, version: string) => Promise<{ success: boolean }>;
     }) {
       this.deps = deps;
       capturedTurnModelIds.push({ sessionId: deps.session?.id, modelId: deps.modelId });
+      capturedHelperPrompts.push(
+        deps.messages
+          .filter(
+            (m: any) =>
+              m.role === "system" &&
+              typeof m.content === "string" &&
+              m.content.startsWith("You are executing a sub-task delegated by the Main Session"),
+          )
+          .map((m: any) => m.content),
+      );
     }
     async *run() {
       if (this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))) {
@@ -134,6 +155,43 @@ vi.mock("../message-processor.js", () => ({
         return;
       }
       if (failHelper) throw new Error("Controlled helper failure");
+      if (helperDelegationFixture && this.deps.readDelegation) {
+        const fixture = helperDelegationFixture;
+        const result = await this.deps.readDelegation(fixture.id);
+        const record = JSON.parse(fs.readFileSync(fixture.jobPath, "utf8"));
+        const ack = await this.deps.acknowledgeDelegation?.(fixture.id, record.resultVersion);
+        helperReadObservation = { deliveredVersion: record.deliveredVersion, ackAllowed: ack?.success };
+        const output = [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool-call",
+                toolCallId: "helper-read-proof",
+                toolName: "delegation_read",
+                input: { id: fixture.id },
+              },
+            ],
+          },
+          {
+            role: "tool",
+            content: [
+              {
+                type: "tool-result",
+                toolCallId: "helper-read-proof",
+                toolName: "delegation_read",
+                output: { type: "text", value: result.output ?? "" },
+              },
+            ],
+          },
+          { role: "assistant", content: "Worker evidence returned to main for acceptance." },
+        ];
+        appendMessages(this.deps.session!.id, output as never);
+        this.deps.messages.push(...output);
+        if (fixture.abortAfterRead) this.deps.getAbortController?.()?.abort();
+        yield { type: "done" };
+        return;
+      }
       this.deps.reportTurnToolLoad?.(reportedLoad);
       if (simulatedCdTo) this.deps.bash?.setCwd(simulatedCdTo);
       const childId = this.deps.session?.id;
@@ -179,7 +237,10 @@ beforeEach(() => {
   simulatedCdTo = null;
   cancelHelper = false;
   failHelper = false;
+  helperDelegationFixture = null;
+  helperReadObservation = {};
   capturedTurnModelIds.length = 0;
+  capturedHelperPrompts.length = 0;
   capturedResolveModelForTaskCalls.length = 0;
   closeDatabase();
   getDatabase(); // run migrations against the temp DB
@@ -199,9 +260,387 @@ afterEach(() => {
 });
 
 describe("sub-session SPAWN on real SQLite — labeling + absorption + parent leanness", () => {
+  it("hands off in assistant text without requiring an unavailable response tool", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "contract regression" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
+    for await (const _ of agent.processMessage("Collect runtime evidence for main")) {
+      /* drain */
+    }
+    const overlay = capturedHelperPrompts[0]![0]!;
+    expect(overlay).toContain("plain assistant text");
+    expect(overlay).toContain("actually exposed");
+    expect(overlay).not.toContain("You have full access to tools");
+    expect(overlay).not.toContain("MUST return your final response using");
+    expect(overlay).toContain("Main Session owns the goal");
+  });
+
+  it("refreshes the legacy host response-tool instruction on resume without rewriting the stored transcript", async () => {
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "contract regression" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
+    const parentId = agent.getSessionId()!;
+    for await (const _ of agent.processMessage("Collect runtime evidence for main")) {
+      /* drain */
+    }
+    const child = getDatabase().prepare("SELECT id FROM sessions WHERE parent_session_id = ?").get(parentId) as {
+      id: string;
+    };
+    const legacy =
+      "You are executing a sub-task delegated by the Main Session in an isolated, temporary Sub-Session.\n" +
+      "1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n" +
+      "3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.";
+    appendMessages(child.id, [{ role: "system", content: legacy }]);
+    capturedHelperPrompts.length = 0;
+    for await (const _ of agent.processMessage("Continue the same evidence check")) {
+      /* drain */
+    }
+    expect(capturedTurnModelIds.at(-2)?.sessionId).toBe(child.id);
+    expect(capturedHelperPrompts[0]!.join("\n")).toContain("plain assistant text");
+    expect(capturedHelperPrompts[0]!.join("\n")).not.toContain("MUST return your final response using");
+    expect(loadRawTranscript(child.id).some((m: any) => m.role === "system" && m.content === legacy)).toBe(true);
+    expect(agent.getSessionId()).toBe(parentId);
+  });
+
+  it("recovers a notice after SQLite commits but the job delivery claim fails without duplicating the transcript", async () => {
+    const before = process.env.MUONROI_CLI_HOME;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
+    const originalWrite = fs.promises.writeFile;
+    let writeSpy: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      const agent = new Agent("sk-dummy", undefined, undefined, undefined, { persistSession: true });
+      const cwd = process.cwd();
+      const scope = path.basename(cwd) + "-" + createHash("sha1").update(cwd).digest("hex").slice(0, 10);
+      const dir = path.join(process.env.MUONROI_CLI_HOME!, "delegations", scope);
+      fs.mkdirSync(dir, { recursive: true });
+      const jobPath = path.join(dir, "durable-notice.json");
+      const outputPath = path.join(dir, "durable-notice.md");
+      fs.writeFileSync(outputPath, "Verified fixture evidence");
+      fs.writeFileSync(
+        jobPath,
+        JSON.stringify({
+          id: "durable-notice",
+          agent: "explore",
+          description: "Fixture",
+          prompt: "fixture",
+          cwd,
+          model: "fixture",
+          sandboxMode: "off",
+          maxToolRounds: 1,
+          maxTokens: 100,
+          status: "complete",
+          startedAt: new Date().toISOString(),
+          outputPath,
+          parentSessionId: agent.getSessionId(),
+        }),
+      );
+      let failClaim = true;
+      writeSpy = vi.spyOn(fs.promises, "writeFile").mockImplementation(async (...args) => {
+        if (String(args[0]).startsWith(jobPath + ".") && String(args[1]).includes('"notifiedAt"') && failClaim) {
+          failClaim = false;
+          throw new Error("fixture job claim write interrupted");
+        }
+        return originalWrite(...args);
+      });
+      expect(await agent.consumeBackgroundNotifications()).toEqual([]);
+      expect(JSON.parse(fs.readFileSync(jobPath, "utf8")).deliveredVersion).toBeUndefined();
+      const noticeMessages = () =>
+        loadRawTranscript(agent.getSessionId()!).filter(
+          (m) => m.role === "system" && String(m.content).includes("jobId=durable-notice"),
+        );
+      expect(noticeMessages()).toHaveLength(1);
+      expect(await agent.consumeBackgroundNotifications()).toHaveLength(1);
+      expect(noticeMessages()).toHaveLength(1);
+      expect(await agent.consumeBackgroundNotifications()).toEqual([]);
+      fs.unlinkSync(outputPath);
+      expect((await (agent as any).readDelegation("durable-notice")).success).toBe(false);
+    } finally {
+      writeSpy?.mockRestore();
+      if (before === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = before;
+    }
+  });
+
+  it.each([
+    "cd",
+    "resume",
+    "helper",
+  ])("keeps main's worker states and rail aligned after %s into a worktree", async (mode) => {
+    const cliHomeBefore = process.env.MUONROI_CLI_HOME;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
+    const originalCwd = process.cwd();
+    const root = fs.mkdtempSync(path.join(tmpHome, "owner-"));
+    const worktree = path.join(root, ".claude", "worktrees", "worker");
+    fs.mkdirSync(worktree, { recursive: true });
+    try {
+      process.chdir(root);
+      let agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: mode === "helper" ? "infrastructure" : "orchestrator",
+      });
+      await (agent as any)._flowReady;
+      const owner = agent.getSessionId()!;
+      const project = `${path.basename(root)}-${createHash("sha1").update(root).digest("hex").slice(0, 10)}`;
+      const dir = path.join(process.env.MUONROI_CLI_HOME!, "delegations", project);
+      fs.mkdirSync(dir, { recursive: true });
+      for (const [id, status, parentSessionId, scope] of [
+        ["eager-teal-owl", "error", owner, root],
+        ["brisk-blue-fox", "complete", owner, root],
+        ["calm-teal-panda", "error", owner, worktree],
+        ["foreign-blue-fox", "complete", "another-owner", root],
+        ["foreign-teal-panda", "complete", "another-owner", worktree],
+        ["legacy-teal-panda", "complete", undefined, worktree],
+      ]) {
+        const scopeDir =
+          scope === root
+            ? dir
+            : path.join(
+                process.env.MUONROI_CLI_HOME!,
+                "delegations",
+                `${path.basename(scope!)}-${createHash("sha1").update(scope!).digest("hex").slice(0, 10)}`,
+              );
+        fs.mkdirSync(scopeDir, { recursive: true });
+        const outputPath = path.join(scopeDir, `${id}.md`);
+        fs.writeFileSync(outputPath, `${id} saved result`);
+        fs.writeFileSync(
+          path.join(scopeDir, `${id}.json`),
+          JSON.stringify({
+            id,
+            agent: "general",
+            kind: "task",
+            description: id,
+            prompt: "Owned worker",
+            cwd: root,
+            model: "fixture",
+            sandboxMode: "off",
+            maxToolRounds: 1,
+            maxTokens: 100,
+            status,
+            startedAt: "2026-10-14T09:00:00Z",
+            completedAt: "2026-10-14T09:01:00Z",
+            parentSessionId,
+            outputPath,
+            summary: `${id} saved result`,
+            ...(status === "error" && id !== "calm-teal-panda" ? { notifiedAt: "2026-10-14T09:02:00Z" } : {}),
+          }),
+        );
+      }
+      if (mode === "resume") {
+        process.chdir(worktree);
+        agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+          persistSession: true,
+          executionRole: "orchestrator",
+          session: owner,
+        });
+        await (agent as any)._flowReady;
+      } else {
+        (agent as any).bash.setCwd(worktree);
+      }
+      if (mode === "helper") {
+        mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "fixture" });
+        const state = agent as any;
+        const buildDeps = state._buildMessageProcessorDeps.bind(state);
+        const helperReads: Array<Promise<unknown>> = [];
+        vi.spyOn(state, "_buildMessageProcessorDeps").mockImplementation(() => {
+          if (state._helperParentSessionId) helperReads.push(state.delegations.list());
+          return buildDeps();
+        });
+        for await (const _ of agent.processMessage("Inspect worker evidence")) {
+          /* drain */
+        }
+        expect(helperReads).toHaveLength(1);
+        expect(await helperReads[0]).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({ id: "brisk-blue-fox", status: "complete" }),
+            expect.objectContaining({ id: "eager-teal-owl", status: "error" }),
+          ]),
+        );
+      }
+      const state = agent as any;
+      const listed = await state.listDelegations();
+      expect(listed.output).toContain("`brisk-blue-fox` [execution=complete]");
+      expect(listed.output).toContain("[delivery=pending] [ack=not_ready]");
+      expect(listed.output).toContain("`eager-teal-owl` [execution=error]");
+      expect(listed.output).toContain("`calm-teal-panda` [execution=error]");
+      expect(listed.output).not.toContain("foreign-blue-fox");
+      expect(listed.output).not.toContain("foreign-teal-panda");
+      expect(listed.output).not.toContain("legacy-teal-panda");
+      expect((await state.readDelegation("brisk-blue-fox")).output).toContain("brisk-blue-fox saved result");
+      expect((await state.listDelegations()).output).toContain(
+        "`brisk-blue-fox` [execution=complete] [delivery=delivered] [ack=pending]",
+      );
+      expect((await state.readDelegation("calm-teal-panda")).output).toContain("calm-teal-panda saved result");
+      expect((await agent.stopBackgroundJob({ delegationId: "calm-teal-panda" })).output).toContain("status: error");
+      const snapshot = await agent.getBackgroundJobSnapshot();
+      const receipts: ChatEntry[] = ["eager-teal-owl", "brisk-blue-fox", "calm-teal-panda"].map((id) => ({
+        type: "tool_result",
+        content: "",
+        timestamp: new Date(),
+        toolCall: {
+          id,
+          type: "function",
+          function: { name: "task", arguments: JSON.stringify({ agent: "general", description: id }) },
+        },
+        toolResult: { success: true, output: `Delegation started: ${id}` },
+      }));
+      expect(partitionForRail(collectAgentActivities(receipts, [], snapshot))).toEqual({
+        running: [],
+        done: 1,
+        failed: 2,
+      });
+      expect(state.bash.getCwd()).toBe(worktree);
+      expect(await agent.consumeBackgroundNotifications()).toHaveLength(0);
+      expect(await agent.consumeBackgroundNotifications()).toEqual([]);
+    } finally {
+      process.chdir(originalCwd);
+      if (cliHomeBefore === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = cliHomeBefore;
+    }
+  });
+
+  it("lets main retrieve child command evidence by the session-qualified tool reference", async () => {
+    const { BashTool } = await import("../../tools/bash.js");
+    const { createBuiltinTools } = await import("../../tools/registry.js");
+    const agent = new Agent("sk-dummy", undefined, undefined, undefined, { persistSession: true });
+    const state = agent as any;
+    const parentId = agent.getSessionId()!;
+    const child = state.sessionStore.createSession("deepseek-v4-flash", "agent", process.cwd());
+    state.sessionStore.linkChild(child.id, parentId, "subagent");
+    const toolId = `child-proof-${child.id}`;
+    appendMessages(child.id, [
+      {
+        role: "assistant",
+        content: [{ type: "tool-call", toolCallId: toolId, toolName: "bash", input: { command: "fixture-test" } }],
+      },
+      {
+        role: "tool",
+        content: [
+          {
+            type: "tool-result",
+            toolCallId: toolId,
+            toolName: "bash",
+            output: { type: "text", value: "fixture-test: exit code 0; verified child proof" },
+          },
+        ],
+      },
+    ] as never);
+    const bash = new BashTool(process.cwd());
+    try {
+      const tools = createBuiltinTools(bash, "agent", { sessionId: parentId });
+      const result = await tools.retrieve_tool_result.execute!({ tool_call_id: toolId }, {} as never);
+      expect(String(result)).toContain("verified child proof");
+      expect(String(result)).toContain(child.id);
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it.each([
+    false,
+    true,
+  ])("records owner delivery only after a durable helper handoff (interrupted=%s)", async (abortAfterRead) => {
+    const { createHash } = await import("node:crypto");
+    const before = process.env.MUONROI_CLI_HOME;
+    const cliHome = path.join(tmpHome, ".muonroi-cli");
+    process.env.MUONROI_CLI_HOME = cliHome;
+    closeDatabase();
+    try {
+      mockClassify.mockResolvedValue({
+        action: "SPAWN_SUB_SESSION",
+        confidence: 0.98,
+        reason: "owned handoff fixture",
+      });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
+      const cwd = process.cwd();
+      const scope = path.basename(cwd) + "-" + createHash("sha1").update(cwd).digest("hex").slice(0, 10);
+      const dir = path.join(cliHome, "delegations", scope);
+      fs.mkdirSync(dir, { recursive: true });
+      const id = "owned-evidence-worker";
+      const jobPath = path.join(dir, id + ".json");
+      const outputPath = path.join(dir, id + ".md");
+      fs.writeFileSync(outputPath, "Verified command evidence; exit code 0; integration unchecked.");
+      fs.writeFileSync(
+        jobPath,
+        JSON.stringify({
+          id,
+          agent: "explore",
+          description: "Owned evidence",
+          prompt: "fixture",
+          cwd,
+          model: "fixture",
+          sandboxMode: "off",
+          maxToolRounds: 2,
+          maxTokens: 100,
+          status: "complete",
+          startedAt: new Date().toISOString(),
+          outputPath,
+          parentSessionId: agent.getSessionId(),
+        }),
+      );
+      helperDelegationFixture = { id, jobPath, abortAfterRead };
+      for await (const _ of agent.processMessage("Inspect the owned worker proof")) {
+        /* drain */
+      }
+      expect(helperReadObservation).toEqual({ deliveredVersion: undefined, ackAllowed: false });
+      const saved = JSON.parse(fs.readFileSync(jobPath, "utf8"));
+      expect(saved.acknowledgedVersion).toBeUndefined();
+      if (abortAfterRead) {
+        expect(saved.deliveredVersion).toBeUndefined();
+        expect(await agent.consumeBackgroundNotifications()).toHaveLength(1);
+      } else {
+        expect(saved.deliveredVersion).toBe(saved.resultVersion);
+        expect(await agent.consumeBackgroundNotifications()).toEqual([]);
+      }
+    } finally {
+      closeDatabase();
+      if (before === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = before;
+    }
+  });
+
+  it("restores main ownership even when reading the child's saved handoff fails", async () => {
+    const transcript = await import("../../storage/transcript.js");
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
+    const parentId = agent.getSessionId()!;
+    mockClassify.mockResolvedValue({
+      action: "SPAWN_SUB_SESSION",
+      confidence: 0.98,
+      reason: "handoff read failure fixture",
+    });
+    const previousHelperOwner = (agent as any)._helperParentSessionId;
+    const load = transcript.loadTranscriptState;
+    const spy = vi.spyOn(transcript, "loadTranscriptState").mockImplementation((id) => {
+      if (id !== parentId) throw new Error("Controlled child transcript read failure");
+      return load(id);
+    });
+    try {
+      for await (const _ of agent.processMessage("Inspect child evidence")) {
+        /* drain */
+      }
+      expect(agent.getSessionId()).toBe(parentId);
+      expect((agent as any).modelId).toBe("deepseek-v4-flash");
+      expect((agent as any)._helperParentSessionId).toBe(previousHelperOwner);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("retains the original main owner through a nested helper handoff", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     (agent as any)._helperParentSessionId = "original-main";
     for await (const _ of agent.processMessage("Inspect nested task")) {
       /* drain */
@@ -211,7 +650,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
   });
 
   it("consults the parent's configured model and propagates cancellation when a helper asks for guidance", async () => {
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const state = agent as any;
     const parentId = agent.getSessionId();
     const child = state.sessionStore.createSession("deepseek-v4-flash", "agent", process.cwd());
@@ -239,7 +681,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
   });
 
   it("defers main-owned notifications while the Agent is executing its helper context", async () => {
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, undefined, undefined, { persistSession: true });
     const parentId = agent.getSessionId();
     (agent as any)._helperParentSessionId = parentId;
     (agent as any).session = { ...(agent as any).session, id: "child-context" };
@@ -253,7 +695,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
   it("restores main after cancellation without starting a new decision step", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
     cancelHelper = true;
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId();
     for await (const _ of agent.processMessage("Inspect")) {
       /* drain */
@@ -265,7 +710,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
   it("restores parent when the consumer closes the generator during helper work", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId();
     const stream = agent.processMessage("Inspect");
     while (capturedTurnModelIds.length === 0) await stream.next();
@@ -278,7 +726,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
   it("returns helper failures to main for a decision rather than finalizing them as an answer", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
     failHelper = true;
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     for await (const _ of agent.processMessage("Inspect")) {
       /* drain */
     }
@@ -289,7 +740,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
   it("returns a bounded helper receipt to main and only main produces the final answer", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId()!;
     const chunks = [];
     for await (const chunk of agent.processMessage("Inspect implementation and report evidence")) chunks.push(chunk);
@@ -313,6 +767,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
     });
     const parentId = agent.getSessionId()!;
     expect(parentId).toBeTruthy();
@@ -368,7 +823,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     // show it twice.
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId()!;
     for await (const _ of agent.processMessage("review toàn bộ src/council")) {
       // drain
@@ -402,6 +860,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
     });
     const parentId = agent.getSessionId()!;
 
@@ -424,6 +883,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
     });
     const parentId = agent.getSessionId()!;
     const db = getDatabase();
@@ -474,6 +934,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
     });
     const parentId = agent.getSessionId()!;
     const db = getDatabase();
@@ -505,7 +966,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
@@ -564,7 +1028,10 @@ describe("_resolveModelForTask — round 3: the pin applies to delegated dispatc
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const resolveModelForTask = (
         agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
       )._resolveModelForTask.bind(agent);
@@ -590,7 +1057,10 @@ describe("_resolveModelForTask — round 3: the pin applies to delegated dispatc
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const resolveModelForTask = (
         agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
       )._resolveModelForTask.bind(agent);
@@ -637,7 +1107,10 @@ describe("_resolveModelForTask — round 11: immune to router/decide.ts's local 
       // "evidence moves the tier" tests) — irrelevant here.
       routerStore.setState({ recentFailures: 5, eeTier: "premium" });
 
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const resolveModelForTask = (
         agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
       )._resolveModelForTask.bind(agent);
@@ -660,7 +1133,10 @@ describe("_resolveModelForTask — round 11: immune to router/decide.ts's local 
     try {
       routerStore.setState({ recentFailures: 5, eeTier: "premium" });
 
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-pro", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const resolveModelForTask = (
         agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
       )._resolveModelForTask.bind(agent);
@@ -701,7 +1177,10 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const resolveModelForTask = (
         agent as unknown as { _resolveModelForTask(task: ModelTaskKind): string }
       )._resolveModelForTask.bind(agent);
@@ -746,7 +1225,10 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
@@ -785,7 +1267,10 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, PIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council và liệt kê silent catch")) {
@@ -816,7 +1301,10 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
 
       // Turn 1: forks a sub-session — this.modelId is switched to
       // subAgentModel for the duration of the child's own turn.
@@ -868,7 +1356,10 @@ describe("subAgentModel — round 9 (HR8): sub-agent/sub-session dispatch can ru
     try {
       mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       // Turn 1: establishes an active child sub-session normally (fork, no
@@ -950,7 +1441,10 @@ describe("sub-session cwd isolation — round 9 (G13)", () => {
   it("a child sub-session's cd does not leak into the parent's cwd after absorb", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const cwdBeforeFork = agent.getCwd();
     const subDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-cwd-child-"));
 
@@ -974,7 +1468,10 @@ describe("sub-session cwd isolation — round 9 (G13)", () => {
   });
 
   it("a SECOND (non-sub-session) turn after the child's cd runs on the restored parent cwd, not the child's", async () => {
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const cwdBeforeFork = agent.getCwd();
     const subDir = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-subsess-cwd-child2-"));
 
@@ -1008,7 +1505,10 @@ describe("sub-session resume vs. fork — round 4 (G9)", () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
     mockRelatedness.mockResolvedValueOnce({ related: false, confidence: 0.9, reason: "different repo/task entirely" });
 
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId()!;
 
     for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
@@ -1045,7 +1545,10 @@ describe("sub-session resume vs. fork — round 4 (G9)", () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
     mockRelatedness.mockResolvedValueOnce({ related: true, confidence: 0.95, reason: "same challenge, follow-up" });
 
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId()!;
 
     for await (const _ of agent.processMessage("seal challenge precommit-working-set-drift")) {
@@ -1072,7 +1575,10 @@ describe("sub-session resume vs. fork — round 4 (G9)", () => {
   it("no active sub-session at all still forks fresh without ever consulting the relatedness classifier (nothing to compare against)", async () => {
     mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "multi-step" });
 
-    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
     const parentId = agent.getSessionId()!;
 
     for await (const _ of agent.processMessage("first task ever for this session")) {
@@ -1108,7 +1614,10 @@ describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main ses
     process.chdir(projectDir);
     try {
       const MAIN_MODEL = "deepseek-v4-flash";
-      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council")) {
@@ -1145,7 +1654,10 @@ describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main ses
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       // Turn 1: heavy tool load reported (router says DIRECT — runs in the
@@ -1183,7 +1695,10 @@ describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main ses
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council")) {
@@ -1206,7 +1721,10 @@ describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main ses
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council")) {
@@ -1234,7 +1752,10 @@ describe("routerSubSessions — round 12 (F1/G15): keep the turn on the main ses
     const prevCwd = process.cwd();
     process.chdir(projectDir);
     try {
-      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, { persistSession: true });
+      const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+        persistSession: true,
+        executionRole: "infrastructure",
+      });
       const parentId = agent.getSessionId()!;
 
       for await (const _ of agent.processMessage("review toàn bộ src/council")) {

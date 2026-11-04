@@ -40,7 +40,7 @@ export type DeliverableKind = "answer" | "code" | "report";
 /**
  * Model-decided WORK DEPTH for the turn — the agent-first replacement for the
  * old regex `scoreComplexity` tier. Decided by the same single classify call so
- * it costs no extra round-trip. Drives the GSD rubric injected by Layer 4:
+ * it costs no extra round-trip. Drives the FLOW rubric injected by Layer 4:
  *   - "quick"    — trivial single-shot (typo, one-liner, small lookup/answer). No plan.
  *   - "standard" — ordinary feature/bugfix touching a few files. Short plan + verify.
  *   - "heavy"    — architectural / multi-file / wide / ambiguous. Full
@@ -393,7 +393,7 @@ const SYSTEM_PROMPT =
   "- 'tại sao bash_output_get trả empty' → analyze,concise,task,answer,standard,local,vietnamese,clear\n" +
   "- 'liệt kê tất cả env var CLI đọc' → analyze,concise,task,report,standard,local,vietnamese,clear\n" +
   "- 'refactor the entire auth system to use OAuth' → refactor,concise,task,code,heavy,local,english,clear\n" +
-  "- 'vendor the used subset of the gsd package natively into src and rename gsd to workflow, keep tests green' → refactor,concise,task,code,heavy,local,english,clear (a migration spanning many files — heavy even though fully specified)\n" +
+  "- 'vendor the used subset of the flow package natively into src and rename flow to workflow, keep tests green' → refactor,concise,task,code,heavy,local,english,clear (a migration spanning many files — heavy even though fully specified)\n" +
   "- 'add auth' → generate,concise,task,code,standard,local,english,underspecified (which flow/provider? unstated)\n" +
   "- 'làm cho CLI tốt hơn' → generate,concise,task,code,heavy,local,vietnamese,underspecified (vague 'make it better', no target)\n" +
   "- 'how does the building-block rule engine work' → analyze,concise,task,answer,standard,ecosystem,english,clear\n" +
@@ -738,7 +738,7 @@ export function createLlmClassifier(modelId: string, classifyOpts?: CreateClassi
         if (cand.providerId && !(await resolveCrossProviderClassifyFactory(cand.providerId))) continue;
         let runtime: ReturnType<typeof resolveModelRuntime>;
         try {
-          runtime = resolveModelRuntime(cand.modelId);
+          runtime = resolveModelRuntime(cand.modelId, { stage: "pil" });
         } catch (e) {
           console.error(`[pil.llm-classify] resolveModelRuntime failed for ${cand.modelId}: ${(e as Error)?.message}`);
           continue;
@@ -820,7 +820,7 @@ export async function classifySubSessionAction(
       : undefined;
     const classificationModelId = fastModel?.id ?? modelId;
 
-    const runtime = resolveModelRuntime(classificationModelId);
+    const runtime = resolveModelRuntime(classificationModelId, { stage: "pil" });
     const isReasoning = runtime.modelInfo?.reasoning === true;
     // Same flat safety-net ceiling as the main classifier (see CLASSIFY_TIMEOUT_MS).
     timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
@@ -956,7 +956,7 @@ export async function classifySubSessionRelatedness(
       : undefined;
     const classificationModelId = fastModel?.id ?? modelId;
 
-    const runtime = resolveModelRuntime(classificationModelId);
+    const runtime = resolveModelRuntime(classificationModelId, { stage: "pil" });
     const isReasoning = runtime.modelInfo?.reasoning === true;
     timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
     const combinedSignal = signal

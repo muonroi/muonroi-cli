@@ -66,7 +66,7 @@ describe("buildStyleClassifyPrompt", () => {
     // These literals are consumed verbatim by the layers — if the vocab drifts, the
     // dim gets populated but the lever never fires. Locks the EE-contract vocab.
     const p = buildStyleClassifyPrompt(["x"]);
-    expect(p).toContain("autonomous"); // layer4-gsd delegation_style
+    expect(p).toContain("autonomous"); // layer4-flow delegation_style
     expect(p).toContain("precise-correction"); // layer6-output feedback_style
     expect(p).toContain("fast-intuitive"); // outputStyleFromProfile decision_speed
     expect(p).toMatch(/"long"/); // layer5-context session_length

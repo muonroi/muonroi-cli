@@ -802,6 +802,17 @@ export interface CouncilStats {
 
 export type ToolTraceEmitter = (traceText: string) => void;
 
+/** Observed SDK tool result, not a participant's claim that a tool ran. */
+export interface CouncilToolResult {
+  toolCallId: string;
+  toolName: string;
+  input: unknown;
+  output: unknown;
+}
+export type CouncilToolEvidenceSink = (
+  result: CouncilToolResult & { modelId: string; phase: "debate" | "research" },
+) => void | Promise<void>;
+
 /**
  * Token usage snapshot from a single model call.
  * Optional side-channel for callers (e.g. sprint-runner) that need real token

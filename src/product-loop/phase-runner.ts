@@ -1,10 +1,10 @@
 import * as path from "node:path";
 import { phaseDone, phaseStart } from "../council/phase-events.js";
 import { readArtifact, writeArtifact } from "../flow/artifact-io.js";
-import { isGsdNativeEnabled } from "../gsd/flags.js";
-import { orderPhasesForExecution, syncPhasePlanToRoadmap } from "../gsd/phase-dag.js";
 import type { StreamChunk } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { isFlowNativeEnabled } from "../workflow/flags.js";
+import { orderPhasesForExecution, syncPhasePlanToRoadmap } from "../workflow/phase-dag.js";
 import { buildSprintContext, digestSprintIntoPhase, handoffPhaseToNext } from "./context-policy.js";
 import { formatProjectContextForPrompt } from "./discovery-context-format.js";
 import {
@@ -489,7 +489,7 @@ export async function* runPhases(args: RunPhasesArgs): AsyncGenerator<StreamChun
       backoffDelays: args.backoffDelays,
     });
     await writePhasePlan(args.flowDir, args.runId, plan);
-    if (isGsdNativeEnabled() && args.projectCwd) {
+    if (isFlowNativeEnabled() && args.projectCwd) {
       syncPhasePlanToRoadmap(args.projectCwd, args.idea ?? args.clarifiedSpec.problemStatement, plan);
     }
   }

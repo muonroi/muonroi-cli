@@ -19,6 +19,7 @@ export interface VisibleRetryOpts {
 }
 
 import { classifyStreamError } from "../orchestrator/retry-classifier.js";
+import { isRateLimitError } from "../providers/rate-limit-backoff.js";
 
 /**
  * Whether a thrown/returned error should trigger a visible retry.
@@ -55,7 +56,10 @@ export function isRetryableError(err: unknown): boolean {
  * bleeding into the composer input frame (user-reported). Routing through a
  * toast keeps it in the proper surface.
  */
-type RetryReporter = (message: string, level: "warn" | "info") => void;
+export interface RetryNoticeOptions {
+  kind?: "rate-limit";
+}
+type RetryReporter = (message: string, level: "warn" | "info", options?: RetryNoticeOptions) => void;
 let retryReporter: RetryReporter | null = null;
 
 export function setRetryReporter(fn: RetryReporter | null): void {
@@ -68,10 +72,15 @@ export function setRetryReporter(fn: RetryReporter | null): void {
  * retry site so a wait is announced the same way wherever it happens — the
  * metered gate's provider rate-limit backoff included.
  */
-export function reportRetryNotice(message: string, level: "warn" | "info" = "warn"): void {
+export function reportRetryNotice(
+  message: string,
+  level: "warn" | "info" = "warn",
+  options?: RetryNoticeOptions,
+): void {
   if (retryReporter) {
     try {
-      retryReporter(message, level);
+      if (options) retryReporter(message, level, options);
+      else retryReporter(message, level);
       return;
     } catch (err) {
       // A broken sink must not hide the notice — fall through to stderr.
@@ -85,7 +94,7 @@ function defaultOnRetry(attempt: number, total: number, delayMs: number, error: 
   const reason =
     (error as { statusCode?: number }).statusCode === 429 ? "rate-limited (429)" : error.message.slice(0, 80);
   const message = `[retry] ${reason} — waiting ${Math.round(delayMs / 1000)}s before attempt ${attempt + 1}/${total}`;
-  reportRetryNotice(message, "warn");
+  reportRetryNotice(message, "warn", isRateLimitError(error) ? { kind: "rate-limit" } : undefined);
 }
 
 export async function withVisibleRetry<T>(fn: () => Promise<T>, opts: VisibleRetryOpts = {}): Promise<T> {

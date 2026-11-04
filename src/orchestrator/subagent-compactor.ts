@@ -49,6 +49,8 @@
  */
 
 import type { ModelMessage } from "ai";
+import { readEEContextReceipt } from "../ee/native-context.js";
+import { logger } from "../utils/logger.js";
 
 export interface SubAgentCompactorOptions {
   /** Cumulative message-content char count above which compaction kicks in. */
@@ -255,7 +257,7 @@ export const HIGH_VALUE_MCP_PREFIXES = ["mcp_muonroi-docs__"] as const;
 /**
  * Heuristic: keep full (no stub) for high-signal tool results.
  * Signals: allowlist tool + (error/todo/plan/keyfile/large output or explicit keep list).
- * Brief inline per GSD-quick + evidence-first.
+ * Brief inline per FLOW-quick + evidence-first.
  */
 export function isHighValueToolResult(
   toolName: string,
@@ -269,6 +271,8 @@ export function isHighValueToolResult(
   // Always preserve terminal response tools — this is the agent's own delivered
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
+  // A short worker handoff is already the summary, not disposable tool noise.
+  if (name === "delegation_read" && preview.length <= 12_000) return true;
 
   // Plan context bias (user-halt + "tiếp tục" resume): keep plan text verbatim so
   // compaction does not drop the APPROVED PLAN the user just approved.
@@ -495,6 +499,16 @@ interface ToolResultPartLike {
  * extracting space.
  */
 const STUB_RE = /elided by (sub-agent|top-level) compactor|\[dup of /;
+
+/** Recognize compacted output envelopes without matching prose that merely mentions them. */
+export function isCompactedToolOutput(output: unknown): boolean {
+  const value = output && typeof output === "object" && "value" in output ? output.value : output;
+  return (
+    typeof value === "string" &&
+    /^\[(?:earlier tool_result for tool=|elided [^\]\r\n]+\]|dup of |Delegation handoff receipt;)/.test(value)
+  );
+}
+
 function isStubbedToolResult(msg: ModelMessage): boolean {
   if (msg.role !== "tool" || !Array.isArray(msg.content)) return false;
   for (const part of msg.content as ReadonlyArray<Record<string, unknown>>) {
@@ -581,9 +595,58 @@ function rewriteOlderToolMessage(
     const rawPreview = extractOutputPreview(tr.output);
     const fullLen = rawPreview.length;
     const toolCallId = tr.toolCallId;
+    // Keep the task-owned scope pointer, not an unbounded recalled lesson.
+    if (tr.toolName === "ee_query" && readEEContextReceipt(rawPreview)) {
+      const header = rawPreview.split("\n", 1)[0]!;
+      if (fullLen <= 3000) return part;
+      try {
+        persistArtifact?.(toolCallId, tr.toolName, rawPreview, "native-ee-context");
+      } catch (error) {
+        logger.file("warn", "ee", "EE recall artifact retention failed", {
+          toolCallId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return {
+        ...part,
+        output: {
+          type: "text",
+          value: `${header}\n[Earlier EE lessons omitted; retrieve_tool_result(tool_call_id=${JSON.stringify(toolCallId)}) for the full result.]`,
+        },
+      };
+    }
+    // Bounded task-stage/handoff receipts are the durable resume pointer, not raw logs.
+    if (tr.toolName === "context_load" && fullLen <= 3000 && rawPreview.includes('"kind":"task-context/v1"'))
+      return part;
+    if (tr.toolName === "context_load" && fullLen <= 10000 && rawPreview.includes('"kind":"working-context/v1"'))
+      return part;
     // Idea 1 + 3: high-value or explicit KEEP_TOOL_IDS → keep verbatim (no stub).
     if (isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
       return part; // preserve full original output
+    }
+    if (tr.toolName === "delegation_read") {
+      let retained = false;
+      try {
+        persistArtifact?.(
+          toolCallId,
+          tr.toolName,
+          rawPreview,
+          "delegation-log-compacted",
+          "Worker result with durable references",
+        );
+        retained = persistArtifact !== undefined;
+      } catch (err) {
+        console.error(
+          `[compactor] Failed to retain delegation artifact ${toolCallId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const receipt =
+        `[Delegation handoff receipt; ${retained ? "long log retained outside context" : "Artifact retention unconfirmed; retry delegation_read with the jobId below"}]\n${rawPreview.slice(0, 3_000)}\n` +
+        (retained
+          ? `[Full evidence: retrieve_tool_result(tool_call_id="${toolCallId}"); preserve jobId/resultVersion when acknowledging.]\n`
+          : "") +
+        rawPreview.slice(-800);
+      return { ...part, output: { type: "text", value: receipt } };
     }
     // C1 — the main-context agent named this content as must-survive. Exact
     // substring containment only (see extractFocusTerms): keep it verbatim.
@@ -933,9 +996,13 @@ export const MIN_ELIDE_ARGS_CHARS = 256;
  * this value in an object turned the failing request 200, and injecting a bare
  * string into a passing request turned it 400).
  */
-export function buildElidedArgsInput(sz: number): Record<string, unknown> {
+export function buildElidedArgsInput(sz: number, toolCallId?: string): Record<string, unknown> {
+  const recovery =
+    toolCallId && toolCallId.length <= 256
+      ? ` Recover captured args with retrieve_tool_result(${JSON.stringify({ tool_call_id: toolCallId, view: "arguments" })}); never execute this marker.`
+      : "";
   return {
-    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]${recovery}`,
   };
 }
 
@@ -1076,7 +1143,9 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     // its own, and every marker written is one more exemplar of a shape the
     // model demonstrably imitates. See MIN_ELIDE_ARGS_CHARS for the measurement.
     if (sz < MIN_ELIDE_ARGS_CHARS) return part;
-    const elided = buildElidedArgsInput(sz);
+    // Recovery hints add bytes to the base marker measured above; the existing
+    // no-inflation guard measures that actual size and keeps the input if cheaper.
+    const elided = buildElidedArgsInput(sz, typeof part.toolCallId === "string" ? part.toolCallId : undefined);
     // F10 — structural no-inflation guard. MIN_ELIDE_ARGS_CHARS already sits far
     // above the marker's serialised length, so this never fires today. It exists
     // so that "an elision must never make a call bigger" is enforced by

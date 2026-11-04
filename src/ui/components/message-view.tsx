@@ -3,8 +3,10 @@ import type { ChatEntry, StructuredResponse } from "../../types/index";
 import { Markdown } from "../markdown.js";
 import { PlanView } from "../plan.js";
 import type { Theme } from "../theme.js";
-import { stripInvisibleChars, stripStrayModelMacros, trunc } from "../utils/text.js";
+import { hideLegacyCompletionReceipts, stripInvisibleChars, stripStrayModelMacros, trunc } from "../utils/text.js";
 import { describeMcpFsTool, toolArgs, toolLabel, tryParseArg } from "../utils/tools.js";
+import { delegationNotificationForDisplay, delegationResultForDisplay } from "../utils/delegation-display.js";
+import { internalActivityForDisplay } from "../utils/internal-activity.js";
 import { DiffView, ReadFilePreviewView } from "./diff-view.js";
 import { LspDiagnosticsView, LspResultView } from "./lsp-views.js";
 import { MediaAutoOpenView, MediaToolResultView } from "./media-views.js";
@@ -34,11 +36,7 @@ const SPLIT = {
   rightT: "",
 };
 
-// Chain-of-thought is never the answer — it is the model talking to itself, so
-// it stays collapsed to a 3-line gist. This is the ONE prose surface that still
-// auto-collapses; assistant and user message bodies render in full (see
-// AssistantMessageContent for why the old body clamp was removed).
-const REASONING_COLLAPSED_LINES = 3;
+// Reasoning stays stored but hidden until explicitly opened with Ctrl+E.
 
 /**
  * Index of the newest entry that renders a `ctrl+e` affordance, or -1.
@@ -55,33 +53,23 @@ const REASONING_COLLAPSED_LINES = 3;
  * before the real target (a tool group / reasoning block) below it.
  */
 export function findLastCollapsibleIndex(messages: ChatEntry[]): number {
-  const lineCount = (s: string | undefined) => (s ? s.split("\n").length : 0);
-
   for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
+    const m = messages[i] ? internalActivityForDisplay(messages[i]!) : null;
     if (!m) continue;
-    if (m.type === "assistant" && lineCount(m.reasoning) > REASONING_COLLAPSED_LINES) return i;
+    if (m.type === "assistant" && m.reasoning?.trim()) return i;
     if (m.type === "tool_group" && m.toolGroup?.state === "done" && (m.toolGroup?.items.length ?? 0) > 0) return i;
   }
   return -1;
 }
 
 export function ReasoningContent({ content, t, expanded }: { content: string; t: Theme; expanded: boolean }) {
-  const lines = content.split("\n");
-  const isLong = lines.length > REASONING_COLLAPSED_LINES;
-  const body = !isLong || expanded ? content : lines.slice(0, REASONING_COLLAPSED_LINES).join("\n");
-  const hidden = lines.length - REASONING_COLLAPSED_LINES;
+  if (!expanded) return null;
   return (
     <box paddingLeft={0} marginBottom={1} flexShrink={0} flexDirection="column">
       <text fg={t.textMuted}>{"[Thought] Thought"}</text>
       <box border={["left"]} borderColor={t.textMuted} paddingLeft={2} marginTop={1} flexDirection="column">
-        <Markdown content={body} t={t} />
-        {isLong && (
-          <text fg={t.textDim}>
-            {"ctrl+e "}
-            <span style={{ fg: t.textMuted }}>{expanded ? "collapse" : `expand (${hidden} more lines)`}</span>
-          </text>
-        )}
+        <Markdown content={content} t={t} />
+        <text fg={t.textDim}>{"ctrl+e hide"}</text>
       </box>
     </box>
   );
@@ -101,7 +89,7 @@ export function AssistantMessageContent({
 }) {
   // Strip stray model self-annotation macros (e.g. grok's trailing
   // `\confidence{85}`) that leak into the answer — not instructed in the prompt.
-  content = stripStrayModelMacros(content);
+  content = stripStrayModelMacros(hideLegacyCompletionReceipts(content));
   // Strip invisible/control Unicode characters that mess up terminal rendering.
   content = stripInvisibleChars(content);
   // PROSE IS NEVER AUTO-COLLAPSED.
@@ -205,6 +193,9 @@ function MessageViewImpl({
   isFinalAssistant?: boolean;
 }) {
   if (mcpRun?.hidden) return null;
+  const visibleEntry = internalActivityForDisplay(entry);
+  if (!visibleEntry) return null;
+  entry = visibleEntry;
   switch (entry.type) {
     case "user":
       return (
@@ -231,7 +222,8 @@ function MessageViewImpl({
 
     case "assistant": {
       let fallbackSr: StructuredResponse | null = null;
-      const rawContent = entry.content.trim();
+      const displayContent = delegationNotificationForDisplay(entry.content);
+      const rawContent = displayContent.trim();
       if (rawContent.startsWith("{") && rawContent.endsWith("}")) {
         try {
           const parsed = JSON.parse(rawContent);
@@ -260,7 +252,7 @@ function MessageViewImpl({
             <StructuredResponseView t={t} sr={fallbackSr} modeColor={entry.modeColor || modeColor} />
           ) : (
             <AssistantMessageContent
-              content={entry.content}
+              content={displayContent}
               t={t}
               expanded={expandedMessages?.has(index) ?? false}
               isFinal={isFinalAssistant === true}
@@ -299,7 +291,7 @@ function MessageViewImpl({
         return <TaskResultView t={t} entry={entry} />;
       }
 
-      if (name === "delegate" && entry.toolResult?.delegation) {
+      if ((name === "delegate" || name === "task") && entry.toolResult?.delegation) {
         return <DelegationResultView t={t} entry={entry} />;
       }
 
@@ -308,7 +300,13 @@ function MessageViewImpl({
       }
 
       if (name === "delegation_read") {
-        return <ToolTextOutputView t={t} label={toolLabel(entry.toolCall!)} content={entry.content} />;
+        return (
+          <ToolTextOutputView
+            t={t}
+            label={toolLabel(entry.toolCall!)}
+            content={delegationResultForDisplay(entry.content)}
+          />
+        );
       }
 
       if (name === "lsp") {
@@ -336,7 +334,11 @@ function MessageViewImpl({
       if (name === "write_file" || name === "edit_file") {
         const filePath =
           diff?.filePath || tryParseArg(entry.toolCall, "file_path") || tryParseArg(entry.toolCall, "path") || args;
-        const label = name === "write_file" ? `Write ${filePath}` : `Edit ${filePath}`;
+        const label = entry.toolResult?.preview
+          ? `Preview edit ${filePath}`
+          : name === "write_file"
+            ? `Write ${filePath}`
+            : `Edit ${filePath}`;
         return (
           <box gap={0}>
             <InlineTool t={t} pending={false}>

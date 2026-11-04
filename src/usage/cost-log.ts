@@ -28,7 +28,7 @@ export interface CostLogEntry extends CostMeta {
    * Free-form chars/tokens breakdown per logical prompt component.
    * Keys: staticPrefix, dynamicSuffix, playwrightGuidance, pilSuffix,
    *       messages, tools, toolNames, etc. Used by orchestrator to
-   *       attribute the 17K-token system prompt to specific parts.
+   *       attribute measured request size to its components.
    */
   breakdown?: Record<string, number>;
 }

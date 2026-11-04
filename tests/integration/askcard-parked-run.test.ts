@@ -81,7 +81,7 @@
  */
 
 import type { ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
@@ -101,6 +101,9 @@ const MODULE = "askcard-parked-run.test";
  */
 const TREE_ROOT = resolve(process.env["MUONROI_ASKCARD_NET_TREE_ROOT"] ?? ".");
 const ENTRY = join(TREE_ROOT, "src/index.ts");
+// This suite exercises the retained internal council/ideal lifecycle. The user-facing
+// root now delegates that work; the fixture alone constructs an infrastructure Agent.
+const INFRASTRUCTURE_ENTRY = resolve("tests/integration/fixtures/askcard-infrastructure-entry.mjs");
 
 /**
  * Reused verbatim from `tests/harness/askcard.spec.ts`, which is where this
@@ -215,7 +218,7 @@ function deadRow(error: string, stderrTail = ""): RowObservation {
  */
 async function runRow(row: Row, cwd: string): Promise<RowObservation> {
   const argv = [
-    ENTRY,
+    INFRASTRUCTURE_ENTRY,
     "--agent-mode",
     "--mock-llm",
     FIXTURES,
@@ -233,6 +236,8 @@ async function runRow(row: Row, cwd: string): Promise<RowObservation> {
     // that scan instant instead of walking this (large) repo.
     HOME: cwd,
     USERPROFILE: cwd,
+    MUONROI_CLI_HOME: join(cwd, ".muonroi-cli"),
+    MUONROI_ASKCARD_FIXTURE_ENTRY: ENTRY,
     MUONROI_INTERNAL_SHIM_OK: "1",
     ANTHROPIC_API_KEY: MOCK_KEY,
     OPENAI_API_KEY: MOCK_KEY,
@@ -294,6 +299,8 @@ async function runRow(row: Row, cwd: string): Promise<RowObservation> {
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
+    const bootstrap = join(cwd, "askcard-fixture-bootstrap.log");
+    if (existsSync(bootstrap)) stderr += readFileSync(bootstrap, "utf8").slice(-8000);
     console.error(`[${MODULE}] ${row.id}: spawning the agent-mode TUI failed: ${message}`, {
       entry: ENTRY,
       stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,

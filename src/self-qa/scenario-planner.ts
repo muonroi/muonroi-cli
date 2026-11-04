@@ -102,6 +102,13 @@ const INTERPOLATED_ID_RE = /\$\{|`/;
  * reported as `skipped`, never driven — see `Scenario.reachable`.
  */
 const SURFACE_OPENERS: Record<string, ScenarioStep[]> = {
+  // app.tsx mounts the transcript only after a message exists; see the setup
+  // in tests/harness/scroll-lock.spec.ts and failed run 0617e6d7.
+  log: [
+    { op: "type", text: "self-qa transcript probe" },
+    { op: "press", key: "Enter" },
+    { op: "wait_for", selector: "id=log", timeoutMs: OPEN_TIMEOUT_MS },
+  ],
   "model-picker": slashOpener("/model", "model-picker"),
   "session-picker": slashOpener("/resume", "session-picker"),
   "mcp-modal": slashOpener("/mcp", "mcp-modal"),
@@ -122,11 +129,11 @@ const SURFACE_OPENERS: Record<string, ScenarioStep[]> = {
 /**
  * Surfaces that are on screen as soon as the TUI mounts, so the mount guard is
  * their whole opener. Taken from CLAUDE.md § "Add semantic instrumentation",
- * which lists these as permanently wired: `composer` (PromptBox textarea),
- * `status` (StatusBar) and `log` (messages scrollbox). Everything else in that
- * list is conditional (`slash-menu` needs a keystroke, `msg-{i}` needs a turn).
+ * `composer` (PromptBox textarea) and `status` (StatusBar) are ready at mount.
+ * The transcript `log` needs a submitted message and has an explicit opener;
+ * `slash-menu` needs a keystroke, and `msg-{i}` needs a turn.
  */
-const ALWAYS_PRESENT = new Set(["composer", "status", "log"]);
+const ALWAYS_PRESENT = new Set(["composer", "status"]);
 
 function slashOpener(command: string, rootId: string): ScenarioStep[] {
   return [

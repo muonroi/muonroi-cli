@@ -1,0 +1,49 @@
+{
+  "measuredAt": "2026-10-16T07:23:36.656858+00:00",
+  "serverRevision": "951d08dee518d473672364f81e35a63c25234297",
+  "upstreamRevision": "f64349532c1260314a7e19f20e3860db2aedb5b2",
+  "deployed": false,
+  "restarted": false,
+  "artifacts": [
+    {
+      "path": ".scratch/ee-server-audit/remote-state.log",
+      "sha256": "31f7d82fe52d2c3da47384280e457abd747ccddfc46d07d270a67103bf162149",
+      "bytes": 1588
+    },
+    {
+      "path": ".scratch/ee-server-audit/entrypoint.log",
+      "sha256": "f76a6751c827250a6ae916ced84d895e29935056da3ade0e16d32ce688287bed",
+      "bytes": 5478
+    },
+    {
+      "path": ".scratch/ee-server-audit/handlers.log",
+      "sha256": "2db6c142ac6fbf9972fcf8364dcf9c726a823b56a7d69a9eeb5c35a932bdd4b9",
+      "bytes": 15650
+    },
+    {
+      "path": ".scratch/ee-server-audit/loopback-proof.json",
+      "sha256": "829c19c28568fe7ee2aa935446b0548407fcaa2bce64d761942a4bba0ff1a7c1",
+      "bytes": 612
+    },
+    {
+      "path": ".scratch/ee-server-audit/upstream.log",
+      "sha256": "535128b9d0c55174c6e73987a6e158d3a35a9c2c77b4042314697031d93ad922",
+      "bytes": 942
+    },
+    {
+      "path": ".scratch/ee-server-audit/upstream-source.log",
+      "sha256": "95e36e3e94e2b625c860d048518c351725da9ccc0d00a453a9b7e482a96feb34",
+      "bytes": 1382
+    },
+    {
+      "path": ".scratch/ee-server-audit/final-state.log",
+      "sha256": "c8b5101007dc72eae681112cf9b3222d54f3793f9fb81de2de6c64a70761201f",
+      "bytes": 940
+    },
+    {
+      "path": "docs/investigations/ee-server-ssh-audit-2026-10-16.md",
+      "sha256": "259ca819006f205dd11700831467d62af74827aabe0b3f9406ff7c4236b42e4d",
+      "bytes": 4731
+    }
+  ]
+}

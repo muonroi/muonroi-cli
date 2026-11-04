@@ -16,13 +16,13 @@
  */
 
 import { pilContext } from "../ee/bridge.js";
-import type { GsdPhase } from "../gsd/types.js";
+import type { FlowPhase } from "../workflow/types.js";
 import { getUnifiedPilBudgetMs, isLlmFirstBrainEnabled } from "./config.js";
 import { buildFileRefAlternation } from "./file-ref-extensions.js";
 import type { LlmClassifyFn, LlmClassifyResult } from "./llm-classify.js";
 import type { BrainData, IntentDetectionTrace, OutputStyle, PipelineContext, TaskType } from "./types.js";
 
-function mapBrainGsdPhase(value: string | null | undefined): GsdPhase | null {
+function mapBrainFlowPhase(value: string | null | undefined): FlowPhase | null {
   if (value === "discuss" || value === "execute") return value;
   return null;
 }
@@ -319,7 +319,7 @@ export function isContinuationPhrase(raw: string): boolean {
 //
 // Session c6387d2c6e1b: after the agent produced a cleanup plan (respond_plan),
 // the user asked "bạn đã có plan chưa nhỉ". Pass 2's `plan` keyword matched the
-// word "plan" → taskType=plan, kind=task → the GSD "state a NEW 2-3 line plan +
+// word "plan" → taskType=plan, kind=task → the FLOW "state a NEW 2-3 line plan +
 // implement + verify" scaffold + a degenerate generic discovery scope
 // ("Intent: plan: Step-by-step plan / Scope: project root") were injected. That
 // overrode the conversational intent and the model went off-topic (asked about
@@ -423,7 +423,7 @@ export interface Layer1Options {
    */
   recentTurns?: string | null;
   /**
-   * Depth of the work already in flight (GSD `.planning/STATE.md` → Depth),
+   * Depth of the work already in flight (FLOW `.planning/STATE.md` → Depth),
    * supplied by the caller so this layer stays I/O-free. Read ONLY to resolve
    * the depth of a continuation utterance — see `resolveContinuationDepth`.
    * null/undefined ⇒ no active run known.
@@ -725,7 +725,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         // stays null → layer3 legacy path (behaviour unchanged). Gate:
         // MUONROI_LLM_FIRST_BRAIN=0 reverts.
         let llmFirstBrainData: BrainData | null = null;
-        let llmFirstGsdPhase: GsdPhase | null = mapBrainGsdPhase(ctx.gsdPhase);
+        let llmFirstFlowPhase: FlowPhase | null = mapBrainFlowPhase(ctx.flowPhase);
         if (isLlmFirstBrainEnabled() && intentKind !== "chitchat") {
           let brainRaw = ctx.raw;
           if (ctx.sessionId) {
@@ -756,7 +756,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
               t2_patterns: resp.t2_patterns,
               retrieval_skipped_reason: resp.retrieval_skipped_reason,
             };
-            llmFirstGsdPhase = mapBrainGsdPhase(resp.gsd_phase) ?? llmFirstGsdPhase;
+            llmFirstFlowPhase = mapBrainFlowPhase(resp.flow_phase) ?? llmFirstFlowPhase;
             intentTrace.pass3UnifiedSucceeded = true;
           }
         }
@@ -764,7 +764,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
         return {
           ...ctx,
           taskType: llmRes.taskType,
-          gsdPhase: llmFirstGsdPhase,
+          flowPhase: llmFirstFlowPhase,
           domain,
           confidence: llmRes.confidence,
           outputStyle,
@@ -773,7 +773,7 @@ export async function layer1Intent(ctx: PipelineContext, opts: Layer1Options = {
           // routing instead of keyword regex. null → those layers fall back to
           // their legacy regex predicates for this turn.
           deliverableKind: llmRes.deliverableKind,
-          // Agent-first work depth: the model decides the GSD tier in the same
+          // Agent-first work depth: the model decides the FLOW tier in the same
           // classify call (no extra round-trip). layer4 prefers this over the
           // regex scorer. null → layer4 defaults to "standard".
           modelDepthTier: depthTier,

@@ -187,6 +187,7 @@ export function createDriver(deps: DriverDeps): Driver {
   const eventBuffer: LiveEvent[] = [];
   const waiters: Set<Waiter> = new Set();
   const subscribers: Set<Subscriber> = new Set();
+  let closed = false;
 
   // ---------------------------------------------------------------------------
   // Helpers
@@ -394,6 +395,7 @@ export function createDriver(deps: DriverDeps): Driver {
     },
 
     wait_for(args: WaitArgs): Promise<WaitForResult> {
+      if (closed) return Promise.reject(new Error("Driver transport closed"));
       const timeoutMs = (args as { timeoutMs?: number }).timeoutMs ?? 5000;
       const start = Date.now();
 
@@ -444,6 +446,8 @@ export function createDriver(deps: DriverDeps): Driver {
             resolve(resolveValue());
           },
           reject(err) {
+            if (timer !== null) clearTimeout(timer);
+            waiters.delete(waiter);
             reject(err);
           },
         };
@@ -620,6 +624,9 @@ export function createDriver(deps: DriverDeps): Driver {
     },
 
     _closeAllSubscribers(): void {
+      closed = true;
+      for (const waiter of waiters) waiter.reject(new Error("Driver transport closed"));
+      waiters.clear();
       for (const sub of subscribers) {
         sub.closed = true;
         // Resolve any pending next() with done

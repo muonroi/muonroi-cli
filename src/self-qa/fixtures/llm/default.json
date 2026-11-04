@@ -1,0 +1,11 @@
+{
+  "responses": [{ "match": "*", "text": "Self-QA fixture response" }],
+  "model": {
+    "stream": [
+      { "type": "text-start", "id": "qa" },
+      { "type": "text-delta", "id": "qa", "delta": "Self-QA fixture response" },
+      { "type": "text-end", "id": "qa" },
+      { "type": "finish", "finishReason": "stop", "usage": { "inputTokens": 10, "outputTokens": 5 } }
+    ]
+  }
+}

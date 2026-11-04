@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { getModelInfo } from "../models/registry.js";
-import type { ModelInfo, ModelRateLimits } from "../types/index.js";
+import type { ModelInfo, ModelRateLimits, ReasoningEffort } from "../types/index.js";
+import { logger } from "../utils/logger.js";
 import { getReasoningEffortForModel, loadUserSettings, type RateLimitOverride } from "../utils/settings.js";
 import { getProviderCapabilities, resolveMaxOutputTokens } from "./capabilities.js";
-import { isProviderDefaultApiBase } from "./endpoints.js";
+import { isProviderDefaultApiBase, PROVIDER_ENDPOINTS } from "./endpoints.js";
+import { loadKeyForProvider } from "./keychain.js";
 import { ceilingForCall, type GateStage, wrapModelWithGate } from "./model-gate.js";
 import { getProviderStrategy } from "./strategies/registry.js";
+import { createSubscriptionFallback, type ProviderAuthMode } from "./subscription-fallback.js";
 import { wrapModelWithToolMarkupGuard } from "./tool-markup-guard.js";
 import type { ProviderId } from "./types.js";
 
@@ -18,6 +21,7 @@ import type { ProviderId } from "./types.js";
 export interface ResolveRuntimeOpts {
   stage?: GateStage;
   sessionId?: string;
+  reasoningEffort?: ReasoningEffort;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -30,6 +34,7 @@ export type ProviderFactory = ((modelId: string) => any) & {
   unsupportedParams?: ReadonlyArray<"maxOutputTokens" | "temperature" | "topP">;
   /** The provider this factory talks to. Stamped by createProviderFactory. */
   providerId?: ProviderId;
+  authModeForModel?: (modelId: string) => ProviderAuthMode;
 };
 
 export interface ProviderFactoryResult {
@@ -41,6 +46,8 @@ export interface ResolvedModelRuntime {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   model: any;
   modelId: string;
+  /** Per-dispatch effort, retained across continuations and batch calls. */
+  reasoningEffort?: ReasoningEffort;
   modelInfo?: ModelInfo;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   providerOptions?: any;
@@ -80,6 +87,13 @@ export function registeredProviderIds(): ProviderId[] {
   return [...providerFactoryRegistry.keys()];
 }
 
+export function authModeForModel(modelId: string): ProviderAuthMode | undefined {
+  const info = getModelInfo(modelId);
+  return info?.provider
+    ? providerFactoryRegistry.get(info.provider as ProviderId)?.authModeForModel?.(info.id)
+    : undefined;
+}
+
 /**
  * Resolve the base URL a factory should actually be built with, folding in a
  * user-set `providers.<id>.baseURL` (a third-party gateway / proxy).
@@ -108,11 +122,31 @@ function resolveFactoryBaseURL(id: ProviderId, callerBaseURL?: string): string |
  */
 export function createProviderFactory(
   id: ProviderId,
-  opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string> },
+  opts: { apiKey?: string; baseURL?: string; headers?: Record<string, string>; authMode?: ProviderAuthMode },
 ): ProviderFactoryResult {
   const strategy = getProviderStrategy(id);
-  const factory = strategy.createFactory({ ...opts, baseURL: resolveFactoryBaseURL(id, opts.baseURL) });
+  const endpoint = PROVIDER_ENDPOINTS[id];
+  const baseURL = resolveFactoryBaseURL(id, opts.baseURL);
+  const plan =
+    !opts.headers && endpoint.subscription && baseURL?.replace(/\/+$/, "") === endpoint.subscription.apiBase
+      ? endpoint.subscription
+      : undefined;
+  // Host-selected API children retain the parent's billing choice instead of
+  // re-entering a saved plan route that has already rejected entitlement.
+  const primary = strategy.createFactory({
+    ...opts,
+    baseURL: plan && opts.authMode === "api-key" ? endpoint.apiBase : baseURL,
+  });
+  let factory = primary;
+  if (plan && opts.authMode !== "api-key" && opts.apiKey && opts.apiKey !== "oauth") {
+    const backup = strategy.createFactory({ apiKey: opts.apiKey, baseURL: endpoint.apiBase });
+    const fallback = createSubscriptionFallback(id, plan.entitlementError);
+    factory = (modelId) => fallback.wrap(primary(modelId), () => backup(modelId));
+    factory.authModeForModel = fallback.authModeForModel;
+  }
   factory.providerId = id;
+  factory.authModeForModel ??= () =>
+    opts.headers || (plan && opts.authMode !== "api-key") ? "subscription" : "api-key";
   providerFactoryRegistry.set(id, factory);
   return { id, factory };
 }
@@ -127,13 +161,13 @@ export function createProviderFactory(
  */
 export async function createProviderFactoryAsync(
   id: ProviderId,
-  opts: { apiKey?: string; baseURL?: string },
+  opts: { apiKey?: string; baseURL?: string; authMode?: ProviderAuthMode },
 ): Promise<ProviderFactoryResult> {
-  try {
+  if (opts.authMode !== "api-key") {
     const { getOAuthProviderConfig } = await import("./auth/registry.js");
     const cfg = await getOAuthProviderConfig(id);
     if (cfg) {
-      const tokens = await cfg.loadTokensWithRefresh().catch(() => null);
+      const tokens = await cfg.loadTokensWithRefresh();
       if (tokens) {
         const headers = cfg.provider.authHeaders(tokens);
         // OAuth subscription tokens are only valid against the provider's OAuth
@@ -162,11 +196,41 @@ export async function createProviderFactoryAsync(
         if (cfg.unsupportedParams) {
           result.factory.unsupportedParams = cfg.unsupportedParams;
         }
+        let apiKey = opts.apiKey && opts.apiKey !== "oauth" ? opts.apiKey : undefined;
+        if (!apiKey) {
+          try {
+            apiKey = await loadKeyForProvider(id);
+          } catch (error) {
+            logger.file("debug", "cli", `[auth-fallback] no backup key for ${id}: ${(error as Error).message}`);
+          }
+        }
+        if (apiKey) {
+          const primary = result.factory;
+          // Build the backup privately: registering it would replace subscription as primary.
+          const backup = getProviderStrategy(id).createFactory({
+            apiKey,
+            baseURL: resolveFactoryBaseURL(id, opts.baseURL),
+          });
+          const fallback = createSubscriptionFallback(id);
+          const factory: ProviderFactory = (modelId) =>
+            fallback.wrap(primary(modelId), () => backup(modelId), cfg.unsupportedParams);
+          if (primary.responses)
+            factory.responses = (modelId) =>
+              fallback.wrap(
+                primary.responses!(modelId),
+                () => (backup.responses ? backup.responses(modelId) : backup(modelId)),
+                cfg.unsupportedParams,
+              );
+          factory.providerId = id;
+          factory.defaultProviderOptions = primary.defaultProviderOptions;
+          // Preserve original budgets until the wrapper selects an endpoint.
+          factory.authModeForModel = fallback.authModeForModel;
+          providerFactoryRegistry.set(id, factory);
+          return { id, factory };
+        }
         return result;
       }
     }
-  } catch {
-    /* registry unavailable or token load failed — fall through to API key */
   }
 
   return createProviderFactory(id, opts);
@@ -226,7 +290,7 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
     throw new Error(`Model "${modelId}" not found in catalog — cannot determine provider.`);
   }
 
-  const userEffort = getReasoningEffortForModel(modelId);
+  const userEffort = opts?.reasoningEffort ?? getReasoningEffortForModel(modelId);
   const mockModel = mockGlobals.__muonroiMockModel;
 
   // Determine the language model + unsupportedParams + provider-level defaults.
@@ -265,6 +329,8 @@ export function resolveModelRuntime(modelId: string, opts?: ResolveRuntimeOpts):
     });
     providerLevelDefaults = factory.defaultProviderOptions;
   }
+
+  resolved.reasoningEffort = userEffort;
 
   // Merge provider-level defaults from the factory (e.g. OAuth backends inject
   // `instructions` + `store: false` for the ChatGPT Codex API). This keeps
@@ -373,7 +439,7 @@ export function buildTurnProviderOptions(
   if (!provider)
     throw new Error(`Cannot build provider options — model "${runtime.modelId}" has no provider in catalog.`);
   const caps = getProviderCapabilities(provider);
-  const userEffort = getReasoningEffortForModel(runtime.modelId);
+  const userEffort = runtime.reasoningEffort ?? getReasoningEffortForModel(runtime.modelId);
   const fromCaps = caps.buildProviderOptions({
     model: runtime.modelInfo,
     sessionId: ctx.sessionId,

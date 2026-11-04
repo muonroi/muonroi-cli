@@ -110,6 +110,7 @@ export async function runSelfVerify(opts: SelfVerifyOptions = {}): Promise<SelfV
   for (const s of skipped) log(`[self-verify]   skipped ${s.id} — ${s.reason}`);
 
   const orchOpts: OrchestratorOptions = {
+    cwd: opts.cwd,
     mockLlmDir: opts.mockLlmDir,
     log,
   };

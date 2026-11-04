@@ -34,9 +34,11 @@ import { wrapLanguageModel } from "ai";
 import { logInteraction } from "../storage/interaction-log.js";
 import type { ModelInfo, ModelRateLimits } from "../types/index.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
+import { logger } from "../utils/logger.js";
 import { reportRetryNotice } from "../utils/visible-retry.js";
 import {
   acquireLedgerSlot,
+  type LedgerLease,
   noteProviderRateLimited,
   TPM_ESTIMATE_CALIBRATION,
   usageTotalTokens,
@@ -407,9 +409,10 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
         // Each attempt re-paces: a retry after a 429 waits behind the shared
         // cooldown and the declared budget exactly like a first call does.
         return retryOnRateLimit(ctx, params.abortSignal, async () => {
-          const lease = await paceCall(ctx, estTokens);
+          const lease = await paceCall(ctx, estTokens, params.abortSignal);
           let result: Awaited<ReturnType<typeof doStream>>;
           try {
+            params.abortSignal?.throwIfAborted();
             result = await doStream();
           } catch (err) {
             lease.release();
@@ -420,7 +423,7 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
           // there is nothing to release, and the stream is returned untouched: a
           // model that declares no `concurrency` must not pay a pipeThrough.
           if (!lease.holdsSlot) return result;
-          return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx) };
+          return { ...result, stream: releaseOnStreamEnd(result.stream, lease, ctx, params.abortSignal) };
         });
       },
       wrapGenerate: async ({ doGenerate, params }) => {
@@ -428,8 +431,9 @@ export function wrapModelWithGate(model: any, ctx: GateContext): any {
         const comp = gateDisabled() ? undefined : gateCall(prompt, ctx, "generate");
         const estTokens = estimateCallTokens(prompt, comp, ctx);
         return retryOnRateLimit(ctx, params.abortSignal, async () => {
-          const lease = await paceCall(ctx, estTokens);
+          const lease = await paceCall(ctx, estTokens, params.abortSignal);
           try {
+            params.abortSignal?.throwIfAborted();
             const result = await doGenerate();
             lease.settle((result as { usage?: unknown }).usage);
             return result;
@@ -512,6 +516,7 @@ function announceRateLimitRetry(info: RateLimitRetryInfo, ctx: GateContext): voi
     `[retry] rate-limited by ${ctx.providerId ?? "provider"} (429) on ${ctx.stage} call — waiting ` +
       `${Math.ceil(info.waitMs / 1000)}s (${source}) before attempt ${info.attempt + 1}/${info.maxAttempts}`,
     "warn",
+    { kind: "rate-limit" },
   );
 }
 
@@ -528,15 +533,31 @@ function pacingApplies(ctx: GateContext): boolean {
  * the app unable to talk to a provider. A 429 is recoverable; a wedged pacer is
  * not.
  */
-async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease> {
+async function paceCall(ctx: GateContext, estTokens: number, signal?: AbortSignal): Promise<PaceLease> {
+  signal?.throwIfAborted();
   if (!pacingApplies(ctx)) {
     // Nothing declared to pace against — but the provider may have pushed back
     // recently (a 429 another process recorded). Honour that cooldown; it is a
     // single lock-free read when there is none.
     if (backpressureApplies(ctx)) {
       try {
-        await acquireLedgerSlot(ctx.providerId!, undefined, 0, (wait) => emitRateLimitWait(wait, ctx));
+        await acquireLedgerSlot(
+          ctx.providerId!,
+          undefined,
+          0,
+          (wait) => emitRateLimitWait(wait, ctx),
+          undefined,
+          signal,
+        );
       } catch (err) {
+        if (signal?.aborted) {
+          logger.debug("orchestrator", "Provider cooldown wait cancelled", {
+            provider: ctx.providerId,
+            model: ctx.modelId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          throw err;
+        }
         console.error(`[model-gate] provider cooldown check failed (proceeding): ${(err as Error)?.message}`, {
           provider: ctx.providerId,
           model: ctx.modelId,
@@ -550,10 +571,22 @@ async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease>
     // Emit through the callback, NOT by walking `lease.waits` afterwards: the
     // lease only resolves once the wait is OVER, so reporting from it would hide
     // the hold for exactly as long as the hold lasts.
-    local = await acquireRateLimitSlot(ctx.providerId!, ctx.rateLimits, undefined, (wait) =>
-      emitRateLimitWait(wait, ctx),
+    local = await acquireRateLimitSlot(
+      ctx.providerId!,
+      ctx.rateLimits,
+      undefined,
+      (wait) => emitRateLimitWait(wait, ctx),
+      signal,
     );
   } catch (err) {
+    if (signal?.aborted) {
+      logger.debug("orchestrator", "Provider pacing cancelled", {
+        provider: ctx.providerId,
+        model: ctx.modelId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
     console.error(`[model-gate] rate-limit pacing failed (proceeding unpaced): ${(err as Error)?.message}`, {
       provider: ctx.providerId,
       model: ctx.modelId,
@@ -564,10 +597,33 @@ async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease>
   // In-process first (FIFO among this process's callers), then the machine-wide
   // ledger shared with background delegations. The ledger is fail-open itself.
   const waits = local.waits;
-  const shared = await acquireLedgerSlot(ctx.providerId!, ctx.rateLimits, estTokens, (wait) => {
-    waits.push(wait);
-    emitRateLimitWait(wait, ctx);
-  });
+  let shared: LedgerLease;
+  try {
+    shared = await acquireLedgerSlot(
+      ctx.providerId!,
+      ctx.rateLimits,
+      estTokens,
+      (wait) => {
+        waits.push(wait);
+        emitRateLimitWait(wait, ctx);
+      },
+      undefined,
+      signal,
+    );
+  } catch (err) {
+    local.release();
+    logger.debug("orchestrator", "Shared pacing acquisition interrupted", {
+      provider: ctx.providerId,
+      model: ctx.modelId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  if (signal?.aborted) {
+    shared.release();
+    local.release();
+    signal.throwIfAborted();
+  }
   return {
     waits,
     // The ledger entry is in flight until the call ends, so its release must
@@ -592,34 +648,54 @@ async function paceCall(ctx: GateContext, estTokens: number): Promise<PaceLease>
  * stranded slot would deadlock every later call to that provider — a far worse
  * failure than the 429 this module exists to prevent.
  */
-function releaseOnStreamEnd<T extends ReadableStream<unknown>>(stream: T, lease: PaceLease, ctx: GateContext): T {
+function releaseOnStreamEnd<T extends ReadableStream<unknown>>(
+  stream: T,
+  lease: PaceLease,
+  ctx: GateContext,
+  signal?: AbortSignal,
+): T {
+  let released = false;
   const watchdog = setTimeout(() => {
     console.error(
       `[model-gate] rate-limit concurrency slot force-released after ${STREAM_SLOT_WATCHDOG_MS}ms — ` +
         `stream neither ended nor cancelled`,
       { provider: ctx.providerId, model: ctx.modelId, stage: ctx.stage },
     );
-    lease.release();
+    done();
   }, STREAM_SLOT_WATCHDOG_MS);
   // Never keep the process alive just to police a slot.
   (watchdog as unknown as { unref?: () => void }).unref?.();
   const done = () => {
+    if (released) return;
+    released = true;
     clearTimeout(watchdog);
+    signal?.removeEventListener("abort", done);
     lease.release();
   };
+  signal?.addEventListener("abort", done, { once: true });
+  if (signal?.aborted) done();
   try {
-    return stream.pipeThrough(
-      new TransformStream({
-        transform: (chunk, controller) => {
-          // The finish part carries the provider-reported usage — the real TPM cost.
-          const part = chunk as { type?: string; usage?: unknown } | null;
-          if (part && part.type === "finish") lease.settle(part.usage);
-          controller.enqueue(chunk);
-        },
-        flush: done,
-        cancel: done,
-      }),
-    ) as T;
+    const forwarding = new TransformStream({
+      transform: (chunk, controller) => {
+        // The finish part carries the provider-reported usage — the real TPM cost.
+        const part = chunk as { type?: string; usage?: unknown } | null;
+        if (part && part.type === "finish") lease.settle(part.usage);
+        controller.enqueue(chunk);
+      },
+    });
+    // Observe the pipe itself: source errors do not flush a transformer, and
+    // readable cancellation does not invoke transformer.cancel in Bun. Caller
+    // abort also releases immediately, even if the provider ignores its signal.
+    void stream.pipeTo(forwarding.writable, { signal }).then(done, (err) => {
+      done();
+      logger.debug("orchestrator", "Provider stream pipe terminated", {
+        provider: ctx.providerId,
+        model: ctx.modelId,
+        stage: ctx.stage,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return forwarding.readable as T;
   } catch (err) {
     console.error(
       `[model-gate] could not wrap stream for concurrency release, releasing early: ${(err as Error)?.message}`,

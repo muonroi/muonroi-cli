@@ -125,6 +125,10 @@ export async function* runPlanning(
   let synthesisText = "";
   let outcome: EnhancedCouncilOutcome | null = null;
   let synthesisFailReason: string | undefined;
+  const callerOwnsFormat = !!synthesisOutputContract?.trim();
+  // Caller results need not implement the interactive outcome/menu schema.
+  const isTruncated = (text: string) =>
+    (!callerOwnsFormat || /^\s*(?:\{|```[^\n]*\n\s*\{)/.test(text)) && extractJsonObject(text).truncated;
 
   try {
     const baseArgs = {
@@ -150,7 +154,7 @@ export async function* runPlanning(
       maxTokens: SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS,
     });
 
-    outcome = parseOutcome(synthesisText, debatePlan);
+    outcome = callerOwnsFormat ? null : parseOutcome(synthesisText, debatePlan);
 
     // ── Empty / unparseable synthesis recovery ─────────────────────────────
     // Synthesis can return "" when the provider times out internally, or a
@@ -168,8 +172,8 @@ export async function* runPlanning(
     // (probe: requested 8192 → finishReason "length", 4096 out, 2501 of them
     // reasoning), so a maximal structured answer cannot physically fit and both
     // attempts truncated identically.
-    const truncated = !emptySynthesis && extractJsonObject(synthesisText).truncated;
-    const unparseable = !emptySynthesis && !truncated && outcome === null;
+    const truncated = !emptySynthesis && isTruncated(synthesisText);
+    const unparseable = !callerOwnsFormat && !emptySynthesis && !truncated && outcome === null;
     if (emptySynthesis || truncated || unparseable) {
       const initialReason = emptySynthesis
         ? "synthesizer returned an empty completion — on a reasoning leader this usually means the whole output budget went to thinking tokens"
@@ -204,26 +208,30 @@ export async function* runPlanning(
       // model's own catalog entry says does not exist. The directive text must
       // not claim "LARGER" when the number is unchanged.
       const emptyRetryHasMoreRoom = retryMaxTokens > SYNTHESIS_FIRST_ATTEMPT_MAX_TOKENS;
-      const retryDirective = emptySynthesis
-        ? emptyRetryHasMoreRoom
-          ? `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
-            `any answer began (expected when a reasoning model thinks before writing). This retry has a LARGER ` +
-            `output budget than the first attempt. Emit the JSON object FIRST, then the literal line ` +
-            `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
-            `re-debate or re-read the exchange history before writing.`
-          : `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
-            `any answer began (expected when a reasoning model thinks before writing). This retry has the SAME ` +
-            `output budget as the first attempt — your model's own declared ceiling does not allow more. Spend as ` +
-            `little of it as possible on internal reasoning: emit the JSON object FIRST, then the literal line ` +
-            `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
-            `re-debate or re-read the exchange history before writing.`
-        : truncated
-          ? `Your previous attempt did not FIT in the output budget. Emit the JSON object FIRST and keep it SMALL: ` +
-            `\`summary\` at most 400 characters, every list at most 3 entries of at most 200 characters each, ` +
-            `no nested prose. Completing the JSON object matters more than covering every point. ` +
-            `Skip the \`---READABLE---\` section entirely if you are running short.`
-          : `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
-            `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
+      const retryDirective = callerOwnsFormat
+        ? `The previous answer was ${emptySynthesis ? "empty" : "cut off before completion"}. ` +
+          `Answer directly from the final positions, complete the caller-required output contract, ` +
+          `and add no other output format or sections. Keep the answer within the available output budget.`
+        : emptySynthesis
+          ? emptyRetryHasMoreRoom
+            ? `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
+              `any answer began (expected when a reasoning model thinks before writing). This retry has a LARGER ` +
+              `output budget than the first attempt. Emit the JSON object FIRST, then the literal line ` +
+              `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
+              `re-debate or re-read the exchange history before writing.`
+            : `Your previous attempt produced NO visible output at all — the entire output budget was spent before ` +
+              `any answer began (expected when a reasoning model thinks before writing). This retry has the SAME ` +
+              `output budget as the first attempt — your model's own declared ceiling does not allow more. Spend as ` +
+              `little of it as possible on internal reasoning: emit the JSON object FIRST, then the literal line ` +
+              `\`---READABLE---\`, then the markdown. Answer directly from the final positions above — do not ` +
+              `re-debate or re-read the exchange history before writing.`
+          : truncated
+            ? `Your previous attempt did not FIT in the output budget. Emit the JSON object FIRST and keep it SMALL: ` +
+              `\`summary\` at most 400 characters, every list at most 3 entries of at most 200 characters each, ` +
+              `no nested prose. Completing the JSON object matters more than covering every point. ` +
+              `Skip the \`---READABLE---\` section entirely if you are running short.`
+            : `Your previous attempt produced no parseable JSON. Emit the JSON object FIRST, ` +
+              `then the literal line \`---READABLE---\`, then the markdown. Do not add any preamble before the JSON.`;
       const retrySystem = `${retry.system}\n\n## Retry directive\n${retryDirective}`;
       const retryText = yield* tracedGenerate(llm, {
         phase: "synthesis",
@@ -235,9 +243,9 @@ export async function* runPlanning(
       });
       if (retryText.trim().length > 0) {
         synthesisText = retryText;
-        outcome = parseOutcome(synthesisText, debatePlan);
+        outcome = callerOwnsFormat ? null : parseOutcome(synthesisText, debatePlan);
       }
-      if (!synthesisText.trim() || outcome === null) {
+      if (!synthesisText.trim() || isTruncated(synthesisText) || (!callerOwnsFormat && outcome === null)) {
         synthesisFailReason =
           synthesisText.trim().length === 0
             ? "Synthesizer returned empty completion on both attempts. Provider may be rate-limited, or the leader is a reasoning model spending its whole output budget on thinking tokens — the debate exchanges above are still usable as raw notes."
@@ -247,9 +255,10 @@ export async function* runPlanning(
       }
     }
 
-    const readablePart = synthesisText.includes("---READABLE---")
-      ? synthesisText.split("---READABLE---")[1]?.trim()
-      : synthesisText;
+    const readablePart =
+      !callerOwnsFormat && synthesisText.includes("---READABLE---")
+        ? synthesisText.split("---READABLE---")[1]?.trim()
+        : synthesisText;
     const synthBody =
       readablePart && readablePart.length > 0
         ? readablePart

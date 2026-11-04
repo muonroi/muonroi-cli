@@ -49,9 +49,18 @@ export function compactTaskLabel(label: string): string {
 }
 
 export function sanitizeContent(raw: string): string {
-  let s = raw.replace(/^[\s\n]*assistant:\s*/gi, "");
+  let s = hideLegacyCompletionReceipts(raw).replace(/^[\s\n]*assistant:\s*/gi, "");
   s = s.replace(/\{"success"\s*:\s*(true|false)\s*,\s*"output"\s*:\s*"[\s\S]*$/m, "");
   return s.trim();
+}
+
+/** Display only: hide exact old host receipt suffixes without editing saved history. */
+export function hideLegacyCompletionReceipts(text: string): string {
+  const suffix =
+    /(?:^|(?:\r?\n)+)\[Native Flow evidence: plan-review=(?:pass|revise|block|missing); implementation-verification=(?:missing|unstructured|recorded_pass|recorded_fail); whole-task completion=unverified\. These artifact facts do not certify the model's completion claim\.\]\s*$/;
+  let display = text;
+  while (suffix.test(display)) display = display.replace(suffix, "");
+  return display;
 }
 
 /**

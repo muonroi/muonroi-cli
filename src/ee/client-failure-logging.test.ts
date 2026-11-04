@@ -76,6 +76,24 @@ describe("EEClient.health — failure cause must be visible", () => {
 });
 
 describe("EEClient.recall — HTTP status must survive the null", () => {
+  it("passes a recognized missing-project response to the diagnostic classifier", async () => {
+    const mockFetch = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects",
+      }),
+    });
+    const ee = createEEClient({ fetchImpl: mockFetch as unknown as typeof fetch });
+    expect(await ee.recall("scope", { strictProject: true, cwd: "D:/consumer" })).toBeNull();
+    expect(logSpy).toHaveBeenCalledWith(
+      "client.recall",
+      "error",
+      expect.any(Error),
+      expect.objectContaining({ status: 400, projectRequired: true }),
+    );
+  });
+
   it("preserves the status on a non-ok response instead of collapsing it into null", async () => {
     // The 429 case specifically: the user's first hypothesis for this incident was
     // rate limiting. `if (!resp.ok) return null` made that unfalsifiable from the

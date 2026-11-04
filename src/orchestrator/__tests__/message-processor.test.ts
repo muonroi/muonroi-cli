@@ -145,6 +145,17 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
 }
 
 describe("MessageProcessor — DI surface invariants", () => {
+  it("host wake provenance keeps the entire user prompt in main's context", async () => {
+    const deps = makeDeps({ batchApi: true });
+    const processor = new MessageProcessor(deps);
+    const fullPrompt = "[background jobs finished]\n\njobId=fixture\nresultVersion=exact\nFULL_WORKER_EVIDENCE";
+    for await (const _chunk of processor.run(fullPrompt, undefined, undefined, { internalActivity: true })) {
+      /* drain */
+    }
+    const message = deps.messages.find((m) => m.role === "user");
+    expect(message?.content).toContain(fullPrompt);
+    expect(message?.providerOptions?.muonroi?.internalActivity).toBe(true);
+  });
   beforeAll(async () => {
     await loadCatalog();
     registerTestProviderFactories();

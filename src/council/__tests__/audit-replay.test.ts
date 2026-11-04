@@ -185,6 +185,33 @@ describe("audit-replay", () => {
     expect(councilMemoryMessages[0].sessionId).toBe("test-session-001");
   });
 
+  it("emits actual roles, personas and contributions to the host without a session row", async () => {
+    const { runCouncil } = await import("../index.js");
+    const onCouncilRecord = vi.fn(async (_record: import("../types.js").CouncilMemoryRecord) => {});
+    const gen = runCouncil(
+      "Should we use gRPC internally?",
+      "mock-model",
+      [],
+      undefined,
+      buildMockLLM(),
+      vi.fn(async () => "skip"),
+      vi.fn(async () => true),
+      async function* () {
+        yield { type: "done" };
+      },
+      { skipClarification: true, suppressPreDebateCards: true, suppressPostDebate: true, onCouncilRecord },
+    );
+    await drainCouncil(gen);
+    expect(onCouncilRecord).toHaveBeenCalledTimes(1);
+    const record = onCouncilRecord.mock.calls[0]![0] as unknown as import("../types.js").CouncilMemoryRecord;
+    expect(record.leaderModel).toBe("mock-leader");
+    expect(record.participants.length).toBeGreaterThanOrEqual(2);
+    expect(record.participants.every((p) => p.model && p.role && p.stance?.name)).toBe(true);
+    expect(record.finalPositions.some((p) => p.position.length > 0)).toBe(true);
+    expect(record.synthesis).toContain("docs/");
+    expect(capturedMessages.some((m) => m.content.startsWith("[Council Memory]"))).toBe(false);
+  });
+
   it("[Council Memory] record is parseable JSON with required fields", async () => {
     const { runCouncil } = await import("../index.js");
 

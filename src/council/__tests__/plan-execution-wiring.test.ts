@@ -15,10 +15,10 @@ import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { planningArtifact } from "../../gsd/paths.js";
-import { readPlanVerifyVerdict } from "../../gsd/workflow-engine.js";
 import { isCouncilPlanExecution } from "../../pil/layer6-output.js";
 import type { StreamChunk } from "../../types/index.js";
+import { planningArtifact } from "../../workflow/paths.js";
+import { readPlanVerifyVerdict } from "../../workflow/workflow-engine.js";
 import { COUNCIL_ANSWER_DISMISSED } from "../types.js";
 
 vi.mock("../../storage/index", () => ({
@@ -247,7 +247,7 @@ describe("implement -> plan draft -> review -> post-plan card -> execute_plan", 
     expect(existsSync(planPath)).toBe(true);
     expect(readFileSync(planPath, "utf8")).toContain("**Status:** done");
 
-    // PLAN-VERIFY.md unlocked the GSD mutation gate WHILE the phase turn ran —
+    // PLAN-VERIFY.md unlocked the FLOW mutation gate WHILE the phase turn ran —
     // the second half of the fix (Task 8's investigation into mutation-gate.ts).
     expect(verdictDuringPhase).toEqual(["pass"]);
 

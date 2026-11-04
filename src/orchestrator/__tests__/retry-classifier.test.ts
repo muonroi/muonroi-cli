@@ -4,6 +4,17 @@ import { classifyStreamError } from "../retry-classifier.js";
 import { STALL_ABORT_REASON } from "../stall-watchdog.js";
 
 describe("classifyStreamError", () => {
+  it.each([
+    429, 50429, 142900,
+  ])("does not retry local context overflow containing token count %i as HTTP 429", (count) => {
+    expect(
+      classifyStreamError(
+        new Error(
+          `Request context overflow: estimated ${count} input tokens + 16000 reserved output tokens exceed the model context window (58134). Request was not sent.`,
+        ),
+      ).transient,
+    ).toBe(false);
+  });
   it("classifies ECONNREFUSED as transient", () => {
     const err = new Error("connect ECONNREFUSED 127.0.0.1:443");
     const result = classifyStreamError(err);

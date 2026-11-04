@@ -12,13 +12,14 @@ vi.mock("../../pil/pipeline.js", () => ({ runPipeline: () => new Promise(() => {
 describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
   it.each([
     "main",
+    "internal mutation",
     "explore",
     "explore approved",
     "explore gate disabled",
   ])("respects plan authorization during %s research", async (scenario) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-gate-research-"));
     const cwd = process.cwd();
-    const keys = ["HOME", "USERPROFILE", "MUONROI_EE_BASE_URL", "MUONROI_GSD_NATIVE", "MUONROI_GSD_HARD_GATE"];
+    const keys = ["HOME", "USERPROFILE", "MUONROI_EE_BASE_URL", "MUONROI_FLOW_NATIVE", "MUONROI_FLOW_HARD_GATE"];
     const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
     fs.mkdirSync(path.join(home, ".muonroi-cli"));
     fs.writeFileSync(path.join(home, ".muonroi-cli", "settings.json"), JSON.stringify({ routerSubSessions: false }));
@@ -26,8 +27,8 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
     process.env.HOME = home;
     process.env.USERPROFILE = home;
     process.env.MUONROI_EE_BASE_URL = "http://127.0.0.1:1";
-    process.env.MUONROI_GSD_NATIVE = "1";
-    process.env.MUONROI_GSD_HARD_GATE = scenario === "explore gate disabled" ? "0" : "1";
+    process.env.MUONROI_FLOW_NATIVE = "1";
+    process.env.MUONROI_FLOW_HARD_GATE = scenario === "explore gate disabled" ? "0" : "1";
     closeDatabase();
     await loadCatalog();
     const handle = installMockModel({
@@ -43,30 +44,39 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
               textOnlyStream("RESEARCH_CONTINUES_WRITES_LOCKED"),
             ]
           : [
-              toolCallStream({
-                toolCallId: "research",
-                toolName: "delegate",
-                input: {
-                  agent: "explore",
-                  description: "Inspect context delivery",
-                  prompt: "Identify bounded source evidence",
-                },
-              }),
-              toolCallStream({
-                toolCallId: "clarify",
-                toolName: "ask_user",
-                input: { question: "Which acceptance criterion?" },
-              }),
-              toolCallStream({
-                toolCallId: "progress",
-                toolName: "todo_write",
-                input: { todos: [{ id: "research", subject: "Inspect evidence", status: "in_progress" }] },
-              }),
-              toolCallStream({
-                toolCallId: "write",
-                toolName: "write_file",
-                input: { path: "forbidden.ts", content: "MUTATION" },
-              }),
+              ...(scenario === "main"
+                ? [
+                    toolCallStream({
+                      toolCallId: "research",
+                      toolName: "delegate",
+                      input: {
+                        agent: "explore",
+                        modelId: "deepseek-v4-flash",
+                        description: "Inspect context delivery",
+                        prompt: "Identify bounded source evidence",
+                      },
+                    }),
+                    toolCallStream({
+                      toolCallId: "clarify",
+                      toolName: "ask_user",
+                      input: { question: "Which acceptance criterion?" },
+                    }),
+                    toolCallStream({
+                      toolCallId: "progress",
+                      toolName: "todo_write",
+                      input: { todos: [{ id: "research", subject: "Inspect evidence", status: "in_progress" }] },
+                    }),
+                  ]
+                : []),
+              ...(scenario === "internal mutation"
+                ? [
+                    toolCallStream({
+                      toolCallId: "write",
+                      toolName: "write_file",
+                      input: { path: "forbidden.ts", content: "MUTATION" },
+                    }),
+                  ]
+                : []),
               textOnlyStream("RESEARCH_CONTINUES_WRITES_LOCKED"),
             ],
       },
@@ -86,7 +96,13 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
       );
       return originalStream(options);
     });
-    const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 5, { persistSession: true });
+    // Root coordinates research. Its former direct mutation is a separate
+    // infrastructure fixture so neither role is granted the other's authority.
+    const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 5, {
+      persistSession: true,
+      executionRole: scenario === "internal mutation" ? "infrastructure" : "orchestrator",
+      permissionMode: "yolo",
+    });
     const delegation = vi
       .spyOn(agent as any, "runDelegation")
       .mockResolvedValue({ success: true, output: "RESEARCH_STARTED" });
@@ -109,13 +125,20 @@ describe("heavy plan gate research dispatch (ea7378aab8f8)", () => {
       }
       for await (const chunk of agent.processMessage("Gather evidence before changing context enrichment"))
         chunks.push(chunk);
+      if (scenario === "internal mutation") {
+        expect(JSON.stringify(handle.model.doStreamCalls)).toContain("BLOCKED: this task");
+        expect(fs.existsSync(path.join(home, "forbidden.ts"))).toBe(false);
+        expect(fs.readFileSync(path.join(home, ".planning", "PLAN-VERIFY.md"), "utf8")).toBe("verdict: revise\n");
+        expect(chunks.some((chunk) => chunk.type === "error")).toBe(false);
+        expect(chunks.map((chunk) => chunk.content ?? "").join("")).toContain("RESEARCH_CONTINUES_WRITES_LOCKED");
+        return;
+      }
       expect(delegation).toHaveBeenCalledOnce();
       expect(clarification).toHaveBeenCalledOnce();
       const transcript = JSON.stringify(handle.model.doStreamCalls);
       expect(transcript).toContain("RESEARCH_STARTED");
       expect(transcript).toContain("Use isolated fixtures");
       expect(transcript.includes("Tracking 1 todo")).toBe(true);
-      expect(transcript).toContain("BLOCKED: this task");
       expect(fs.existsSync(path.join(home, "forbidden.ts"))).toBe(false);
       expect(fs.readFileSync(path.join(home, ".planning", "PLAN-VERIFY.md"), "utf8")).toBe("verdict: revise\n");
       expect(chunks.some((chunk) => chunk.type === "error")).toBe(false);

@@ -14,6 +14,11 @@ import type { ProviderId } from "./types.js";
 export interface ProviderEndpoints {
   apiBase: string;
   consoleUrl: string;
+  /** Known API-key subscription route; arbitrary user proxies are never rerouted. */
+  subscription?: {
+    apiBase: string;
+    entitlementError: { statusCode: number; type: string; message: string };
+  };
 }
 
 export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
@@ -62,6 +67,15 @@ export const PROVIDER_ENDPOINTS: Record<ProviderId, ProviderEndpoints> = {
     // Plan users set `providers.stepfun.baseURL` in user-settings.json.
     apiBase: "https://api.stepfun.ai/v1",
     consoleUrl: "https://platform.stepfun.ai/",
+    subscription: {
+      apiBase: "https://api.stepfun.ai/step_plan/v1",
+      // Measured in session a2a067c7ca78, interaction_logs 63917/63925.
+      entitlementError: {
+        statusCode: 400,
+        type: "request_params_invalid",
+        message: "you have no active step plan subscription",
+      },
+    },
   },
 };
 

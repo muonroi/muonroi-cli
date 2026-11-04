@@ -1,4 +1,3 @@
-import { resolveGsdPremiumModel } from "../gsd/model-tier.js";
 import { getCatalogCouncilRouting, getModelInfo, getTextModelsForProvider } from "../models/registry.js";
 import { getConfiguredProviders } from "../providers/keychain.js";
 import { detectProviderForModel } from "../providers/runtime.js";
@@ -7,6 +6,7 @@ import { getRoutedModelByTier } from "../router/peak-hour.js";
 import { isIdealRunUnlimited } from "../utils/ideal-run-scope.js";
 import { logger } from "../utils/logger.js";
 import { getRoleModel, getRoleModels, isProviderDisabled, type ModelRole } from "../utils/settings.js";
+import { resolveFlowPremiumModel } from "../workflow/model-tier.js";
 
 const TIER_RANK: Record<string, number> = { fast: 1, balanced: 2, premium: 3 };
 
@@ -219,7 +219,7 @@ export async function resolvePlanCouncilLeader(sessionModelId: string): Promise<
     return { modelId: catalogLeader.id };
   }
 
-  const premiumId = resolveGsdPremiumModel(sessionModelId);
+  const premiumId = resolveFlowPremiumModel(sessionModelId);
   const sessionTier = tierOf(sessionModelId);
   const premiumTier = tierOf(premiumId);
   if (premiumId !== sessionModelId && premiumTier && sessionTier && TIER_RANK[premiumTier] > TIER_RANK[sessionTier]) {

@@ -21,11 +21,25 @@ import { __resetProposerStallNoticeForTests, takeProposerStallNotice } from "../
 import { __resetTurnProgressForTests, hasTurnProgressSince } from "../turn-progress.js";
 
 // Controllable per-test behaviour for the mocked provider call.
-let mockBehavior: "resolve" | "hang" = "resolve";
+let mockBehavior: "resolve" | "hang" | "abortable" | "resolve-on-abort" = "resolve";
+const attemptSignals: AbortSignal[] = [];
 let mockResponseText = '{"shouldCompact":false,"reason":"not needed","actions":[]}';
 
 vi.mock("../../providers/streamed-generate.js", () => ({
-  generateTextStreamed: async (_args: unknown) => {
+  generateTextStreamed: async (_args: { abortSignal: AbortSignal }) => {
+    attemptSignals.push(_args.abortSignal);
+    if (mockBehavior === "abortable" || mockBehavior === "resolve-on-abort") {
+      if (attemptSignals.length > 1 && !attemptSignals[attemptSignals.length - 2]!.aborted) {
+        throw new Error("Previous compaction attempt is still active");
+      }
+      return new Promise((resolve, reject) =>
+        _args.abortSignal.addEventListener(
+          "abort",
+          () => (mockBehavior === "resolve-on-abort" ? resolve({ text: "" }) : reject(_args.abortSignal.reason)),
+          { once: true },
+        ),
+      );
+    }
     if (mockBehavior === "hang") {
       // Never resolves/rejects on its own — only the deadline race can end it.
       return new Promise(() => {});
@@ -40,6 +54,7 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
+  attemptSignals.length = 0;
   mockBehavior = "resolve";
   mockResponseText = '{"shouldCompact":false,"reason":"not needed","actions":[]}';
   __resetTurnProgressForTests();
@@ -53,6 +68,47 @@ afterEach(() => {
 });
 
 describe("proposeCompaction — round 4 (G8 HIGH)", () => {
+  it("extracts a complete proposal without greedy prose braces and rejects ambiguous proposals", async () => {
+    const proposal = '{"shouldCompact":false,"reason":"active work","actions":[]}';
+    mockResponseText = `Example {not JSON}; actual:\n\`\`\`json\n${proposal}\n\`\`\``;
+    expect(await proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }])).toMatchObject({
+      shouldCompact: false,
+      actions: [],
+    });
+    mockResponseText = `${proposal}\n${proposal}`;
+    expect(await proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }])).toBeNull();
+  });
+  it.each([
+    "",
+    '{"shouldCompact":true,"reason":"truncated","actions":[',
+    '{"shouldCompact":true,"reason":"invalid","actions":[{"messageIndex":-1,"action":"drop","reason":"x"}]}',
+  ])("falls back once without replaying malformed output (%s)", async (text) => {
+    mockResponseText = text;
+    expect(await proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }])).toBeNull();
+    expect(attemptSignals).toHaveLength(1);
+  });
+  it("aborts the expired request before retrying and after the final timeout", async () => {
+    mockBehavior = "abortable";
+    await expect(proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }])).resolves.toBeNull();
+    expect(attemptSignals).toHaveLength(2);
+    expect(attemptSignals.every((signal) => signal.aborted)).toBe(true);
+  }, 8000);
+
+  it.each([
+    "abortable",
+    "resolve-on-abort",
+  ] as const)("propagates caller cancellation instead of starting another attempt (%s)", async (behavior) => {
+    mockBehavior = behavior;
+    const controller = new AbortController();
+    const reason = new Error("caller timeout cancellation");
+    const pending = proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }], controller.signal);
+    const assertion = expect(pending).rejects.toBe(reason);
+    controller.abort(reason);
+    await assertion;
+    expect(attemptSignals).toHaveLength(1);
+    expect(attemptSignals[0]!.aborted).toBe(true);
+  });
+
   it("pings turn progress before the call, so the top-level watchdog is not blind to this auxiliary LLM round-trip", async () => {
     const before = Date.now() - 1;
     await proposeCompaction(getAnyTestModel(), [{ role: "user", content: "hi" }]);

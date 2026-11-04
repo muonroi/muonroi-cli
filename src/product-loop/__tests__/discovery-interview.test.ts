@@ -434,7 +434,7 @@ describe("discovery-interview", () => {
     await iterateInterview({
       flowDir,
       runId: "collapse-run",
-      idea: "remove the @opengsd/gsd-core dependency and reimplement the workflow engine natively in src/council",
+      idea: "remove the @openflow/flow-core dependency and reimplement the workflow engine natively in src/council",
       detection: existingDetection,
       userPrompt,
       recommender: rec as any,
@@ -498,7 +498,7 @@ describe("discovery-interview", () => {
     await iterateInterview({
       flowDir,
       runId: "synthfail-run",
-      idea: "remove the @opengsd/gsd-core dependency and reimplement natively",
+      idea: "remove the @openflow/flow-core dependency and reimplement natively",
       detection: existingDetection,
       userPrompt,
       recommender: rec as any,

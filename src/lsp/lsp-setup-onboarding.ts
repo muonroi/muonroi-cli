@@ -14,10 +14,11 @@
  *     sessions, then re-offer. NOT a permanent flag.
  *   - At most once per session (deduped in lsp-setup-bus).
  */
-import { isLspSetupCardEnabled } from "../gsd/flags.js";
+
 import { loadUserSettings, saveUserSettings } from "../utils/settings.js";
-import { publishLspSetup } from "./lsp-setup-bus.js";
+import { isLspSetupCardEnabled } from "../workflow/flags.js";
 import { defaultLspSetupDeps, detectProjectLanguages, isLspServerInstalled } from "./lsp-setup.js";
+import { publishLspSetup } from "./lsp-setup-bus.js";
 
 /** How many interactive sessions a skip/esc hides the setup card for. */
 export const LSP_SETUP_SNOOZE_SESSIONS = 3;

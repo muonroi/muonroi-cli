@@ -40,18 +40,18 @@ describe("council intent gate + plan card", () => {
       // few roles for a debate. MUONROI_EE_BASE_URL points at a closed port so
       // the CQ-11 experience-warnings prefetch fails fast instead of racing a
       // real (possibly reachable) default host — mirrors council-flow.spec.ts.
-      // MUONROI_GSD_ASSESSOR=0 skips the leader-tier complexity assessor (an
+      // MUONROI_FLOW_ASSESSOR=0 skips the leader-tier complexity assessor (an
       // unfixtured extra LLM call) — depth comes only from the fixture's
       // `classify` line (consumed by runCouncil's own PIL pass).
-      // MUONROI_GSD_NATIVE=0 keeps the native GSD directive/mutation-gate
+      // MUONROI_FLOW_NATIVE=0 keeps the native FLOW directive/mutation-gate
       // machinery out of scope: this spec asserts the intent gate, not the
-      // GSD pipeline, and PIL still sets pilCtx.complexityTier regardless of
-      // this flag (src/pil/layer4-gsd.ts sets it unconditionally).
+      // FLOW pipeline, and PIL still sets pilCtx.complexityTier regardless of
+      // this flag (src/pil/layer4-flow.ts sets it unconditionally).
       env: {
         SILICONFLOW_API_KEY: MOCK_PROVIDER_KEY,
         MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
-        MUONROI_GSD_ASSESSOR: "0",
-        MUONROI_GSD_NATIVE: "0",
+        MUONROI_FLOW_ASSESSOR: "0",
+        MUONROI_FLOW_NATIVE: "0",
       },
       fixturesDir: FIXTURES_DIR,
       cwd: greenfield,

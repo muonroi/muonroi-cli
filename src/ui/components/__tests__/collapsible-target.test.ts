@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ChatEntry, ToolGroup } from "../../../types/index";
-import { findLastCollapsibleIndex } from "../message-view.js";
+import { findLastCollapsibleIndex, ReasoningContent } from "../message-view.js";
+import { dark } from "../../theme.js";
 
 const lines = (n: number) => Array.from({ length: n }, (_, i) => `line${i + 1}`).join("\n");
 
@@ -69,8 +70,15 @@ describe("findLastCollapsibleIndex", () => {
     expect(findLastCollapsibleIndex([assistant(20), assistant(2, 8)])).toBe(1);
   });
 
-  it("ignores reasoning at exactly the collapse threshold", () => {
-    expect(findLastCollapsibleIndex([assistant(2, 3)])).toBe(-1);
+  it("allows reopening short reasoning that is hidden by default", () => {
+    expect(findLastCollapsibleIndex([assistant(2, 3)])).toBe(0);
+    expect(findLastCollapsibleIndex([assistant(2, 1)])).toBe(0);
+  });
+
+  it("hides completed reasoning until explicitly expanded", () => {
+    const content = "Reasoning retained for inspection";
+    expect(ReasoningContent({ content, t: dark, expanded: false })).toBeNull();
+    expect(ReasoningContent({ content, t: dark, expanded: true })).not.toBeNull();
   });
 
   it("picks the newest target when several qualify", () => {

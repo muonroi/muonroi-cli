@@ -2,7 +2,7 @@ import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { planningRoot } from "../../gsd/paths.js";
+import { planningRoot } from "../../workflow/paths.js";
 import { foldPlanningIntoFlow } from "../fold-planning.js";
 
 describe("fold-planning", () => {

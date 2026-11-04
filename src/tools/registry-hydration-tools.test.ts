@@ -2,7 +2,7 @@ import os from "node:os";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { __resetArtifactCacheForTests, recordArtifact } from "../ee/artifact-cache.js";
 import { BashTool } from "./bash.js";
-import { createBuiltinTools } from "./registry.js";
+import { createBuiltinTools, MAX_TOOL_OUTPUT_CHARS } from "./registry.js";
 
 interface ToolWithExecute {
   execute?: (input: unknown) => Promise<unknown> | unknown;
@@ -33,10 +33,14 @@ describe("hydration tools registration", () => {
     expect(tools.search_session_history).toBeDefined();
   });
 
-  it("does NOT register retrieve_tool_result or search_session_history in plan/ask mode", () => {
-    const planTools = createBuiltinTools(new BashTool(os.tmpdir()), "plan");
-    expect(planTools.retrieve_tool_result).toBeUndefined();
-    expect(planTools.search_session_history).toBeUndefined();
+  it("allows plan/ask to rehydrate evidence without exposing workspace mutation tools", () => {
+    for (const mode of ["plan", "ask"] as const) {
+      const tools = createBuiltinTools(new BashTool(os.tmpdir()), mode);
+      expect(tools.retrieve_tool_result).toBeDefined();
+      expect(tools.search_session_history).toBeDefined();
+      expect(tools.write_file).toBeUndefined();
+      expect(tools.edit_file).toBeUndefined();
+    }
   });
 });
 
@@ -44,6 +48,91 @@ describe("retrieve_tool_result tool", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     __resetArtifactCacheForTests();
+  });
+
+  it("discovers bounded local evidence IDs without needing an ID or EE", async () => {
+    mockGetSessionChain.mockReturnValue(["session_root", "session_child"]);
+    const all = vi.fn().mockReturnValue([
+      {
+        tool_call_id: "call_complete_identifier",
+        session_id: "session_child",
+        tool_name: "delegation_read",
+        result_available: 1,
+      },
+    ]);
+    mockPrepare.mockReturnValue({ all });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "agent", { sessionId: "session_child" })
+      .retrieve_tool_result as ToolWithExecute;
+    const response = JSON.parse(String(await tool.execute?.({ view: "index", query: "PLAN.md" })));
+    expect(response.view).toBe("index");
+    expect(response.entries[0].tool_call_id).toBe("call_complete_identifier");
+    expect(response.entries[0].retrieve).toEqual({ tool_call_id: "call_complete_identifier" });
+    expect(response.entries[0]).not.toHaveProperty("content");
+    expect(response.entries[0]).not.toHaveProperty("args_json");
+    expect(all).toHaveBeenCalled();
+    expect(mockSearchEE).not.toHaveBeenCalled();
+  });
+
+  it("returns complete candidate references on a truncated-ID miss without reading their content", async () => {
+    const full = "call_f56f2b2b980c4ea7861f126c";
+    mockGetSessionChain.mockReturnValue(["session_root"]);
+    mockPrepare.mockReturnValue({
+      get: vi.fn().mockReturnValue(undefined),
+      all: vi.fn().mockReturnValue([
+        { tool_call_id: full, session_id: "session_root", tool_name: "delegation_read", result_available: 1 },
+        { tool_call_id: "call_f56f2b2_other", session_id: "session_root", tool_name: "read_file", result_available: 1 },
+      ]),
+    });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "agent", { sessionId: "session_root" })
+      .retrieve_tool_result as ToolWithExecute;
+    const response = String(await tool.execute?.({ tool_call_id: "call_f56f2b2" }));
+    expect(response).toContain("not found");
+    expect(response).toContain(full);
+    expect(response).toContain("call_f56f2b2_other");
+    expect(response).toContain('"retrieve"');
+    expect(response).not.toContain('"content"');
+    expect(mockSearchEE).not.toHaveBeenCalled();
+  });
+
+  it("does not discover unbound sessions or treat an invalid index page as a content request", async () => {
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "agent").retrieve_tool_result as ToolWithExecute;
+    expect(String(await tool.execute?.({ view: "index" }))).toContain("session");
+    expect(String(await tool.execute?.({ view: "index", chunk_index: -1 }))).toContain("chunk_index");
+    expect(mockPrepare).not.toHaveBeenCalled();
+    expect(mockSearchEE).not.toHaveBeenCalled();
+  });
+
+  it("recovers bounded original arguments from the owning session family instead of output caches", async () => {
+    recordArtifact("call-original", "bash", "cached output is not arguments");
+    mockGetSessionChain.mockReturnValue(["session_root", "session_child"]);
+    const get = vi.fn().mockReturnValue({ output_json: JSON.stringify({ command: "x".repeat(6000) }) });
+    mockPrepare.mockReturnValue({ get });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask", { sessionId: "session_child" })
+      .retrieve_tool_result as ToolWithExecute;
+    const response = JSON.parse(String(await tool.execute?.({ tool_call_id: "call-original", view: "arguments" })));
+    expect(response.view).toBe("arguments");
+    expect(response.content).not.toContain("cached output");
+    expect(response.content.length).toBeLessThanOrEqual(4000);
+    expect(response.total_chunks).toBeGreaterThan(1);
+    expect(get).toHaveBeenCalledWith("call-original", "session_child");
+    expect(mockSearchEE).not.toHaveBeenCalled();
+  });
+
+  it("reports when only an old marker was stored instead of fabricating original arguments", async () => {
+    mockGetSessionChain.mockReturnValue(["session_root"]);
+    mockPrepare.mockReturnValue({
+      get: vi.fn().mockReturnValue({
+        output_json: JSON.stringify({
+          __elided_note: "[earlier call args elided by sub-agent compactor — 500 chars]",
+        }),
+      }),
+    });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask", { sessionId: "session_root" })
+      .retrieve_tool_result as ToolWithExecute;
+    expect(String(await tool.execute?.({ tool_call_id: "lost-original", view: "arguments" }))).toContain(
+      "original arguments were not retained",
+    );
+    expect(mockSearchEE).not.toHaveBeenCalled();
   });
 
   it("checks Tier 1 (LRU cache) first", async () => {
@@ -84,7 +173,7 @@ describe("retrieve_tool_result tool", () => {
     expect(mockPrepare).toHaveBeenCalled();
   });
 
-  it("checks Tier 4 (Experience Engine) when others are missing", async () => {
+  it("does not substitute a semantic EE lesson for a missing exact tool result", async () => {
     mockSearchEE.mockResolvedValue({
       points: [
         {
@@ -96,11 +185,19 @@ describe("retrieve_tool_result tool", () => {
     const tools = createBuiltinTools(new BashTool(os.tmpdir()), "agent");
     const tool = tools.retrieve_tool_result as ToolWithExecute;
     const res = await tool.execute?.({ tool_call_id: "call_ee_1" });
-    const parsed = JSON.parse(String(res));
+    expect(String(res)).toContain("not found");
+    expect(String(res)).toContain("delegation_read");
+    expect(String(res)).not.toContain("Remote EE Content");
+    expect(mockSearchEE).not.toHaveBeenCalled();
+  });
 
-    expect(parsed.tool_call_id).toBe("call_ee_1");
-    expect(parsed.source).toContain("Tier 4 remote EE");
-    expect(parsed.content).toBe("Remote EE Content");
+  it("keeps exact EE artifact lookup separate from semantic lesson recall", async () => {
+    mockSearchEE.mockResolvedValue({ points: [{ text: "Unrelated provider lesson" }] });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "agent").ee_query as ToolWithExecute;
+    const result = String(await tool.execute?.({ query: "tool-artifact id=missing-peer-call" }));
+    expect(result).toContain("not found");
+    expect(result).not.toContain("Unrelated provider lesson");
+    expect(mockSearchEE).not.toHaveBeenCalled();
   });
 
   it("supports character limits and chunking", async () => {
@@ -131,8 +228,86 @@ describe("retrieve_tool_result tool", () => {
 });
 
 describe("search_session_history tool", () => {
+  it("rejects standalone FTS wildcards before SQLite without widening the query", async () => {
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask").search_session_history as ToolWithExecute;
+    for (const query of ["*", "  ***  "]) {
+      const response = String(await tool.execute?.({ query, query_mode: "fts" }));
+      expect(response).toContain("unsupported_fts_wildcard");
+      expect(response).toContain("term*");
+    }
+    expect(mockPrepare).not.toHaveBeenCalled();
+  });
   beforeEach(() => {
     vi.resetAllMocks();
+  });
+
+  it("quotes literal punctuation as an FTS phrase while preserving the original query in the response", async () => {
+    const all = vi.fn().mockReturnValue([
+      {
+        session_id: "history",
+        seq: 1,
+        role: "user",
+        content: 'auto-edit "safe"',
+        tool_name: null,
+        tool_args: null,
+        tool_output: null,
+      },
+    ]);
+    mockPrepare.mockReturnValue({ all });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask").search_session_history as ToolWithExecute;
+    const response = JSON.parse(String(await tool.execute?.({ query: 'auto-edit "safe"', query_mode: "literal" })));
+    expect(all).toHaveBeenCalledWith('"auto-edit ""safe"""', 0);
+    expect(response.query).toBe('auto-edit "safe"');
+    expect(response.query_mode).toBe("literal");
+  });
+
+  it("bounds historical tool blobs as valid JSON excerpts with omission metadata", async () => {
+    const blob = 'history \\" nested result \\n'.repeat(4000);
+    mockPrepare.mockReturnValue({
+      all: vi.fn().mockReturnValue(
+        Array.from({ length: 50 }, (_, i) => ({
+          session_id: "history-session",
+          seq: i,
+          role: "tool",
+          tool_name: "bash",
+          content: blob,
+          tool_args: blob,
+          tool_output: blob,
+        })),
+      ),
+    });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask").search_session_history as ToolWithExecute;
+    const output = String(await tool.execute?.({ query: "history" }));
+    expect(output.length).toBeLessThanOrEqual(MAX_TOOL_OUTPUT_CHARS);
+    const parsed = JSON.parse(output);
+    expect(parsed.truncated).toBe(true);
+    expect(parsed.match_count).toBe(50);
+    expect(parsed.returned_count).toBe(parsed.results.length);
+    expect(parsed.results[0].session_id).toBe("history-session");
+    expect(parsed.results[0].truncated_fields.tool_output).toBe(blob.length);
+    expect(parsed.results[0].tool_output.length).toBeLessThan(blob.length);
+    expect(parsed.next_offset).toBeGreaterThan(0);
+  });
+
+  it("uses the returned offset to page through remaining FTS matches", async () => {
+    const all = vi.fn().mockReturnValue([
+      {
+        session_id: "history",
+        seq: 9,
+        role: "user",
+        tool_name: null,
+        content: "history",
+        tool_args: null,
+        tool_output: null,
+      },
+    ]);
+    mockPrepare.mockReturnValue({ all });
+    const tool = createBuiltinTools(new BashTool(os.tmpdir()), "ask").search_session_history as ToolWithExecute;
+    const response = JSON.parse(String(await tool.execute?.({ query: "history", offset: 8 })));
+    expect(all).toHaveBeenCalledWith("history", 8);
+    expect(response.results[0].seq).toBe(9);
+    expect(response.next_offset).toBeNull();
+    expect(await tool.execute?.({ query: "history", offset: -1 })).toContain("ERROR");
   });
 
   it("returns search results from FTS table", async () => {

@@ -52,7 +52,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
 
-9. VERIFICATION: when finishing a task, ALWAYS self-verify your work. Use the \`selfverify_*\` native tools (start/status/result) to run the QA harness which drives the live TUI like a real user to catch regressions that unit tests can't.
+9. VERIFICATION: run focused checks for changed logic; add \`selfverify_*\` for UI/harness/workflow changes. Pure discussion needs no harness. Use VERIFICATION ROUTING in native capabilities and honor repository-required checks.
 
 10. COUNCIL/ASK: call \`convene_council\` for high-stakes/conflicting calls — its conclusion returns as the tool result; then YOU decide. In impl discussion you MAY confirm via \`ask_user\` before building, else keep going.
 

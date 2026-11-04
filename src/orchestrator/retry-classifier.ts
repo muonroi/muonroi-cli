@@ -133,9 +133,11 @@ export function classifyStreamError(err: unknown, depth = 0): TransientCheck {
   }
 
   const message = typeof e.message === "string" ? e.message : "";
+  // Local preflight counts can contain "429"; no provider request was sent.
+  if (message.startsWith("Request context overflow:")) return { transient: false, reason: "request-context-overflow" };
 
   // Rate limits (including wrapped messages from proxies like "Console Go")
-  if (/rate limit|rate-limited|429|too many requests/i.test(message)) {
+  if (/rate limit|rate-limited|\b429\b|too many requests/i.test(message)) {
     return { transient: true, reason: "rate-limit-message" };
   }
 

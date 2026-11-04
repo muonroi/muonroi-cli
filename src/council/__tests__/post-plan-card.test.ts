@@ -129,7 +129,7 @@ describe("buildPostPlanCard", () => {
   });
 
   // ── I9: don't sell an execute that the mutation gate will silently eat ────
-  describe("execute is withdrawn when the GSD mutation gate would block it (I9)", () => {
+  describe("execute is withdrawn when the FLOW mutation gate would block it (I9)", () => {
     it("a revise verdict under a blocking gate offers NO execute_plan", () => {
       // canExecute (workflow-engine.ts:227-243) blocks every mutation tool at
       // heavy depth while PLAN-VERIFY.md is not `pass`. runPlanReview wrote

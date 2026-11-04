@@ -24,7 +24,7 @@ function ctx(raw: string): PipelineContext {
     tokenBudget: 500,
     metrics: null,
     layers: [],
-    gsdPhase: null,
+    flowPhase: null,
     sessionId: null,
   } as unknown as PipelineContext;
 }

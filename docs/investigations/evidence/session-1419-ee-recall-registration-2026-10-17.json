@@ -1,0 +1,349 @@
+{
+  "capturedAt": "2026-10-17T07:55:48.215105+00:00",
+  "session": "1419c612a6b7",
+  "helper": "eb4dc060ae0e",
+  "registration": {
+    "at": "2026-10-17T07:53:20.193Z",
+    "backup": "/home/phila/.experience/config.json.backup-2026-10-17T07-53-20-189Z",
+    "addedProject": "ai-dock",
+    "beforePatterns": [
+      "storyflow",
+      "storyflow_ui",
+      "quick-codex",
+      "experience-engine",
+      "muonroi-cli",
+      "muonroi-control-plane",
+      "muonroi-license-server",
+      "muonroi-building-block",
+      "muonroi-ui-engine"
+    ],
+    "afterPatterns": [
+      "storyflow",
+      "storyflow_ui",
+      "quick-codex",
+      "experience-engine",
+      "muonroi-cli",
+      "muonroi-control-plane",
+      "muonroi-license-server",
+      "muonroi-building-block",
+      "muonroi-ui-engine",
+      "ai-dock"
+    ],
+    "otherValuesUnchanged": true,
+    "configSha256": "559449aa57ab2ebc16a4f299c5129e793ed105be89b7a46c3c2d073eaac85e56",
+    "service": "MainPID=1444131\nActiveState=active\n",
+    "reloadAt": "2026-10-17T07:53:22.333Z"
+  },
+  "preservation": {
+    "at": "2026-10-17T07:54:33.608Z",
+    "onlyRegisteredProjectChanged": true,
+    "backupMode": "600",
+    "installCommit": "2187ba68b681"
+  },
+  "serverBefore": {
+    "capturedAt": "2026-10-17T07:50:09.973Z",
+    "patterns": [
+      "storyflow",
+      "storyflow_ui",
+      "quick-codex",
+      "experience-engine",
+      "muonroi-cli",
+      "muonroi-control-plane",
+      "muonroi-license-server",
+      "muonroi-building-block",
+      "muonroi-ui-engine"
+    ],
+    "derived": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "lang": null,
+        "framework": null,
+        "project_slug": null
+      },
+      {
+        "cwd": "D:/sources/Core/muonroi-cli",
+        "lang": null,
+        "framework": null,
+        "project_slug": "muonroi-cli"
+      }
+    ],
+    "sourceHashes": {
+      "api/config.js": "598cddfd2dd0f37c56d571c4b3040838e88166ac5a7aed5233382bbe9c846da9",
+      "lib/path-canonical.js": "4fbdf3699ed03bd76422fe712dd66f0064a0e9a170c5f329c1ec3b325302ad04",
+      "api/handlers/knowledge.js": "5d9e0300644782536df725446ab39d9311f90c18c5669be9bc690f40e043cab3"
+    }
+  },
+  "serverAfter": {
+    "capturedAt": "2026-10-17T07:53:48.480Z",
+    "patterns": [
+      "storyflow",
+      "storyflow_ui",
+      "quick-codex",
+      "experience-engine",
+      "muonroi-cli",
+      "muonroi-control-plane",
+      "muonroi-license-server",
+      "muonroi-building-block",
+      "muonroi-ui-engine",
+      "ai-dock"
+    ],
+    "derived": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "lang": null,
+        "framework": null,
+        "project_slug": "ai-dock"
+      },
+      {
+        "cwd": "D:/sources/Core/muonroi-cli",
+        "lang": null,
+        "framework": null,
+        "project_slug": "muonroi-cli"
+      }
+    ],
+    "sourceHashes": {
+      "api/config.js": "598cddfd2dd0f37c56d571c4b3040838e88166ac5a7aed5233382bbe9c846da9",
+      "lib/path-canonical.js": "4fbdf3699ed03bd76422fe712dd66f0064a0e9a170c5f329c1ec3b325302ad04",
+      "api/handlers/knowledge.js": "5d9e0300644782536df725446ab39d9311f90c18c5669be9bc690f40e043cab3"
+    }
+  },
+  "liveBefore": {
+    "startedAt": "2026-10-17T07:50:08.666Z",
+    "boundary": "Fresh built native tools, configured URL/auth, actual EE read-only recall; no settings, writes or provider requests",
+    "requests": [
+      {
+        "at": "2026-10-17T07:50:08.770Z",
+        "endpoint": "http://72.61.127.154:8082/api/recall",
+        "status": 400,
+        "elapsedMs": 91,
+        "request": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "project": null,
+          "strict": true
+        },
+        "count": null,
+        "scope": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      },
+      {
+        "at": "2026-10-17T07:50:18.881Z",
+        "endpoint": "http://72.61.127.154:8082/api/recall",
+        "status": 200,
+        "elapsedMs": 10108,
+        "request": {
+          "cwd": "D:/sources/Core/muonroi-cli",
+          "project": null,
+          "strict": true
+        },
+        "count": 1,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli"
+        },
+        "error": null
+      }
+    ],
+    "results": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "projectRequired": true,
+        "unavailable": false,
+        "verifiedReceipt": false,
+        "scope": {
+          "cwd": "D:\\sources\\Core\\extension\\ai-dock",
+          "source": "cwd"
+        }
+      },
+      {
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "projectRequired": false,
+        "unavailable": false,
+        "verifiedReceipt": true,
+        "scope": {
+          "cwd": "D:\\sources\\Core\\muonroi-cli",
+          "project": "muonroi-cli",
+          "source": "task"
+        }
+      }
+    ],
+    "finishedAt": "2026-10-17T07:50:18.883Z"
+  },
+  "liveAfter": {
+    "startedAt": "2026-10-17T07:53:47.278Z",
+    "boundary": "Fresh built native tools, configured URL/auth, actual EE read-only recall; no settings, lesson writes or model-generation calls",
+    "requests": [
+      {
+        "at": "2026-10-17T07:53:57.229Z",
+        "endpoint": "http://72.61.127.154:8082/api/recall",
+        "status": 200,
+        "elapsedMs": 9939,
+        "request": {
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "project": null,
+          "strict": true
+        },
+        "count": 0,
+        "scope": {
+          "strict": true,
+          "project": "ai-dock",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/extension/ai-dock"
+        },
+        "error": null
+      },
+      {
+        "at": "2026-10-17T07:54:04.728Z",
+        "endpoint": "http://72.61.127.154:8082/api/recall",
+        "status": 200,
+        "elapsedMs": 7429,
+        "request": {
+          "cwd": "D:/sources/Core/muonroi-cli",
+          "project": null,
+          "strict": true
+        },
+        "count": 2,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli"
+        },
+        "error": null
+      },
+      {
+        "at": "2026-10-17T07:54:04.845Z",
+        "endpoint": "http://72.61.127.154:8082/api/recall",
+        "status": 400,
+        "elapsedMs": 41,
+        "request": {
+          "cwd": "D:/sources/Core/extension/not-registered-fixture",
+          "project": null,
+          "strict": true
+        },
+        "count": null,
+        "scope": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      }
+    ],
+    "results": [
+      {
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "projectRequired": false,
+        "unavailable": false,
+        "verifiedReceipt": true,
+        "scope": {
+          "cwd": "D:\\sources\\Core\\extension\\ai-dock",
+          "project": "ai-dock",
+          "source": "task"
+        },
+        "health": {
+          "ok": true,
+          "status": 200,
+          "recallReady": "not_checked"
+        }
+      },
+      {
+        "cwd": "D:\\sources\\Core\\muonroi-cli\\",
+        "projectRequired": false,
+        "unavailable": false,
+        "verifiedReceipt": true,
+        "scope": {
+          "cwd": "D:\\sources\\Core\\muonroi-cli",
+          "project": "muonroi-cli",
+          "source": "task"
+        },
+        "health": {
+          "ok": true,
+          "status": 200,
+          "recallReady": "not_checked"
+        }
+      },
+      {
+        "cwd": "D:/sources/Core/extension/not-registered-fixture",
+        "projectRequired": true,
+        "unavailable": false,
+        "verifiedReceipt": false,
+        "scope": {
+          "cwd": "D:\\sources\\Core\\extension\\not-registered-fixture",
+          "source": "cwd"
+        },
+        "health": {
+          "ok": true,
+          "status": 200,
+          "recallReady": "not_checked"
+        }
+      }
+    ],
+    "events": [],
+    "finishedAt": "2026-10-17T07:54:04.912Z"
+  },
+  "tests": {
+    "cli": {
+      "files": 6,
+      "passed": 69
+    },
+    "ee": {
+      "passed": 21
+    },
+    "buildExit": 0,
+    "compiledChecks": {
+      "settingsHomeIsIsolated": true,
+      "nativeFtsPreflight": true,
+      "completeProposalEnvelope": true,
+      "truncatedProposalRejected": true,
+      "ambiguousProposalRejected": true,
+      "lspStubHasRealPreviewGuidance": true,
+      "healthDoesNotClaimRecallReadiness": true,
+      "defaultProjectPinPreserved": true,
+      "routeStatusShowsPin": true,
+      "routeStatusDoesNotWrite": true,
+      "explicitSuggestKeepsBaselineSetting": true,
+      "autoUsesSameProviderCheaperTier": true,
+      "suggestKeepsBaselineAndReportsCandidate": true,
+      "cachedSuggestRechecksCap": true,
+      "liveTuiModeCommandAndStatus": true,
+      "nativeSelfverifyRebuiltMcpBootAndStatus": true
+    },
+    "selfverifyRunId": "f3136984-ed98-4e5f-bf4d-3e7615319447",
+    "selfverify": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "limits": [
+    "No full suite or push",
+    "No EE algorithm change",
+    "No paid model-generation trial",
+    "Individual live observations, not a latency benchmark",
+    "Initial before-probe Windows forced-shutdown assertion; after-probe exit0"
+  ],
+  "sha256": {
+    "src/utils/ee-logger.ts": "94fafeb65a514e5a803f424c6912e83bbe36150681858d0bec8b87ddcdf1ce3c",
+    "src/ee/client.ts": "cc571b2d1b12e135363844e04be152d4135d8f9f83ad1cda2b38037a224db583",
+    "src/utils/__tests__/ee-logger.test.ts": "5927259a3fe9d57c1c36a5a73ba9b1fc3c73919dbc769de77e64484fa727afee",
+    "src/utils/__tests__/ee-recall-diagnostic.test.ts": "bf5716dd8cad520a66e3814cc066b4a3a5d90eea78ba6ec095718c491f31c781",
+    "src/ee/client-failure-logging.test.ts": "af20cb7e6f4a4f96f830327a53d3ed27b9110c50726225e73721e27ba21b8fb9",
+    "dist/src/utils/ee-logger.js": "d46310673318b94083296fe8aba322aa3ab0a82e17c7a541663707664a4cae83",
+    "dist/src/ee/client.js": "5b72507ff0b22ff5b37fc4657e074f7d9e1636264a833c196d06434cf75fe32e",
+    "docs/investigations/session-1419-ee-recall-registration-2026-10-17.md": "2d8180371f01ee6ae02ee31232eda5278bdaa9cc7ec61c9cbaac62b1749e7ac8",
+    ".scratch/ee-cwd-scope/session-1419.json": "939e9ae6ecf3479a57b02821d6168dd5e7afacd5df6e273be8bee04b20d51831",
+    ".scratch/ee-cwd-scope/server-scope.json": "36b69d8241713613d6b205905a865d4035ab1c5f9a9409d72575213f4dc7b5c7",
+    ".scratch/ee-cwd-scope/server-scope-after.json": "b082226378129cf2864a7439abe4040f492bcc6afad2b213e9f6fc8223b1637b",
+    ".scratch/ee-cwd-scope/registration.json": "af7863f50ee137e5ee042a89881a6f774635edcd82b8449f0448930e0d23ee31",
+    ".scratch/ee-cwd-scope/config-preserved.json": "a6c99caa0a47e20bd88a398a5c37289d3683289566af76979653266ead86e5a6",
+    ".scratch/ee-cwd-scope/live-native-before.json": "1769391b1abafc7993522a4ca1eca0aaf85f1d507b917cfdb4b6e2ccb1545ec5",
+    ".scratch/ee-cwd-scope/live-native-after.json": "ce88ef9ae624fb3bb0afcb276ead059231d1c7161470655e91b600550bf948fd",
+    ".scratch/ee-cwd-scope/red.log": "9e643e082bdf9dcf64982f188be3d6171a5603e7e741e2b6c5f775663fc3b92d",
+    ".scratch/ee-cwd-scope/accepted-tests.log": "1c629b482b968533a4be8fd819d0ae0f09ea5f0c1d70d65c738ade687da54938",
+    ".scratch/ee-cwd-scope/ee-canonical-tests.log": "4237945589f175acaf68f42eb1b3d594bf033a9a074ab15bab8062008a29211b",
+    ".scratch/ee-cwd-scope/build.log": "8ef95d0cd01f58aa67c48cfe7726bd48c6d081e1acf90ac9ddad22007534cce5",
+    ".scratch/ee-cwd-scope/compiled-controls.json": "f29fe19a36fda94c766f2e02bccc8c80ef3a54e14d4cda874a26a4c448ea6167",
+    ".scratch/ee-cwd-scope/live-native.mjs": "ea5f126cf8dc4e2eafa86a1ac5fc07e1026950a35026e08631ffcabde8dd1cd2",
+    ".scratch/ee-cwd-scope/register-repo.mjs": "49e36e77cf2af4812bc3e161706519b0a4f362acb2d62b489dd8744e6bde288c"
+  }
+}

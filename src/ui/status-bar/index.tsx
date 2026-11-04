@@ -1,17 +1,8 @@
-/**
- * src/ui/status-bar/index.tsx
- *
- * OpenTUI status bar React component composing the 6 slots:
- * [provider/model] | [tier badge] | [in/out tokens session] | [USD session | month] | [degraded marker]
- *
- * Subscribes to statusBarStore for live updates (no polling).
- */
-
+/** Two fixed footer rows: operating state, then workspace and current-run usage. */
 import { Semantic } from "@muonroi/agent-harness-opentui";
 import * as React from "react";
 import { type SprintProgressSegment, type StatusBarState, statusBarStore } from "../../state/status-bar-store.js";
 import { computeCacheHitPct } from "./cache-hit.js";
-import { TierBadge } from "./tier-badge.js";
 import { UsdMeter } from "./usd-meter.js";
 
 function useStatusBarState(): StatusBarState {
@@ -19,113 +10,134 @@ function useStatusBarState(): StatusBarState {
   React.useEffect(() => statusBarStore.subscribe(set), []);
   return s;
 }
-
-const EE_DOT: Record<string, { color: string; symbol: string }> = {
-  ok: { color: "green", symbol: "●" }, // ●
-  warn: { color: "yellow", symbol: "●" }, // ●
-  down: { color: "red", symbol: "●" }, // ● configured but unreachable
-  off: { color: "#555555", symbol: "◌" }, // ◌ not configured — connect via /ee setup
-  unknown: { color: "gray", symbol: "○" }, // ○
-};
-
+const EE_COLORS = { ok: "green", warn: "yellow", down: "red", off: "#777777", unknown: "gray" };
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return String(n);
 }
-
-function fmtCost(usd: number): string {
-  if (usd >= 1) return `$${usd.toFixed(2)}`;
-  if (usd >= 0.01) return `$${usd.toFixed(3)}`;
-  return `$${usd.toFixed(4)}`;
-}
-
-/**
- * Format a SprintProgressSegment into the StatusBar display string.
- * Format: Sprint N/M · X/Y stories · Z%
- */
 export function renderSprintSegment(s: SprintProgressSegment): string {
   return `Sprint ${s.activeSprintNumber}/${s.totalSprints} · ${s.completedStories}/${s.totalStories} stories · ${s.overallPct}%`;
 }
-
-/** Pure render function -- testable without React hooks context. */
-export function renderStatusBar(s: StatusBarState): React.ReactElement {
-  const modelLabel =
-    s.routed_from && s.routed_from !== s.model
-      ? `${s.provider || "-"}/${s.routed_from}→${s.model}`
-      : `${s.provider || "-"}/${s.model || "-"}`;
-
-  // F5 — show context fill % (latest call vs model window) so the user can
-  // see how close they are to hitting the model's context limit, not just
-  // the cumulative billed input.
-  const ctxFill =
-    s.ctx_pct !== undefined
-      ? ` ctx${s.ctx_pct}%`
-      : s.ctx_tokens !== undefined
-        ? ` [ctx: ${fmtTokens(s.ctx_tokens)}]`
-        : "";
-  const hitPct = computeCacheHitPct(s);
-  const cacheSeg = s.cache_read_tokens
-    ? ` ⊚${fmtTokens(s.cache_read_tokens)}${hitPct !== null ? ` ${hitPct}%` : ""}`
-    : "";
-  const tokenStr = `↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}${cacheSeg}${ctxFill}`;
-  const ee = EE_DOT[s.ee_status] ?? EE_DOT.unknown;
-
-  const slots: React.ReactNode[] = [
-    React.createElement("text", { key: "pm", fg: "#5c9cf5", "data-testid": "slot-provider-model" }, modelLabel),
-    React.createElement(TierBadge, { key: "tier", tier: s.tier }),
-    React.createElement(
-      "text",
-      { key: "tok", fg: "cyan", "data-testid": "slot-tokens" },
-      `${tokenStr}${s.compaction_summary ? ` [${s.compaction_summary}]` : ""} ${fmtCost(s.session_usd)}`,
-    ),
-    React.createElement(UsdMeter, {
-      key: "usd",
-      session_usd: s.session_usd,
-      current_pct: s.current_pct,
-    }),
-    React.createElement("text", { key: "ee", fg: ee.color, "data-testid": "slot-ee" }, ee.symbol),
-  ];
-
-  // Sprint progress segment (B1) — only shown when an /ideal run is active.
-  if (s.sprint) {
-    slots.push(
-      React.createElement(
-        "text",
-        { key: "sprint", fg: "#a0e0a0", "data-testid": "slot-sprint" },
-        renderSprintSegment(s.sprint),
-      ),
-    );
-  }
-
-  if (s.degraded) {
-    slots.push(
-      React.createElement(
-        "text",
-        { key: "deg", fg: "yellow", blink: true, "data-testid": "slot-degraded" },
-        "DEGRADED",
-      ),
-    );
-  }
-
-  // Join slots with ' | ' separators
-  const joined: React.ReactNode[] = [];
-  slots.forEach((el, i) => {
-    if (i > 0) joined.push(React.createElement("text", { key: `sep-${i}` }, " | "));
-    joined.push(el);
-  });
-
-  return React.createElement("box", { "data-testid": "status-bar", flexDirection: "row" }, ...joined);
+export interface StatusBarProps {
+  width?: number;
+  cwd?: string;
+  sandbox?: boolean;
+  version?: string;
+}
+interface Segment {
+  id: string;
+  text: string;
+  color: string;
 }
 
-/** React component with hook-based subscription -- used in app.tsx layout. */
-export function StatusBar(): React.ReactNode {
+/** ASCII labels use a cell budget; OpenTUI truncates Unicode paths/models. */
+export function footerSegments(s: StatusBarState, width: number) {
+  const primary: Segment[] = [];
+  if (s.degraded || s.tier === "degraded") primary.push({ id: "degraded", text: "DEGRADED", color: "yellow" });
+  if (s.permission_mode)
+    primary.push({
+      id: "permission-mode",
+      text: s.permission_mode === "auto-edit" ? "Auto-edit" : s.permission_mode === "yolo" ? "Yolo" : "Safe",
+      color: s.permission_mode === "yolo" ? "yellow" : "gray",
+    });
+  if (width >= 100 && s.routing_mode)
+    primary.push({
+      id: "routing-mode",
+      text: `Workers: ${s.routing_mode[0].toUpperCase()}${s.routing_mode.slice(1)}`,
+      color: "gray",
+    });
+  if (width >= 120) primary.push({ id: "ee", text: `EE ${s.ee_status}`, color: EE_COLORS[s.ee_status] });
+  const hit = computeCacheHitPct(s);
+  const secondary: Segment[] = [
+    {
+      id: "context",
+      text: `Context ${s.ctx_pct !== undefined ? `${s.ctx_pct}%` : s.ctx_tokens !== undefined ? fmtTokens(s.ctx_tokens) : "—"}`,
+      color: "gray",
+    },
+    { id: "cache", text: `Cache hit ${hit === null ? "—" : `${hit}%`}`, color: "gray" },
+  ];
+  if (width >= 110)
+    secondary.push({ id: "tokens", text: `Run ↑${fmtTokens(s.in_tokens)} ↓${fmtTokens(s.out_tokens)}`, color: "gray" });
+  const compactions = s.compaction_summary?.match(/^(\d+) cmp\b/);
+  if (width >= 140 && compactions)
+    secondary.push({
+      id: "compaction",
+      text: `Compact ${compactions[1]}${s.compaction_summary?.includes("long session") ? " · Long session" : ""}`,
+      color: "gray",
+    });
+  if (width >= 170 && s.sprint) secondary.push({ id: "sprint", text: renderSprintSegment(s.sprint), color: "#a0e0a0" });
+  while (secondary.length > 2 && secondary.reduce((n, part) => n + part.text.length + 3, 0) > width - 24)
+    secondary.pop();
+  return { primary, secondary };
+}
+const lineProps = {
+  height: 1,
+  minHeight: 1,
+  maxHeight: 1,
+  flexShrink: 0,
+  flexDirection: "row" as const,
+  overflow: "hidden" as const,
+};
+const textProps = { height: 1, wrapMode: "none" as const, truncate: true };
+function fixedSegment(segment: Segment) {
+  return React.createElement(
+    "text",
+    { ...textProps, key: segment.id, flexShrink: 0, fg: segment.color, "data-testid": `slot-${segment.id}` },
+    ` · ${segment.text}`,
+  );
+}
+export function renderStatusBar(
+  s: StatusBarState,
+  { width = 180, cwd = "", sandbox = false, version }: StatusBarProps = {},
+): React.ReactElement {
+  const available = Math.max(1, width);
+  const { primary, secondary } = footerSegments(s, available);
+  const primaryBudget = primary.reduce((n, part) => n + part.text.length + 3, 0);
+  const costWidth = `Run $${s.session_usd.toFixed(2)}`.length;
+  const identityWidth = Math.max(1, available - primaryBudget - costWidth - 2);
+  const metricsWidth = secondary.reduce((n, part) => n + part.text.length + 3, 0);
+  const model = available < 100 ? s.model || "-" : `${s.provider || "-"}/${s.model || "-"}`;
+  const identity = `${available < 100 ? "Orch" : "Orchestrator"} ${model}`;
+  return React.createElement(
+    "box",
+    { "data-testid": "status-bar", width: available, height: 2, flexDirection: "column", flexShrink: 0 },
+    React.createElement(
+      "box",
+      { ...lineProps, width: available, key: "operation", "data-testid": "footer-operation" },
+      React.createElement(
+        "text",
+        { ...textProps, width: identityWidth, fg: "#5c9cf5", "data-testid": "slot-provider-model" },
+        identity,
+      ),
+      ...primary.map(fixedSegment),
+      React.createElement("box", { flexGrow: 1, minWidth: 0 }),
+      React.createElement(UsdMeter, {
+        key: "usd",
+        session_usd: s.session_usd,
+        current_pct: s.current_pct,
+        label: "Run",
+      }),
+    ),
+    React.createElement(
+      "box",
+      { ...lineProps, width: available, key: "usage", "data-testid": "footer-usage" },
+      React.createElement(
+        "text",
+        { ...textProps, width: Math.max(1, available - metricsWidth), fg: "#777777", "data-testid": "slot-workspace" },
+        `${cwd}${sandbox ? " · sandbox" : ""}${version && available >= 200 ? ` · v${version}` : ""}`,
+      ),
+      ...secondary.map(fixedSegment),
+    ),
+  );
+}
+export function StatusBar(props: StatusBarProps): React.ReactNode {
   const s = useStatusBarState();
-  const valueSummary = `${s.provider || "-"}/${s.model || "-"} ${s.degraded ? "DEGRADED" : "OK"}`;
+  const valueSummary = `${s.provider || "-"}/${s.model || "-"} ${s.degraded ? "DEGRADED" : "OK"}${s.routing_mode ? ` routing=${s.routing_mode}` : ""}; current run input=${s.in_tokens} cached=${s.cache_read_tokens}; ${s.compaction_summary ?? ""}`;
   return (
-    // biome-ignore lint/a11y/useValidAriaRole: statusbar is a valid ARIA role in the harness protocol, not a DOM element
+    // biome-ignore lint/a11y/useValidAriaRole: statusbar is a harness protocol role
     <Semantic id="status" role="statusbar" value={valueSummary} state={s.degraded ? "degraded" : undefined}>
-      {renderStatusBar(s)}
+      {renderStatusBar(s, props)}
     </Semantic>
   );
 }

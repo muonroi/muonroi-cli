@@ -14,14 +14,14 @@
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { getPlanReviewDebateRetries } from "../gsd/flags.js";
-import { planningArtifact } from "../gsd/paths.js";
-import type { PerspectiveVerdict } from "../gsd/plan-council.js";
-import { extractStructuredVerdict, VERDICT_OUTPUT_CONTRACT } from "../gsd/verdict-schema.js";
-import { advancePhase, setStateField } from "../gsd/workflow-engine.js";
 import { logInteraction } from "../storage/index.js";
 import type { StreamChunk } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { getPlanReviewDebateRetries } from "../workflow/flags.js";
+import { planningArtifact } from "../workflow/paths.js";
+import type { PerspectiveVerdict } from "../workflow/plan-council.js";
+import { extractStructuredVerdict, VERDICT_OUTPUT_CONTRACT } from "../workflow/verdict-schema.js";
+import { advancePhase, setStateField } from "../workflow/workflow-engine.js";
 import { tracedGenerate } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";
 import { type PlanPhase, renderPlanMarkdown } from "./plan-artifact.js";
@@ -330,7 +330,7 @@ export async function* runPlannerPhase(args: PlannerArgs): AsyncGenerator<Stream
 
 // ── Review stage: the debate panelists cross-review PLAN.md, leader merges ──
 //
-// src/gsd/plan-council.ts already reviews PLAN.md, but its reviewers are the
+// src/workflow/plan-council.ts already reviews PLAN.md, but its reviewers are the
 // fixed PlanPerspectiveId union (architect/skeptic/research/security/
 // implementer) with no debate context — a shape check, not a deep review. The
 // reviewers here are the panelists who just argued the topic, so each review
@@ -347,11 +347,11 @@ export interface PlanReviewOutcome {
    * `.planning/PLAN-VERIFY.md`, written alongside `reviewPath` whenever the panel
    * actually reached a merged verdict. Absent only on the early "could not read
    * PLAN.md" failure, where there is nothing to verify. This is the SAME artifact
-   * `src/gsd/workflow-engine.ts`'s `readPlanVerifyVerdict`/`canExecute` read — a
-   * panel-reviewed, leader-merged plan IS the plan verification the GSD mutation
-   * gate requires at heavy depth (src/gsd/mutation-gate.ts), so this review must
+   * `src/workflow/workflow-engine.ts`'s `readPlanVerifyVerdict`/`canExecute` read — a
+   * panel-reviewed, leader-merged plan IS the plan verification the FLOW mutation
+   * gate requires at heavy depth (src/workflow/mutation-gate.ts), so this review must
    * write it or the gate blocks every edit tool call in the execution phase that
-   * follows, even after an `approve`. Mirrors `src/gsd/plan-council.ts`'s
+   * follows, even after an `approve`. Mirrors `src/workflow/plan-council.ts`'s
    * `planVerifyPath` convention rather than inventing a new one.
    */
   planVerifyPath?: string;
@@ -435,10 +435,10 @@ export function buildReviewPrompt(
 }
 
 /**
- * `.planning/PLAN-VERIFY.md` — the artifact `readPlanVerifyVerdict` (gsd/
+ * `.planning/PLAN-VERIFY.md` — the artifact `readPlanVerifyVerdict` (flow/
  * workflow-engine.ts) actually parses (`verdict:\s*(pass|revise|block)`), so the
  * verdict line here is intentionally `pass`, not `approve` — `PerspectiveVerdict`
- * uses "approve" but the GSD gate's vocabulary is "pass" (mirrors
+ * uses "approve" but the FLOW gate's vocabulary is "pass" (mirrors
  * plan-council.ts's own `rawVerdict === "approve" ? "pass" : rawVerdict`).
  */
 function formatPlanVerify(verdict: PerspectiveVerdict, concerns: string[], leaderModelId: string): string {
@@ -539,10 +539,10 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
       });
       // A prior run's "yes" must not survive a plan that can no longer even be
       // read — mirrors applyVerdict's pass→yes / everything-else→no convention
-      // (src/gsd/plan-council.ts:176-185).
+      // (src/workflow/plan-council.ts:176-185).
       setStateField(args.cwd, "Plan Verified", "no");
       // Without this write, a PRIOR run's "verdict: pass" survives on disk in
-      // PLAN-VERIFY.md and the GSD mutation gate (canExecute) stays open even
+      // PLAN-VERIFY.md and the FLOW mutation gate (canExecute) stays open even
       // though this review just returned "block" — the artifact the gate
       // actually reads must agree with the verdict this function returns.
       const concerns = [`Could not read ${planPath}: ${msg}`];
@@ -631,9 +631,9 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     try {
       mkdirSync(dirname(reviewPath), { recursive: true });
       writeFileSync(reviewPath, formatReviewMarkdown(results, merged, args.leaderModelId, attempt), "utf8");
-      // PLAN-VERIFY.md is the artifact src/gsd/workflow-engine.ts's canExecute
+      // PLAN-VERIFY.md is the artifact src/workflow/workflow-engine.ts's canExecute
       // actually reads (see PlanReviewOutcome.planVerifyPath doc above) — write
-      // it alongside PLAN-REVIEW.md on every attempt so the GSD mutation gate
+      // it alongside PLAN-REVIEW.md on every attempt so the FLOW mutation gate
       // never sees a stale or missing verdict for this cwd.
       writeFileSync(planVerifyPath, formatPlanVerify(merged.verdict, merged.concerns, args.leaderModelId), "utf8");
     } catch (err) {
@@ -666,7 +666,7 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
 
     if (merged.verdict === "approve") {
       setStateField(args.cwd, "Plan Verified", "yes");
-      // Mirror applyVerdict (src/gsd/plan-council.ts:176-185): an approve also
+      // Mirror applyVerdict (src/workflow/plan-council.ts:176-185): an approve also
       // advances STATE.md Phase to "execute" — canExecute's OWN phase check
       // (workflow-engine.ts:239) blocks on any non-"execute", non-null phase
       // left over from a prior /ideal run in the same cwd.
@@ -681,9 +681,9 @@ export async function* runPlanReview(args: ReviewArgs): AsyncGenerator<StreamChu
     }
 
     if (merged.verdict === "block") {
-      // Mirror applyVerdict (src/gsd/plan-council.ts:176-185): pass → "yes",
+      // Mirror applyVerdict (src/workflow/plan-council.ts:176-185): pass → "yes",
       // everything else → "no". Without this, a `block` after a prior `approve`
-      // in the same cwd leaves a stale "yes" that canExecute/gsd_status/
+      // in the same cwd leaves a stale "yes" that canExecute/flow_status/
       // council-context all still read as true.
       setStateField(args.cwd, "Plan Verified", "no");
       yield phaseError({

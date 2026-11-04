@@ -170,8 +170,7 @@ export interface UsageReportOpts {
 
 /**
  * Average the orchestrator-side prompt breakdown across message-source entries.
- * This is what answers "of the 17K input tokens, how many came from the system
- * prompt vs tool definitions vs message history".
+ * Distinguishes measured system instruction size, tool definitions and history.
  */
 function printBreakdown(entries: CostLogEntry[]): void {
   const msgs = entries.filter((e) => e.callsite === "orchestrator.message" && e.breakdown);
@@ -246,6 +245,16 @@ export async function runUsageReport(opts: UsageReportOpts = {}): Promise<void> 
   }
 
   console.log(`Loaded ${entries.length} entries (source=${source})`);
+  console.log(
+    `Scope: ${opts.date ? `UTC date ${opts.date}` : "all recorded dates"}${opts.runId ? `; product run ${opts.runId}` : ""}. Costs are CLI ledger estimates, not provider invoices.`,
+  );
+  if (source === "both")
+    console.log(
+      "Combined ledgers are not a deduplicated provider invoice; use --source cost-log or --source product to inspect provenance.",
+    );
+  console.log(
+    "Drift compares logged input tokens with the initial prompt estimate; tool/system expansion and multi-step calls are not a per-request estimator accuracy measurement.",
+  );
   printTable(aggregate(entries, by), by);
 
   if (opts.breakdown) {
@@ -269,7 +278,7 @@ export async function runUsageReport(opts: UsageReportOpts = {}): Promise<void> 
   // This is the actionable output the agent can consume after any turn to self-calibrate.
   console.log("\n[agent-self] comfort snapshot (run with --breakdown for full per-turn numbers)");
   console.log(
-    "  batch system info in ONE bash with ; or && (uname; node -v; ls -la | head; git status; df -h; ps | head), then bash_output_get(run_id, mode=...) for slices — never re-run.",
+    "  batch independent system checks; preserve full build/test logs and failure exit codes. Use sufficient returned output directly; fetch missing slices with bash_output_get(run_id, mode=...).",
   );
   console.log(
     "  prefer read_file + grep over bash cat/grep/find for source; read-path budget defaults to 0 (unlimited after write/edit thanks to notifyWrite).",
@@ -370,14 +379,18 @@ export async function runSecurityAudit(
   }
   if (highRiskCmds.length > 0) {
     console.log("\nHigh-risk / sandbox cmds (redacted):");
-    [...new Set(highRiskCmds)].slice(0, 5).forEach((c) => console.log(`  ${c}`));
+    [...new Set(highRiskCmds)].slice(0, 5).forEach((c) => {
+      console.log(`  ${c}`);
+    });
   }
   if (taken.length > 0) {
     console.log("\nOther risky decisions taken:");
     taken
       .filter((d: any) => !["yolo-override", "permission-override"].includes(d.kind))
       .slice(0, 3)
-      .forEach((d: any) => console.log(`  ${d.ts} ${d.kind} ${d.reason || ""}`));
+      .forEach((d: any) => {
+        console.log(`  ${d.ts} ${d.kind} ${d.reason || ""}`);
+      });
   }
   console.log("\nTop spend by callsite (review for bloat/risk):");
   printTable(costRows, "callsite");
@@ -409,8 +422,8 @@ export async function runPerfRegression(opts: { compare?: string; json?: boolean
   const drifts = rows.filter((r) => r.driftSamples >= 2 && r.driftSum / r.driftSamples > 1.2).slice(0, 3);
   if (drifts.length > 0) {
     console.log("\nHigh drift (>1.2x) callsites (potential regression):");
-    drifts.forEach((r) =>
-      console.log(`  ${r.key} drift×${(r.driftSum / r.driftSamples).toFixed(2)} over ${r.driftSamples}`),
-    );
+    drifts.forEach((r) => {
+      console.log(`  ${r.key} drift×${(r.driftSum / r.driftSamples).toFixed(2)} over ${r.driftSamples}`);
+    });
   }
 }

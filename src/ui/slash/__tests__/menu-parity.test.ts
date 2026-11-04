@@ -26,6 +26,7 @@ import "../council.js";
 import "../council-inspect.js";
 import "../ideal.js";
 import "../route.js";
+import "../permissions.js";
 import "../status.js";
 import "../ponytail.js";
 

@@ -21,10 +21,10 @@ import { searchByText } from "../ee/bridge.js";
 import { updateLastSurfacedState } from "../ee/intercept.js";
 import { formatPendingReminder, isRecallLedgerEnabled, sessionRecallLedger } from "../ee/recall-ledger.js";
 import { getRenderSink } from "../ee/render.js";
-import { PLANNING_CHECKPOINT_QUERY } from "../gsd/ee-closure.js";
-import { isGsdNativeEnabled } from "../gsd/flags.js";
 import { logInteraction } from "../storage/interaction-log.js";
 import { classifyEeError, logEeFailure, readTimeoutEnv } from "../utils/ee-logger.js";
+import { PLANNING_CHECKPOINT_QUERY } from "../workflow/ee-closure.js";
+import { isFlowNativeEnabled } from "../workflow/flags.js";
 import { truncateToBudget } from "./budget.js";
 import type { PipelineContext } from "./types.js";
 
@@ -186,7 +186,7 @@ async function queryEeBridge(raw: string, taskType?: string | null): Promise<Bri
     // Phase 3 (ee-anti-mu): third arm for compaction checkpoints so PIL can surface
     // prior "Progress ✔ DONE / elided" without the agent having to ask "task finished?".
     const signal = AbortSignal.timeout(PIL_SEARCH_TIMEOUT_MS);
-    const planningQuery = isGsdNativeEnabled()
+    const planningQuery = isFlowNativeEnabled()
       ? `${PLANNING_CHECKPOINT_QUERY} OR compaction checkpoint`
       : 'Context checkpoint summary OR "compaction checkpoint" recent Progress DONE elided OR tool-artifact OR "tool result id="';
     const [principleRaw, behavioralRaw, checkpointRaw] = await Promise.all([
@@ -480,7 +480,7 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
   // OR (b) surfaced earlier this session (still pending). Re-injecting the full
   // body of a hint the agent already saw is the "hint lặp" repetition; the entry
   // stays in the feedback nudge (shown once) so rating is still prompted.
-  // Checkpoints are GSD status context (not rateable) — only cleared-suppressed,
+  // Checkpoints are FLOW status context (not rateable) — only cleared-suppressed,
   // they may legitimately re-surface each turn.
   const ledgerEnabled = isRecallLedgerEnabled();
   const alreadyShown = (id: string) =>

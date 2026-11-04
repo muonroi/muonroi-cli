@@ -1,0 +1,161 @@
+{
+  "manifestCreatedAt": "2026-10-16T01:44:36.326853+00:00",
+  "workspace": "D:\\sources\\Core\\muonroi-cli",
+  "scopeNote": "Historical acceptance files remain unchanged. Current validation is a separate run. Counts from different scenario selections are not interchangeable.",
+  "historicalTests": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\forensics-measurement-coverage\\tests-expanded.log",
+    "bytes": 1938,
+    "sha256": "1cffdd2893b10fc0884c37b7f82101d7babcd6dc62e54be9d495114245ff3de6",
+    "summaryLines": [
+      "Test Files  30 passed (30)",
+      "Tests  313 passed (313)",
+      "Start at  17:15:57",
+      "Duration  14.11s (transform 1.08s, setup 385ms, import 5.30s, tests 4.22s, environment 2ms)"
+    ]
+  },
+  "historicalNative": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\forensics-measurement-coverage\\native-result.json",
+    "bytes": 34932,
+    "sha256": "f4ed65f0849b3ebd9861cb6836789527c3a7a8d48af32137791f72739adb02f6",
+    "runId": "d11f2fda-4e72-449d-a499-ed566e83ba2d",
+    "checks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeOfflineTuiBootPasses": true
+    },
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "selection": {
+      "files": [],
+      "max": 1,
+      "emit": false
+    }
+  },
+  "forwardedSessionRuntime": {
+    "sessionId": "441325f7b3c5",
+    "messageSeq": 41,
+    "runId": "0617e6d7-e347-40c7-8f59-af883297397e",
+    "summary": {
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "inconclusive": 0,
+      "passRate": 0.5
+    },
+    "scenarioIds": ["smoke-boot", "passive-log"]
+  },
+  "currentFocusedTests": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\passive-log-evidence-handoff\\tests.log",
+    "bytes": 1928,
+    "sha256": "0b2d4cbb7316d64cc0d0765e9c52d1a13b291ee129515828067f5181a921adb7",
+    "summaryLines": [
+      "Test Files  9 passed (9)",
+      "Tests  72 passed (72)",
+      "Start at  08:39:57",
+      "Duration  6.05s (transform 726ms, setup 153ms, import 2.13s, tests 2.44s, environment 1ms)"
+    ]
+  },
+  "currentNative": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\passive-log-evidence-handoff\\native-result.json",
+    "bytes": 40795,
+    "sha256": "2bc65c0beb8fee4340699ba30c5a01ac4191a735793acf8cad0d62e952891be6",
+    "runId": "92c4e20a-d887-42f6-9de4-dc3e15705b63",
+    "checks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeSmokeAndPassiveLogPass": true
+    },
+    "summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "scenarioIds": ["smoke-boot", "passive-log"],
+    "conditions": "Isolated home/DB, explicit log semantic fixture, mock model and fake test credential. Forced-unauthenticated test flag disabled because it suppresses all credential sources; no production credential changes."
+  },
+  "currentSourceEvidence": {
+    "packagingFiles": [
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\packages\\agent-harness-core\\package.json",
+        "bytes": 3154,
+        "sha256": "8083c17cce05bb68b7203c94022fd63df2ec1ee8d6a3c629e4271c879870e9be"
+      },
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\packages\\agent-harness-core\\tsup.config.ts",
+        "bytes": 1753,
+        "sha256": "c632855801cd39ff5aea0602352176b73788e6d966115fd6818edac2705098f0"
+      },
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\packages\\agent-harness-core\\src\\spec-helpers.ts",
+        "bytes": 2413,
+        "sha256": "fff8560016cb3f2d8280b1e7e1d5185139236a20516c6380fdb367c582dd6b85"
+      },
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\packages\\agent-harness-core\\dist\\node\\predicate.js",
+        "bytes": 537,
+        "sha256": "84ba963f95aef854d7ede3488cf01305e88ff7d8cdb59297f526d1202f30ae9b"
+      }
+    ],
+    "plannerFiles": [
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\src\\self-qa\\scenario-planner.ts",
+        "bytes": 19720,
+        "sha256": "3f1f152ebf644d16c305a042a915593a373605d416021374d327869b4559c9f4"
+      },
+      {
+        "path": "D:\\sources\\Core\\muonroi-cli\\src\\self-qa\\__tests__\\scenario-planner.test.ts",
+        "bytes": 9806,
+        "sha256": "c762579750237d91c4caaa0f6e3b0c6efb55b56af8d9a4e2a5342082fd0d30cf"
+      }
+    ],
+    "note": "These source/build hashes describe the current working tree at manifest creation, not a reconstructed historical snapshot. Generated predicate.js is under dist/node; source driver imports are not the compiled export target."
+  },
+  "policyProvenance": {
+    "breakingDirect": {
+      "path": "D:/sources/CompanyLibs/tcis-libraries/CLAUDE.md",
+      "line": 100
+    },
+    "obsoleteRequired": {
+      "path": "D:/sources/CompanyLibs/tcis-libraries/AGENTS.md",
+      "line": 235
+    },
+    "checkedCliFiles": ["D:/sources/Core/muonroi-cli/AGENTS.md", "D:/sources/Core/muonroi-cli/CLAUDE.md"],
+    "note": "Current CLI files do not contain the forwarded Obsolete claims at the cited lines. No policy file was edited."
+  },
+  "limits": [
+    "Historical 313-test log is not a fresh full-suite run.",
+    "Mock scenarios do not prove live-provider behavior or all TUI surfaces.",
+    "Original session DB queried read-only; frozen historical artifacts not regenerated."
+  ]
+}

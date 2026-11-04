@@ -27,7 +27,7 @@
  *
  * Round 5 (G8 HIGH #1): a single ping before a pre-stream phase only buys ONE
  * extra idle window — a phase slower than `idleMs` (compaction's proposer, a
- * hook, a PIL classifier, the GSD gate's leader-tier assessor, the G9
+ * hook, a PIL classifier, the FLOW gate's leader-tier assessor, the G9
  * relatedness classifier) still starves the watchdog exactly like before.
  * `startPeriodicTurnProgressPing` fixes the CLASS instead of one instance: a
  * caller starts it when a phase begins awaiting and stops it when the phase

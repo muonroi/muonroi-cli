@@ -1,0 +1,176 @@
+{
+  "recordedAt": "2026-10-16T04:27:50.006272+00:00",
+  "status": "Research/proposal; production loader unchanged by this wave",
+  "sdkVersion": "6.0.169",
+  "baseline": {
+    "measurements": "Compiled preparation-layer character counts and CLI token estimates; no HTTP capture or provider bill",
+    "model": "deepseek-v4-flash",
+    "provider": "deepseek",
+    "instructionSha256": "1e41b1f8ba4b3e024aafb9fae2a9518e76841a3a78492b46ac9adbfda3cff789",
+    "components": {
+      "contractChars": 1988,
+      "nativeManifestChars": 13883
+    },
+    "observations": {
+      "first": {
+        "systemChars": 48412,
+        "messagesChars": 74,
+        "historyChars": 74,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 23416,
+        "toolsCount": 42,
+        "estimatedInputTokens": 16966,
+        "staticPrefixChars": 48088,
+        "dynamicChars": 324,
+        "retainsRepoInstructions": true,
+        "retainsPermission": true
+      },
+      "toolTurn": {
+        "systemChars": 14576,
+        "messagesChars": 74,
+        "historyChars": 74,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 23416,
+        "toolsCount": 42,
+        "estimatedInputTokens": 8471,
+        "staticPrefixChars": 14252,
+        "dynamicChars": 324,
+        "retainsRepoInstructions": true,
+        "retainsPermission": true
+      },
+      "chitchat": {
+        "systemChars": 12586,
+        "messagesChars": 74,
+        "historyChars": 74,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 23416,
+        "toolsCount": 42,
+        "estimatedInputTokens": 7987,
+        "staticPrefixChars": 12262,
+        "dynamicChars": 324,
+        "retainsRepoInstructions": true,
+        "retainsPermission": true
+      }
+    }
+  },
+  "sections": {
+    "skillsCount": 74,
+    "skillsCatalogChars": 19948,
+    "skillsByScope": {
+      "project": 74,
+      "user": 0
+    },
+    "nativeChars": 13883,
+    "nativeMetaTailChars": 7610,
+    "notes": "Fixed fixture inherits ancestor project skills discovered by existing directory-walk semantics; catalog metadata, not complete skill bodies."
+  },
+  "sdkProbe": {
+    "boundary": "Installed SDK loop with synthetic mock model; no CLI production-loader change or paid provider call",
+    "checks": {
+      "outerOnlyHasThreeSdkRequests": true,
+      "firstStepOnlyHasThreeSdkRequests": true,
+      "everyStepHasThreeSdkRequests": true,
+      "outerContextIsResentOnAllSdkSteps": true,
+      "singleStepOverrideDoesNotPersistOnSdk6": true,
+      "reappliedProjectionReplacesStageWithoutAccumulation": true,
+      "allRequestsRetainUserScope": true,
+      "canonicalInputRemainsUnchanged": true,
+      "perStepToolProjectionActuallyChangesSchemaRoster": true
+    },
+    "requestCount": 9
+  },
+  "sources": {
+    "sdk": "https://github.com/vercel/ai/blob/ai%406.0.169/packages/ai/src/generate-text/prepare-step.ts",
+    "contextEngineering": "https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents"
+  },
+  "artifacts": [
+    {
+      "path": ".scratch/progressive-task-context/measure.mjs",
+      "bytes": 3493,
+      "sha256": "682fcdb5edb31f9f2e1acd7a95abf5062ae8005623707102d1c37045c6755c57"
+    },
+    {
+      "path": ".scratch/progressive-task-context/before.json",
+      "bytes": 1635,
+      "sha256": "b66084cb10522d24d10babd73f4607dc7f21bdec075454296723befd79bd2b64"
+    },
+    {
+      "path": ".scratch/progressive-task-context/before.log",
+      "bytes": 2532,
+      "sha256": "5d600df48bd9c37d6d89bb5cd291b16c32543869a57ec9dab80352a88c7e2a0f"
+    },
+    {
+      "path": ".scratch/progressive-task-context/section-breakdown.json",
+      "bytes": 323,
+      "sha256": "d90b26759c54ca204ebbebf38b3ef76d9b125ba9b0aec726b0773c3b7c7fd084"
+    },
+    {
+      "path": ".scratch/progressive-task-context/probe-sdk.mjs",
+      "bytes": 4002,
+      "sha256": "ed377c76e75960f1ace1e6f6dd828597b54ef2a8ed201aeb696d2e2935c84f21"
+    },
+    {
+      "path": ".scratch/progressive-task-context/sdk-probe.json",
+      "bytes": 2348,
+      "sha256": "7abf956c66b7b9dad702b4f99a23bffc8219306f8f10426f969fe18c17166433"
+    },
+    {
+      "path": ".scratch/progressive-task-context/sdk-probe.log",
+      "bytes": 3220,
+      "sha256": "cd34a9cc425969d60cdf70bf61259ced5106992142238a044ba17fa4531c2818"
+    },
+    {
+      "path": "src/orchestrator/prompts.ts",
+      "bytes": 52252,
+      "sha256": "c22ea1216ff9d636a8a50dcf907096a3bc98329533fda87659a6dbad0ee25522"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "bytes": 262790,
+      "sha256": "b53d79afc65c58d8a94ba28fffd66552042d1e33a95dd38e1b6e4a11811c4c0c"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "bytes": 70548,
+      "sha256": "30e8e818e145417115d269803f7a4dc23fe0a5be4a2eded121353669ae062e7b"
+    },
+    {
+      "path": "src/orchestrator/cache-prefix.ts",
+      "bytes": 4565,
+      "sha256": "1ca3b42cc9061fa2b303b343f2911a79ec18588cfee54c2871de47076295600f"
+    },
+    {
+      "path": "src/orchestrator/prompt-breakdown.ts",
+      "bytes": 3553,
+      "sha256": "a8c8a71cf6342aa03f8933ae2aa341b8592b8dc4bc96c7d0ae195ce0384803b3"
+    },
+    {
+      "path": "src/pil/pipeline.ts",
+      "bytes": 21540,
+      "sha256": "8a8ab5b9cb92bc801528227d1447fb4a09ccdc926e8fdf15facbeca9cd8908fd"
+    },
+    {
+      "path": "src/utils/skills.ts",
+      "bytes": 8331,
+      "sha256": "e0010cc78f1d82c84e5334d76db48ac71c2cc53ec357163da1ea5ab5b5f947b1"
+    },
+    {
+      "path": "node_modules/ai/package.json",
+      "bytes": 3081,
+      "sha256": "740c779930500122fe49ca0ca8313117f4681712dca2e5b77c49e2b90eec41df"
+    },
+    {
+      "path": "node_modules/ai/src/generate-text/prepare-step.ts",
+      "bytes": 3175,
+      "sha256": "43abd237dc2f78a568803a9dbd397bbd4291b2f8051f59146cc9892988b5792d"
+    },
+    {
+      "path": "node_modules/ai/src/generate-text/stream-text.ts",
+      "bytes": 95949,
+      "sha256": "2c6e53b0f34876094965b5234c8103bb9520a4dc43c83a4a1ae7872e9d3f1e46"
+    }
+  ]
+}

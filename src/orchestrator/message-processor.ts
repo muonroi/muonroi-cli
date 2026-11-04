@@ -54,7 +54,7 @@ import { generateText, type ModelMessage, type StopCondition, stepCountIs, strea
 import { breadcrumb } from "../council/crash-breadcrumb.js";
 import { recordArtifact } from "../ee/artifact-cache.js";
 import { getCachedAuthToken, getCachedServerBaseUrl } from "../ee/auth.js";
-import { routeFeedback, routeModel } from "../ee/bridge.js";
+import { routeFeedback } from "../ee/bridge.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { getMistakeDetector } from "../ee/mistake-detector.js";
 import { fireAndForgetPhaseOutcome } from "../ee/phase-outcome.js";
@@ -62,9 +62,6 @@ import * as phaseTracker from "../ee/phase-tracker.js";
 import { buildScope as buildScopeForVeto } from "../ee/scope.js";
 import { fireTrajectoryEvent } from "../ee/session-trajectory.js";
 import { getTenantId as getTenantIdForVeto } from "../ee/tenant.js";
-import { isGsdNativeEnabled } from "../gsd/flags.js";
-import { getGsdLoopHost } from "../gsd/loop-host.js";
-import { readState, syncWorkflowContext } from "../gsd/workflow-engine.js";
 import type {
   PostToolUseFailureHookInput,
   PostToolUseHookInput,
@@ -124,6 +121,7 @@ import {
 } from "../providers/vision-proxy.js";
 import { wireDebug } from "../providers/wire-debug.js";
 import { reportRouteOutcome } from "../router/decide.js";
+import { getRoutingPolicy } from "../router/policy.js";
 import { decideStepRouting, getStepRouterConfig } from "../router/step-router.js";
 import { routerStore } from "../router/store.js";
 import { statusBarStore } from "../state/status-bar-store.js";
@@ -159,12 +157,14 @@ import {
   getTopLevelCompactThresholdChars,
   getTopLevelToolBudgetChars,
   isAutoCouncilEnabled,
-  isModelPinnedByProject,
   isProviderDisabled,
   loadMcpServers,
   loadValidSubAgents,
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
+import { isFlowNativeEnabled } from "../workflow/flags.js";
+import { getFlowLoopHost } from "../workflow/loop-host.js";
+import { readState, syncWorkflowContext } from "../workflow/workflow-engine.js";
 import type { AbortContext } from "./abort.js";
 import type { LegacyProvider, ProcessMessageObserver } from "./agent-options";
 import type { AskUserAskInfo } from "./ask-user.js";
@@ -636,7 +636,7 @@ export function reinjectTaggedSessionStartAcrossCompaction(
  *
  * Round 5 (G8 HIGH #1): ALSO keeps the top-level turn watchdog alive for the
  * phase's whole duration via `startPeriodicTurnProgressPing` — every phase
- * that runs through this wrapper (hooks, PIL classify, samrGuidance, gsdGate,
+ * that runs through this wrapper (hooks, PIL classify, samrGuidance, flowGate,
  * the G9 relatedness classifier, and any future addition) automatically stops
  * starving the watchdog, without a per-call-site change. This is a
  * DELIBERATE, structural fix over round 4's one-off `compaction.ts` fix,
@@ -879,7 +879,7 @@ export class MessageProcessor {
     userMessage: string,
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
-    options?: { retainModel?: boolean },
+    options?: { retainModel?: boolean; internalActivity?: boolean },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     const deps = this.deps;
     // A1 fix: mirror the existing `ownsController` pattern (orchestrator.ts
@@ -1142,7 +1142,7 @@ export class MessageProcessor {
     try {
       const cwd = deps.bash.getCwd();
       if (
-        isGsdNativeEnabled() &&
+        isFlowNativeEnabled() &&
         shouldRunGate(pilCtx, () => {
           try {
             return readState(cwd).phase;
@@ -1159,7 +1159,7 @@ export class MessageProcessor {
         try {
           const sessionModel = deps.session?.model ?? deps.modelId;
           const depth = pilCtx.modelDepthTier ?? "standard";
-          getGsdLoopHost().ensureHost(cwd, sessionModel);
+          getFlowLoopHost().ensureHost(cwd, sessionModel);
           syncWorkflowContext(cwd, sessionModel, depth);
         } catch (err) {
           logger.error("orchestrator", "Local workflow synchronization failed", { error: String(err), cwd });
@@ -1197,7 +1197,7 @@ export class MessageProcessor {
       // server when there is a high-SNR verdict. Endpoint is feature-flagged
       // server-side; 404 is silently swallowed by the client wrapper.
       try {
-        const drained = phaseTracker.setPhase(pilCtx.gsdPhase ?? null);
+        const drained = phaseTracker.setPhase(pilCtx.flowPhase ?? null);
         if (drained && drained.principleRefs.length > 0 && deps.session?.id) {
           const outcome = phaseTracker.classifyOutcome(drained);
           if (outcome) {
@@ -1287,6 +1287,15 @@ export class MessageProcessor {
       let turnModelId = deps.modelId;
       let taskHash: string | null = null;
       let routeReason: string | null = null;
+      const routingPolicy = getRoutingPolicy(deps.bash.getCwd());
+      const orchestratorOnly = deps.executionRole === "orchestrator";
+      const routingMode = orchestratorOnly || options?.retainModel ? "fixed" : routingPolicy.mode;
+      const routingSource = orchestratorOnly
+        ? "orchestrator-flagship"
+        : options?.retainModel
+          ? "retain-model"
+          : routingPolicy.source;
+      let suggestedModel: string | undefined;
       const historyHasImages = deps.messages.some(
         (m) => Array.isArray(m.content) && (m.content as Array<{ type: string }>).some((p) => p.type === "image"),
       );
@@ -1310,7 +1319,7 @@ export class MessageProcessor {
       // decide()/routeModel() through their own, separate paths and are
       // unaffected — they may still downgrade independently of the pin.
       {
-        const pinnedModel = options?.retainModel || isModelPinnedByProject() ? deps.modelId : undefined;
+        const pinnedModel = routingMode === "fixed" ? deps.modelId : undefined;
         try {
           const { decide } = await import("../router/decide.js");
           const compactionMsg = deps.messages.find(
@@ -1326,12 +1335,20 @@ export class MessageProcessor {
             cwd: deps.bash.getCwd(),
             defaultModel: deps.modelId,
             defaultProvider: deps.providerId,
-            ...(pinnedModel ? { forcedModel: pinnedModel } : {}),
+            routingMode,
+            refuseModelSubstitution: orchestratorOnly,
+            ...(pinnedModel
+              ? {
+                  forcedModel: pinnedModel,
+                  forcedReason:
+                    routingSource === "project-model-pin" ? "project-model-pin" : `routing-fixed:${routingSource}`,
+                }
+              : {}),
             pil: {
               domain: pilCtx.domain,
               taskType: pilCtx.taskType,
               confidence: pilCtx.confidence,
-              gsdPhase: pilCtx.gsdPhase ?? null,
+              flowPhase: pilCtx.flowPhase ?? null,
               activeRunId: pilCtx.activeRunId ?? null,
               recentTurnsSummary: deps.buildRecentTurnsSummary(),
               projectSize: deps.estimateProjectSize(),
@@ -1344,6 +1361,13 @@ export class MessageProcessor {
               compactionSummary,
             },
           });
+          if (orchestratorOnly && routeDecision.model === "HALT") {
+            yield {
+              type: "content",
+              content: `Request refused: the selected orchestrator model exceeds the configured spend cap (${routeDecision.reason}). No model was substituted.\n`,
+            };
+            return;
+          }
           if (routeDecision.model && routeDecision.model !== "HALT") {
             // Respect user's default model when it has a vision proxy and the
             // current turn (or history) has images — the proxy will convert
@@ -1354,12 +1378,14 @@ export class MessageProcessor {
             const canHandleImages =
               !defaultHasVisionProxy || !imagesOnTurn || (await canHandleImagesForTextOnlyModel(deps.modelId));
             const skipVisionRoute = defaultHasVisionProxy && imagesOnTurn && canHandleImages;
-            if (!skipVisionRoute) {
+            if (!orchestratorOnly && !skipVisionRoute) {
               turnModelId = routeDecision.model;
             }
           }
           taskHash = routeDecision.taskHash ?? null;
           routeReason = routeDecision.reason ?? null;
+          suggestedModel = routeDecision.suggestedModel;
+          statusBarStore.setState({ routing_mode: routingMode, suggested_model: suggestedModel });
           // Update status bar with router switch info. Also reset back to the
           // session default when the router does NOT switch on this turn —
           // otherwise the bar stays "stuck" showing the previously-routed model
@@ -1381,12 +1407,16 @@ export class MessageProcessor {
               output_summary: turnModelId !== deps.modelId ? `routed→${turnModelId}` : `kept ${turnModelId}`,
             });
           }
-        } catch {
+        } catch (err) {
+          if (orchestratorOnly) throw err;
           // Router unavailable — use session default model (skip if provider is disabled)
-          if (!isProviderDisabled(deps.providerId as ProviderId)) {
-            const eeRoute = await routeModel(userMessage, {}, deps.providerId).catch(() => null);
-            taskHash = eeRoute?.taskHash ?? null;
-          }
+          logger.file("warn", "orchestrator", "Main routing failed; retaining session model", {
+            error: err instanceof Error ? err.message : String(err),
+            routingMode,
+            routingSource,
+          });
+          routeReason = "router-error:session-default";
+          statusBarStore.setState({ routing_mode: routingMode, suggested_model: undefined });
         }
         breadcrumb("pre-stream.routerDecide.end", { sessionId: _sessionIdForBreadcrumbs });
       }
@@ -1398,15 +1428,18 @@ export class MessageProcessor {
           primaryModelId: turnModelId,
           imageCount,
         });
-        if (plan.strategy === "native_model") {
+        if (plan.strategy === "native_model" && !orchestratorOnly) {
           turnModelId = plan.fallback.modelId;
           routeReason = routeReason ? `${routeReason}; vision-native-fallback` : "vision-native-fallback";
           yield {
             type: "content",
             content: `[Vision: routed to ${plan.fallback.modelId} — no proxy backend; using native image support]\n`,
           };
-        } else if (plan.strategy === "unavailable") {
-          visionUnavailableNotice = plan.notice;
+        } else if (plan.strategy === "unavailable" || (plan.strategy === "native_model" && orchestratorOnly)) {
+          visionUnavailableNotice =
+            plan.strategy === "unavailable"
+              ? plan.notice
+              : "The orchestrator model was retained. Delegate image analysis to a suitable worker instead of switching the main model.";
         }
         breadcrumb("pre-stream.visionPlan.end", { sessionId: _sessionIdForBreadcrumbs });
       }
@@ -1426,6 +1459,9 @@ export class MessageProcessor {
               // an EE premium pick down to balanced — queryable via event_subtype +
               // data.reason to audit cost-leak prevention (session 89b34ce9a4e8 class).
               reason: routeReason,
+              routingMode,
+              routingSource,
+              suggestedModel,
               taskHash,
               pilTaskType: pilCtx.taskType ?? null,
               pilIntentKind: pilCtx.intentKind ?? null,
@@ -1472,6 +1508,10 @@ export class MessageProcessor {
           turnProvider = deps.requireProvider();
         }
       } else if (isProviderDisabled(deps.providerId as ProviderId)) {
+        if (orchestratorOnly)
+          throw new Error(
+            "The selected orchestrator provider is disabled. Enable it or explicitly choose another provider; no automatic substitution was made.",
+          );
         // Session provider is disabled — find a non-disabled alternative
         const fallback = await deps.councilManager.resolveNonDisabledFallback();
         turnModelId = fallback.modelId;
@@ -1592,6 +1632,13 @@ export class MessageProcessor {
         breadcrumb("pre-stream.visionProxy.end", { sessionId: _sessionIdForBreadcrumbs });
       }
 
+      // Provenance is host-owned, never inferred from user text. It hides only
+      // the wake receipt in the TUI; both full prompts remain in main's context.
+      if (options?.internalActivity) {
+        for (const message of [userModelMessage, userEnrichedMessage]) {
+          message.providerOptions = { ...message.providerOptions, muonroi: { internalActivity: true } };
+        }
+      }
       deps.messages.push(userModelMessage);
       // Phase A5 — write-ahead the user row so `recordUsage` mid-stream can
       // attribute usage to a real `message_seq` instead of falling back to
@@ -1684,7 +1731,7 @@ export class MessageProcessor {
         deps.bash.getSandboxSettings(),
         deps.providerId,
         deps.getResumeDigest(),
-        { chitchat: isChitchat },
+        { chitchat: isChitchat, permissionMode: deps.permissionMode, executionRole: deps.executionRole },
       );
       // F3c — tool-turn system prompt: same context, but skips native-capabilities
       // and skills sections (~4K tokens) that the model already saw on the first
@@ -1698,7 +1745,12 @@ export class MessageProcessor {
         deps.bash.getSandboxSettings(),
         deps.providerId,
         deps.getResumeDigest(),
-        { chitchat: isChitchat, toolTurn: true },
+        {
+          chitchat: isChitchat,
+          toolTurn: true,
+          permissionMode: deps.permissionMode,
+          executionRole: deps.executionRole,
+        },
       );
       if (deps.getResumeDigest()) deps.setResumeDigest(null);
       // Skip vision/playwright guidance unless the user's message has a URL
@@ -1733,7 +1785,11 @@ export class MessageProcessor {
           turnModelId,
         ),
       );
-      const runtime = resolveModelRuntime(turnModelId, { stage: "main", sessionId: deps.session?.id });
+      const runtime = resolveModelRuntime(turnModelId, {
+        stage: "main",
+        sessionId: deps.session?.id,
+        reasoningEffort: deps.reasoningEffort,
+      });
       const modelInfo = runtime.modelInfo;
 
       // Keep the user's static routing choice. Server advice is optional leader information.
@@ -1742,9 +1798,11 @@ export class MessageProcessor {
       // (see "Gap (d) / round-2 fix" above) — SAMR must not downgrade a
       // pinned orchestrator turn's tool-continuation steps. See
       // decideStepRouting's `opts.pinned` doc comment in router/step-router.ts.
-      const stepRouterDecision = decideStepRouting(turnModelId, deps.providerId, stepRouterCfg, {
-        pinned: options?.retainModel || isModelPinnedByProject(),
-      });
+      const stepRouterDecision = orchestratorOnly
+        ? { phase1ModelId: turnModelId, phase2ModelId: null, reason: "orchestrator owns explicit worker dispatch" }
+        : decideStepRouting(turnModelId, deps.providerId, stepRouterCfg, {
+            pinned: routingMode !== "auto",
+          });
       const stepRouterPhase: "phase1" | "phase2" | "done" = stepRouterDecision.phase2ModelId ? "phase1" : "done";
       const phase2Runtime = stepRouterDecision.phase2ModelId
         ? resolveModelRuntime(stepRouterDecision.phase2ModelId, { stage: "main", sessionId: deps.session?.id })
@@ -1818,6 +1876,7 @@ export class MessageProcessor {
           MAX_STREAM_RETRIES,
           subagents,
           systemParts,
+          toolTurnParts,
           playwrightGuidance,
           _hasResponseTools,
           _pilResponseTools,

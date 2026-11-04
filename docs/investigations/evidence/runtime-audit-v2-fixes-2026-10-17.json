@@ -1,0 +1,340 @@
+{
+  "capturedAt": "2026-10-17T02:41:05.816Z",
+  "baseHead": "2d33b8d9a557a8fec30ea4713d98b8469f8f5603",
+  "provenance": "Dirty working tree; source hashes identify complete files, not attribution of pre-existing changes. Executed local dist and new local tools-MCP, not a release.",
+  "checks": {
+    "settingsHomeIsIsolated": true,
+    "nativeFtsPreflight": true,
+    "completeProposalEnvelope": true,
+    "truncatedProposalRejected": true,
+    "ambiguousProposalRejected": true,
+    "lspStubHasRealPreviewGuidance": true,
+    "healthDoesNotClaimRecallReadiness": true,
+    "defaultProjectPinPreserved": true,
+    "routeStatusShowsPin": true,
+    "routeStatusDoesNotWrite": true,
+    "explicitSuggestKeepsBaselineSetting": true,
+    "autoUsesSameProviderCheaperTier": true,
+    "suggestKeepsBaselineAndReportsCandidate": true,
+    "cachedSuggestRechecksCap": true,
+    "liveTuiModeCommandAndStatus": true,
+    "nativeSelfverifyRebuiltMcpBootAndStatus": true
+  },
+  "testEvidence": "\n RUN  v4.1.5 D:/sources/Core/muonroi-cli\n\nWarning: A vi.mock(\"bun:sqlite\") call in \"D:/sources/Core/muonroi-cli/src/__test-stubs__/vitest-setup.ts\" is not at the top level of the module. Although it appears nested, it will be hoisted and executed before any tests run. Move it to the top level to reflect its actual execution order. This will become an error in a future version.\nSee: https://vitest.dev/guide/mocking/modules#how-it-works\n\n Test Files  16 passed (16)\n      Tests  174 passed (174)\n   Start at  09:37:56\n   Duration  26.33s (transform 2.73s, setup 292ms, import 9.86s, tests 12.99s, environment 1ms)\n\n",
+  "buildTail": "ESM dist\\node\\chunk-UBXPY6FD.js         27.98 KB\nESM dist\\node\\mock-llm.js               343.00 B\nESM dist\\node\\chunk-26UMEQLL.js         13.66 KB\nESM dist\\node\\chunk-5WRI5ZAA.js         1.50 KB\nESM dist\\node\\mcp-server.js             641.24 KB\nESM dist\\node\\chunk-6536JDWU.js         732.44 KB\nESM ⚡️ Build success in 153ms\n  [sync-version] wrote src\\generated\\version.ts (v1.9.0)\n  [fix-extensions] scanned 3420 file(s), rewrote 410 import(s)\n",
+  "controlWindow": {
+    "startedAt": "2026-10-17T02:39:02.079Z",
+    "finishedAt": "2026-10-17T02:39:08.999Z"
+  },
+  "tui": [
+    {
+      "verdict": "pass",
+      "scenarioId": "route-suggest-live-tui",
+      "durationMs": 1501,
+      "checks": [
+        {
+          "expectation": {
+            "kind": "noErrorToast"
+          },
+          "passed": true,
+          "reason": "No error-level toasts observed"
+        },
+        {
+          "expectation": {
+            "kind": "selectorPresent",
+            "selector": "id=status value*=routing=suggest"
+          },
+          "passed": true,
+          "reason": "Selector 'id=status value*=routing=suggest' matched 1 node(s)"
+        }
+      ]
+    }
+  ],
+  "runId": "5880c6c0-9775-477a-9a85-fdc6d3cf1484",
+  "harness": {
+    "summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "skipped": []
+  },
+  "ee": {
+    "startedAt": "2026-10-17T02:35:18.274Z",
+    "boundary": "Current configured endpoint and compiled native tools; no settings/tokens changed or logged",
+    "requests": [
+      {
+        "host": "72.61.127.154:8082",
+        "path": "/health",
+        "method": "GET",
+        "status": 200,
+        "elapsedMs": 89
+      },
+      {
+        "host": "72.61.127.154:8082",
+        "path": "/api/recall",
+        "method": "POST",
+        "status": 200,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli/"
+        },
+        "count": 2,
+        "responseKeys": ["text", "entries", "count", "query", "scope"],
+        "elapsedMs": 8176
+      },
+      {
+        "host": "localhost:8082",
+        "path": "/health",
+        "method": "GET",
+        "error": "Unable to connect. Is the computer able to access the url?",
+        "elapsedMs": 6
+      }
+    ],
+    "calls": [
+      {
+        "name": "ee_health",
+        "elapsedMs": 91,
+        "unavailable": false,
+        "scopeUnverified": false,
+        "chars": 121,
+        "health": {
+          "ok": true,
+          "status": 200,
+          "check": "reachability",
+          "endpoint": "http://72.61.127.154:8082/health",
+          "recallReady": "not_checked"
+        }
+      },
+      {
+        "name": "ee_query",
+        "elapsedMs": 8182,
+        "unavailable": false,
+        "scopeUnverified": false,
+        "chars": 665
+      }
+    ],
+    "configuredEndpoint": "http://72.61.127.154:8082",
+    "localComparison": {
+      "ok": false,
+      "detail": "Unable to connect. Is the computer able to access the url?",
+      "elapsedMs": 7
+    },
+    "finishedAt": "2026-10-17T02:35:27.311Z"
+  },
+  "hashes": [
+    {
+      "file": "src/router/policy.ts",
+      "sha256": "24c5bba1355655de828fced3befe1b53317c6353b5e93a6c875d7c63b52aaf95"
+    },
+    {
+      "file": "src/router/decide.ts",
+      "sha256": "139622fd7e113f5f177ea082f2a955de4f52eb250d619305aca812985143d499"
+    },
+    {
+      "file": "src/router/types.ts",
+      "sha256": "fdcc2807bf6577495a8a9fa21f7ea8ef869261bae4f3297237b6de7ee10a78a2"
+    },
+    {
+      "file": "src/utils/settings.ts",
+      "sha256": "587fe9292d1ed6823602b2791f426f9e2b619b5acb5a24039ea7de1aa3d36eab"
+    },
+    {
+      "file": "src/orchestrator/message-processor.ts",
+      "sha256": "c0091f052be765c658ce6509e04fbd805eb167ba98e2fe4c2619b33f3672b830"
+    },
+    {
+      "file": "src/state/status-bar-store.ts",
+      "sha256": "4519295642109f42d98ebdfe74233bc7901ff86e62a761d25ac7b803a9753f7b"
+    },
+    {
+      "file": "src/ui/slash/route.ts",
+      "sha256": "b94cee6112bcfea707e8dd0dc7b720ece740a9973b69c2886a256886b450c2f6"
+    },
+    {
+      "file": "src/ui/status-bar/index.tsx",
+      "sha256": "2aa6ed87c06812db49a620032c3bb8ba49bdc97296b9cde068f7bb76a5e42a3b"
+    },
+    {
+      "file": "src/orchestrator/compaction-proposal.ts",
+      "sha256": "dfbd6c36d5e538523ae8f83c1706dc323776a369f46673ce1aede1ff4a178c2c"
+    },
+    {
+      "file": "src/orchestrator/compaction.ts",
+      "sha256": "9d98a229de55fc1609fb6e1bf7659ddca49d5e4c6dbcaaee9191425bff0aacf5"
+    },
+    {
+      "file": "src/orchestrator/compaction-proposer-prompt.ts",
+      "sha256": "17765897e41be6282f7de68bc7f01c5e530b0e7d83f9e5a7a2b289ab2794ff4e"
+    },
+    {
+      "file": "src/ee/search.ts",
+      "sha256": "9524177ebd31799c36c9e4790bb9e82aeaf9f3ec2daf5be902e5c33ec3c932ba"
+    },
+    {
+      "file": "src/tools/registry.ts",
+      "sha256": "279c8c0612c2cc4b225ebb6fe8a60378ea427a4be128666a6b7e75337ecb4327"
+    },
+    {
+      "file": "src/tools/native-tools.ts",
+      "sha256": "a8287c5c01e8873e6c630741103eeb34ccfd79cf843984d946a0eaae94eca67b"
+    },
+    {
+      "file": "src/router/policy.test.ts",
+      "sha256": "5cce5768f9960a466244e27c3ca1aea9a7ebf38f16e7d6d90c69b82f7121b2ef"
+    },
+    {
+      "file": "src/router/decide.test.ts",
+      "sha256": "ddb78ade666d04699e327a06cf5970b01a9700f3be6691759c66372d82137659"
+    },
+    {
+      "file": "src/router/__tests__/decide-forced-model-pin.test.ts",
+      "sha256": "76f1d2338b80c7cce992a8cda332a3dcdabdd517236a380226306863273937c4"
+    },
+    {
+      "file": "src/ui/slash/route-policy.test.ts",
+      "sha256": "0ac59a7df7cbaa100d98a6549f7840d361e84b150eb93227e8fc24408a8fdd4b"
+    },
+    {
+      "file": "src/ui/status-bar/index.test.tsx",
+      "sha256": "7f4672d6a57dbf0bdab899dfeffd8b54689aed87d5f793c25a4cd05d73a8a307"
+    },
+    {
+      "file": "src/orchestrator/__tests__/message-processor-model-pin-routing.test.ts",
+      "sha256": "29d325c6d9ba2e758e2ea842ef3d12b78f62d60daf1cd7ea4ed5174c1943a9cd"
+    },
+    {
+      "file": "src/orchestrator/compaction-proposal.test.ts",
+      "sha256": "7dfd15289cc3372063877239c8e641a592bee37e1c1526ca635330cb0b9c248b"
+    },
+    {
+      "file": "src/orchestrator/__tests__/compaction-proposer-stall.test.ts",
+      "sha256": "0a3d81bad338bb535be3ecff1f14b60eec43bb6052645ea1c045ed0620cbd3cf"
+    },
+    {
+      "file": "src/ee/health-contract.test.ts",
+      "sha256": "8157e09d5809922440eb9dd161ab5e96eae645d6d17b3d8197bbbdab7278f4a9"
+    },
+    {
+      "file": "src/tools/registry-hydration-tools.test.ts",
+      "sha256": "c12f6ed5bff9153592c953c31121cfd8f8d0cf524ffcb34d0c562cbcdd825bcd"
+    },
+    {
+      "file": "dist/src/router/policy.js",
+      "sha256": "80d37c516945136b3d693dcc3641d6d61a9d48ed6e3a665201a54b21e2a49400"
+    },
+    {
+      "file": "dist/src/router/decide.js",
+      "sha256": "56808d0c12c40984f72eb1355811e03a8fa9a1c112a25bdba3bb0cdd88a56fc1"
+    },
+    {
+      "file": "dist/src/router/types.js",
+      "sha256": "01ae2a5b120382f9a648ced7ee8507493a134f216d100fc61600c6c9738235d2"
+    },
+    {
+      "file": "dist/src/utils/settings.js",
+      "sha256": "cd71edb7cc5a486dea6b97d618cd0963e2dc71bbfe47e4c4ef034fb614fb7cde"
+    },
+    {
+      "file": "dist/src/orchestrator/message-processor.js",
+      "sha256": "c110ae8a709cebd13a5a293d632b8bd575ff3c5b892f4e610f6dc2bd16117368"
+    },
+    {
+      "file": "dist/src/state/status-bar-store.js",
+      "sha256": "767a843d6dce0cfd4e87c9aaa9ec1e925fcdb7cba7a4a8c1c92afd88a8948242"
+    },
+    {
+      "file": "dist/src/ui/slash/route.js",
+      "sha256": "7c8548c1fcb641c322b10182ec3d1efb89fe4d719f1ff792e691c1e9e0653031"
+    },
+    {
+      "file": "dist/src/ui/status-bar/index.js",
+      "sha256": "04204850a66b71c9d5eb5955fd3ce7cd4f885bfc381450f5c6d6c694088013e5"
+    },
+    {
+      "file": "dist/src/orchestrator/compaction-proposal.js",
+      "sha256": "76e05bcd66d749cddd3f651fde7328d16858c8a1705b0b756a121d97cc3227ea"
+    },
+    {
+      "file": "dist/src/orchestrator/compaction.js",
+      "sha256": "5e6967ad6dde889ca3a84cb221ae0f011e6e2006aeb3838dde7d5405cabc39c1"
+    },
+    {
+      "file": "dist/src/orchestrator/compaction-proposer-prompt.js",
+      "sha256": "b9357af2e82e5a61755be1e5edfd1fc780ea8cf2d0e0de13a090f9deb209feb7"
+    },
+    {
+      "file": "dist/src/ee/search.js",
+      "sha256": "dcffc49f11da25e236c26584386aee9f2ccfa76d4d4124241282f65eb929d507"
+    },
+    {
+      "file": "dist/src/tools/registry.js",
+      "sha256": "a4633cbc7162b8d2238e3d818a74d49c66f427f80a6f1603fb0fb8fb1628b491"
+    },
+    {
+      "file": "dist/src/tools/native-tools.js",
+      "sha256": "3fd6434644898e57c3bf4f016b945ebc8142b82de5c879a0c25cca79d7c8d221"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/compiled-controls.mjs",
+      "sha256": "cafe5a312955c161d92b7087cdeb959cb01d00d13e1b776598a6e369d554dcd0"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/compiled-controls.json",
+      "sha256": "a6826a246130200d0621cf9c4d17416c2779090e31be4330d508ee4d97562be9"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/compiled-controls.log",
+      "sha256": "1f9a4dea9e3c2a8b0ba20184d589b5c89842070af9157f1d63a52b209cb17aa7"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/accepted-tests.log",
+      "sha256": "42a6b8807d9a5578cfe9c1f98d09d41212fc0f282c4152e176625fd3f2ebc38b"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/build.log",
+      "sha256": "ef0c8152f7102efc06cb79b361eacfd69e88e9eea23837cb50b558f3f9394896"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/ee-retry.mjs",
+      "sha256": "e1ba86705d0ccf550f87795ca07169f01220801727477a27b7c6551b6c717cc1"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/ee-retry.json",
+      "sha256": "f29eae00fbd0ef80cf3ed932c855d87cb8400df43fb8220859dd9ac240eb8b3e"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/ee-retry.log",
+      "sha256": "bc5f69c8c68606881591a96f2943427ecb8be3d523406034e5b369482cde827d"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/reproduce.ps1",
+      "sha256": "03133484259585aafe367ac14f946c3c13d442e7c66fd29dd49f317a6dfc1fe9"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/phase1-red.log",
+      "sha256": "e0a6246d6ca71dafdca6b9b8dabd9ddcbaed75e47a6204e616842f8a7225a1d9"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/routing-red.log",
+      "sha256": "225938eb4ef5632073ea3cbdc241a3c355e043afd8eab67c5ec80fef851d40e9"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/cache-cap-red.log",
+      "sha256": "d72bafd3f30f57b333ad2a9d8ee850e344de71114695170dac9bac81344f4511"
+    },
+    {
+      "file": ".scratch/runtime-audit-v2-fixes/cache-bound-red.log",
+      "sha256": "643cc65adbcc0d1c2c6d2a8e93841bfc8b54c16500ee07be267ba2196de5e76f"
+    }
+  ],
+  "limits": [
+    "Focused suite only; no full-suite/push/publication/deployment",
+    "Offline mock model for TUI; no provider cost/quality experiment",
+    "Supplied runtime-audit-evidence-v2.json missing at stated path"
+  ]
+}

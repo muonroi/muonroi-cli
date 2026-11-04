@@ -23,6 +23,7 @@ import type { Theme } from "../theme.js";
 import { trunc } from "../utils/text.js";
 import { activeToolGroupHeader, doneToolGroupSummary } from "../utils/tool-summary.js";
 import { toolLabel } from "../utils/tools.js";
+import { internalActivityForDisplay } from "../utils/internal-activity.js";
 import { DiffView } from "./diff-view.js";
 
 // Tools whose result carries a FileDiff worth rendering inline under the item
@@ -68,7 +69,8 @@ export function bashCommandLines(tc: ToolCall): string[] | null {
  * One-line prose outcome for a write/edit, e.g. "Wrote 161 lines to a.ts" or
  * "Edited a.ts (+12 -3)". Null when the tool isn't a file mutation.
  */
-export function writeOutcomeLine(toolName: string, diff: FileDiff): string | null {
+export function writeOutcomeLine(toolName: string, diff: FileDiff, preview = false): string | null {
+  if (preview) return `Preview ${diff.filePath} (+${diff.additions} -${diff.removals}); not applied`;
   if (toolName === "write_file") {
     const n = diff.additions;
     return `Wrote ${n} line${n === 1 ? "" : "s"} to ${diff.filePath}`;
@@ -99,10 +101,10 @@ export interface ToolGroupViewProps {
 }
 
 export function ToolGroupView({ entry, t, expanded, modeColor }: ToolGroupViewProps) {
-  const g = entry.toolGroup;
+  const g = internalActivityForDisplay(entry)?.toolGroup;
   if (!g) return null;
 
-  const toolNames = g.items.map((it) => it.toolCall.function.name);
+  const toolNames = g.items.map((it) => (it.result?.preview ? "edit_file_preview" : it.toolCall.function.name));
   const elapsed = (g.finishedAt ?? Date.now()) - g.startedAt;
   const errorCount = g.items.filter((it) => it.failed).length;
   const total = g.items.length;
@@ -186,9 +188,11 @@ export function ToolGroupView({ entry, t, expanded, modeColor }: ToolGroupViewPr
                   {/* State the outcome in words before the diff renders it in
                     numbers — "Wrote 161 lines to x.ts" is what the user asked
                     for, and it is the only part that survives a glance. */}
-                  {diff && writeOutcomeLine(it.toolCall.function.name, diff) && (
+                  {diff && writeOutcomeLine(it.toolCall.function.name, diff, it.result?.preview) && (
                     <box paddingLeft={2}>
-                      <text fg={t.textMuted}>{writeOutcomeLine(it.toolCall.function.name, diff)}</text>
+                      <text fg={t.textMuted}>
+                        {writeOutcomeLine(it.toolCall.function.name, diff, it.result?.preview)}
+                      </text>
                     </box>
                   )}
                   {diff && <DiffView t={t} diff={diff} />}

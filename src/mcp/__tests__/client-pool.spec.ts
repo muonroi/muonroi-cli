@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../utils/logger.js";
 
 // Pool reuse semantics: connect a server ONCE, reuse the live client across
 // turns, evict on failure (retry) and on a post-connect connection error
@@ -27,6 +28,7 @@ const connected = (id: string, close: () => Promise<void> = async () => {}) => (
   tools: { [`mcp_${id}__ping`]: { execute: async () => "pong" } },
   client: { close },
 });
+const originalTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 
 describe("acquireMcpTools — cross-turn client pool", () => {
   beforeEach(() => {
@@ -35,6 +37,93 @@ describe("acquireMcpTools — cross-turn client pool", () => {
   });
   afterEach(async () => {
     await closeAllMcpClients();
+    vi.restoreAllMocks();
+    if (originalTTY) Object.defineProperty(process.stdout, "isTTY", originalTTY);
+    else delete (process.stdout as { isTTY?: boolean }).isTTY;
+  });
+
+  it.each([false, true])("warmup logs partial readiness and HTTP failure only to file (TTY=%s)", async (tty) => {
+    Object.defineProperty(process.stdout, "isTTY", { configurable: true, value: tty });
+    const log = vi.spyOn(logger, "file").mockImplementation(() => undefined);
+    const terminal = [
+      vi.spyOn(console, "log").mockImplementation(() => undefined),
+      vi.spyOn(console, "warn").mockImplementation(() => undefined),
+      vi.spyOn(console, "error").mockImplementation(() => undefined),
+      vi.spyOn(process.stdout, "write").mockReturnValue(true),
+    ];
+    connectOneServer.mockImplementation(async (s: { id: string }) => {
+      if (s.id === "broken") throw new Error('HTTP 401: {"error":"invalid_token"}');
+      return connected(s.id);
+    });
+    await warmMcpClients([srv("good"), srv("broken")], true);
+    for (const sink of terminal) expect(sink).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith("info", "mcp", expect.stringContaining("1/2"));
+    expect(log).toHaveBeenCalledWith(
+      "warn",
+      "mcp",
+      expect.stringContaining('mcp_auth_required: broken: HTTP 401: {"error":"invalid_token"}'),
+    );
+    expect(connectOneServer).toHaveBeenCalledTimes(2);
+    expect(__mcpClientPoolSize()).toBe(1);
+  });
+
+  it("does not retry unchanged rejected auth each turn, but new credentials connect immediately", async () => {
+    const server = {
+      id: "auth-service",
+      label: "Auth service",
+      enabled: true,
+      transport: "http" as const,
+      url: "https://auth.invalid/mcp",
+    };
+    connectOneServer.mockRejectedValue(new Error("MCP HTTP Transport Error: HTTP 401 invalid_token"));
+    for (let i = 0; i < 3; i++) {
+      const result = await acquireMcpTools([server]);
+      expect(result.errors.join(" ")).toContain("mcp_auth_required");
+      expect(result.errors.join(" ")).toContain("/mcp");
+      expect(Object.keys(result.tools)).toHaveLength(0);
+    }
+    expect(connectOneServer).toHaveBeenCalledTimes(1);
+    connectOneServer.mockImplementation(async (s: { id: string }) => connected(s.id));
+    const result = await acquireMcpTools([{ ...server, headers: { Authorization: "Bearer fixture-updated" } }]);
+    expect(result.errors).toHaveLength(0);
+    expect(connectOneServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not replay a tool that returns an authentication transport error", async () => {
+    const execute = vi.fn().mockRejectedValue(new Error("MCP HTTP Transport Error: HTTP 401 invalid_token"));
+    connectOneServer.mockResolvedValue({
+      tools: { mcp_auth__ping: { execute } },
+      client: { close: vi.fn().mockResolvedValue(undefined) },
+    });
+    const bundle = await acquireMcpTools([srv("auth")]);
+    await expect(bundle.tools.mcp_auth__ping!.execute!({}, {} as never)).rejects.toThrow("mcp_auth_required");
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(connectOneServer).toHaveBeenCalledTimes(1);
+    const next = await acquireMcpTools([srv("auth")]);
+    expect(next.errors.join(" ")).toContain("mcp_auth_required");
+    expect(connectOneServer).toHaveBeenCalledTimes(1);
+  });
+
+  it("allows a new auth attempt after the bounded cooldown", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1000);
+    connectOneServer
+      .mockRejectedValueOnce(new Error("HTTP 401 invalid_token"))
+      .mockImplementation(async (s: { id: string }) => connected(s.id));
+    await acquireMcpTools([srv("auth")]);
+    now.mockReturnValue(62000);
+    const result = await acquireMcpTools([srv("auth")]);
+    expect(result.errors).toHaveLength(0);
+    expect(connectOneServer).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not block an explicitly requested interactive sign-in behind the auth cooldown", async () => {
+    connectOneServer
+      .mockRejectedValueOnce(new Error("HTTP 401 invalid_token"))
+      .mockImplementation(async (s: { id: string }) => connected(s.id));
+    await acquireMcpTools([srv("auth")]);
+    const result = await acquireMcpTools([srv("auth")], { onOAuthRequired: vi.fn() });
+    expect(result.errors).toHaveLength(0);
+    expect(connectOneServer).toHaveBeenCalledTimes(2);
   });
 
   it("connects a server once and reuses it across turns (no per-turn cold-spawn)", async () => {

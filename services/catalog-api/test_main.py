@@ -324,8 +324,6 @@ def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeyp
     assert response.status_code == 200
     models = response.json()["models"]
     assert [model["id"] for model in models] == [
-        "step-3.5-flash",
-        "step-3.5-flash-2603",
         "step-3.7-flash",
         "step-5-preview",
         "stepaudio-2.5-chat",
@@ -335,6 +333,11 @@ def test_real_catalog_serves_every_stepfun_model_with_billing_and_limits(monkeyp
         "stepaudio-2.5-asr-stream",
         "step-image-edit-2",
     ]
+    flash = next(model for model in models if model["id"] == "step-3.7-flash")
+    assert flash["tier"] == "balanced"
+    assert flash["routing_tiers"] == ["fast"]
+    premium = next(model for model in models if model["id"] == "step-5-preview")
+    assert premium["tier"] == "premium"
     tts = next(model for model in models if model["id"] == "stepaudio-2.5-tts")
     assert tts["pricing_unit"] == "per_10000_characters"
     assert tts["unit_price"] == 0.85

@@ -1,0 +1,153 @@
+{
+  "recordedAt": "2026-10-16T03:20:09.643666+00:00",
+  "scope": "Dirty working-tree snapshot; bounded compiled/native mock controls, no paid provider replay",
+  "observation": {
+    "sessionId": "2e52c89dc8a6",
+    "sequenceRange": [1, 3],
+    "source": "original SQLite opened mode=ro; messages seq 1-3 only",
+    "messageHashes": [
+      {
+        "seq": 1,
+        "role": "user",
+        "createdAt": "2026-10-16T03:07:25.861Z",
+        "messageSha256": "33a0e4b483f123bd4466c5b60c99d225172d8cd0edd17a98ec6a29b8bc6d8987"
+      },
+      {
+        "seq": 2,
+        "role": "assistant",
+        "createdAt": "2026-10-16T03:07:51.668Z",
+        "messageSha256": "100666cf4f14e9c5aa0cf57ff94b179d9eb826a4b477cf79cac24df83c7d8739"
+      },
+      {
+        "seq": 3,
+        "role": "tool",
+        "createdAt": "2026-10-16T03:07:51.681Z",
+        "messageSha256": "d54b54908fd0e84704d896e38d786207f0da5a0370ea202148723ead0f53add2"
+      }
+    ],
+    "blockedTools": ["search_session_history", "list_tools"]
+  },
+  "verification": {
+    "focusedTests": 86,
+    "testFiles": 7,
+    "buildExit": 0,
+    "compiledChecks": {
+      "sharedReadOnlyContractIsImmutable": true,
+      "historyLookupReturnsActualSqliteEvidence": true,
+      "toolInventoryAccessibleUnderHeavyRevise": true,
+      "mcpInventoryAccessibleUnderHeavyRevise": true,
+      "toolDescriptionAccessibleUnderHeavyRevise": true,
+      "evidenceRetrievalAccessibleUnderHeavyRevise": true,
+      "forensicsAccessibleUnderHeavyRevise": true,
+      "edit_fileRemainsBlocked": true,
+      "write_fileRemainsBlocked": true,
+      "bashRemainsBlocked": true,
+      "taskRemainsBlocked": true,
+      "unknown_toolRemainsBlocked": true,
+      "agenticSelfverifyRemainsBlocked": true,
+      "emittingSelfverifyRemainsBlocked": true,
+      "boundedOfflineSelfverifyRemainsAllowed": true,
+      "nativeLspDescriptionsDoNotRequireGrepPrelude": true,
+      "planningStateAndVerdictRemainByteIdentical": true
+    },
+    "compiledBoundary": "Compiled mutation gate plus registered native handlers; no paid model dispatch",
+    "nativeChecks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeSmokeAndPassiveLogPass": true
+    },
+    "nativeRunId": "7aa07f85-75c2-4c6e-a040-57971d9257dd",
+    "nativeScenarios": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "whitespaceExit": 0
+  },
+  "artifacts": [
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/verify.mjs",
+      "bytes": 5594,
+      "sha256": "89434b632255047602e8c10556f91a22dcf1b6c9ef3b37efd3a5b87edceb02e1"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/verify-native.mjs",
+      "bytes": 10270,
+      "sha256": "c9a91e835c6fc55eea98d2c954d881476198a1ca41e6bb4246f9e4f9a3d14614"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/compiled-result.json",
+      "bytes": 1168,
+      "sha256": "ff43383e80d1056a63907b739e8222de5e233bf5e9166c2071e41d5998a89da4"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/native-result.json",
+      "bytes": 40795,
+      "sha256": "fa823dfb93c3b68c1205e69427eeca4ffa718c6956d8e7f46e72e317dd5d3eb6"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/observed-trace.json",
+      "bytes": 3113,
+      "sha256": "ee50cb1f1fbbf0217b821549f0a309ca271efcebd44fa146af921f17731fd8e4"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/red.log",
+      "bytes": 6474,
+      "sha256": "068ad84ad8e59c164d5f047fc688490a74bae4b7dc74da4193e03ddcd452dbc9"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/tests.log",
+      "bytes": 1948,
+      "sha256": "e6f67d076e035ad58f5ba289fd1fa00e54910bf815003f7fffd7e87bee1cae16"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/build.log",
+      "bytes": 7484,
+      "sha256": "3e74c25aca80a21c5a8ceeb880122a9ce07a34af5455af2bfe030b893a0a1d30"
+    },
+    {
+      "path": ".scratch/readonly-feedback-gsd-gate/diff-check.log",
+      "bytes": 15802,
+      "sha256": "1c75e72c070519442269ce329f2ac3b897386459cc732e0c68180f26104e8ae8"
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "bytes": 4154,
+      "sha256": "fcf15a5a0a3d37a4fcfa4fd10e8a7c9e8ad92108cf60a8f11dabd0db1318b4e9"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "bytes": 262790,
+      "sha256": "b53d79afc65c58d8a94ba28fffd66552042d1e33a95dd38e1b6e4a11811c4c0c"
+    },
+    {
+      "path": "src/tools/native-tools.ts",
+      "bytes": 23140,
+      "sha256": "5bf8f0313f3820477956b4eff842d9d8cd30f9cdb6021e271541f10a31ee53b2"
+    },
+    {
+      "path": "src/gsd/__tests__/mutation-gate.test.ts",
+      "bytes": 5082,
+      "sha256": "95b2375357562c62bd404cab958987bc78c0abf1b3bc154b9433b99099d07f99"
+    },
+    {
+      "path": "src/pil/__tests__/layer4-gsd.test.ts",
+      "bytes": 20577,
+      "sha256": "2de0a295866b2553dd68f2ab8c8e4b63f39834f2daec10d8fe242e8a12c16886"
+    }
+  ]
+}

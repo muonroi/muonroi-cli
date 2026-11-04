@@ -1,5 +1,6 @@
 import type { ToolSet } from "ai";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { getSelfVerifyJobManager } from "../../mcp/self-verify-runner.js";
 import { NATIVE_MUONROI_TOOL_NAMES, registerNativeMuonroiTools } from "../native-tools.js";
 
 async function exec(tools: ToolSet, name: string, args: unknown): Promise<string> {
@@ -8,6 +9,34 @@ async function exec(tools: ToolSet, name: string, args: unknown): Promise<string
 }
 
 describe("registerNativeMuonroiTools", () => {
+  it.each(["", "none"])("rejects invalid tier1 fixture %j before starting a job", async (mockLlmDir) => {
+    const tools: ToolSet = {};
+    registerNativeMuonroiTools(tools);
+    const start = vi.spyOn(getSelfVerifyJobManager(), "start").mockReturnValue("must-not-start");
+    try {
+      expect(await exec(tools, "selfverify_start", { mode: "tier1", mockLlmDir })).toContain("invalid_args");
+      expect(start).not.toHaveBeenCalled();
+    } finally {
+      start.mockRestore();
+    }
+  });
+
+  it("forwards the task workspace and exact file selection without widening the diff", async () => {
+    const tools: ToolSet = {};
+    registerNativeMuonroiTools(tools, { cwd: "/caller/workspace" });
+    const start = vi.spyOn(getSelfVerifyJobManager(), "start").mockReturnValue("fixture-run");
+    try {
+      await exec(tools, "selfverify_start", { mode: "tier1", files: ["owned.ts"], emit: false });
+      expect(start).toHaveBeenLastCalledWith(
+        expect.objectContaining({ cwd: "/caller/workspace", files: ["owned.ts"], emit: false }),
+      );
+      await exec(tools, "selfverify_start", { mode: "tier1", cwd: "/explicit/target", files: [] });
+      expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ cwd: "/explicit/target", files: [] }));
+    } finally {
+      start.mockRestore();
+    }
+  });
+
   it("registers every muonroi-tools capability as a native builtin", () => {
     const tools: ToolSet = {};
     registerNativeMuonroiTools(tools);
@@ -64,5 +93,7 @@ describe("registerNativeMuonroiTools", () => {
     const tools: ToolSet = {};
     registerNativeMuonroiTools(tools);
     expect(await exec(tools, "usage_forensics", { prefix: "  " })).toMatch(/invalid_args/);
+    expect(await exec(tools, "usage_forensics", { prefix: "fixture", until: "invalid-date" })).toMatch(/invalid_args/);
+    expect(await exec(tools, "usage_forensics", { prefix: "fixture", error_offset: -1 })).toMatch(/invalid_args/);
   });
 });

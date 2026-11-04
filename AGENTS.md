@@ -12,7 +12,7 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 | Typecheck | `bun run typecheck` or `npx tsc --noEmit` |
 | Build | `bun run build` |
 | Run from source | `bun run dev` |
-| Run built CLI | `node dist/index.js` |
+| Run built CLI (TUI, Bun runtime) | `bun dist/src/index.js` |
 | Headless mode | `node dist/index.js --prompt "..." --max-tool-rounds N` |
 | Run tests | `bun test` |
 

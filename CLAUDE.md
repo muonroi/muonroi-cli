@@ -145,12 +145,12 @@ EE failure-mode reference (what every call site does when EE is down):
 
 Feature flag: `userSettings.eeBBContext: false` to disable BB retrieval.
 
-## Native GSD depth pipeline & the hard mutation gate
+## Native FLOW depth pipeline & the hard mutation gate
 
-GSD is **native to the runtime**, not the external superpowers skill. Depth is
+FLOW is **native to the runtime**, not the external superpowers skill. Depth is
 agent-decided and variable — `quick` | `standard` | `heavy` | (none) — and every
 stage consumes the prior stage's artifact, so the flow is one continuous pipeline
-built on the GSD SDK (`src/gsd/`), never a workaround around it.
+built on the native Muonroi Flow engine (`src/workflow/`), never a workaround around it.
 
 **The one depth slot everything reads.** layer1 model-first classify emits
 `pilCtx.modelDepthTier` + `pilCtx.confidence` (`src/pil/layer1-intent.ts`) →
@@ -160,52 +160,52 @@ reads depth via `readState(cwd).depth`, never off a propagated pilCtx field.
 
 **Pipeline stages (each feeds the next):**
 
-1. **Complexity assessor** (`src/gsd/complexity-assessor.ts`) — a leader-tier
+1. **Complexity assessor** (`src/workflow/complexity-assessor.ts`) — a leader-tier
    single-shot call (`createCouncilLLM(...).generate`, billed `source=council`,
    no cost leak) that *enriches the same* `modelDepthTier` slot. `shouldAssess`
    pre-filters: standard/heavy always assess, low-confidence (<0.7) quick
    assesses, high-confidence quick skips. NEVER throws (parse/leader failure →
    `parse-failed-fallback`). Writes `.planning/ASSESSMENT.md`.
-2. **Council context** (`src/gsd/council-context.ts`) folds `ASSESSMENT.md`
+2. **Council context** (`src/workflow/council-context.ts`) folds `ASSESSMENT.md`
    into `buildCouncilContextBundle`, so plan-review AND verify councils both see
    the assessment rationale — pipeline coherence.
-3. **Directive** (`src/pil/layer4-gsd.ts`) is emitted during PIL prep — i.e.
+3. **Directive** (`src/pil/layer4-flow.ts`) is emitted during PIL prep — i.e.
    *before* the assessor runs — so it is keyed on the layer1 classify depth,
-   NOT the assessed depth (the assessor override reaches the gate + `gsd_verify`
+   NOT the assessed depth (the assessor override reaches the gate + `flow_verify`
    via STATE.md / `pilCtx.modelDepthTier`, not this directive). heavy →
-   MANDATORY `gsd_status → gsd_discuss → gsd_plan → gsd_plan_review`, mutation
+   MANDATORY `flow_status → flow_discuss → flow_plan → flow_plan_review`, mutation
    tools BLOCKED until plan-review passes; standard → advisory
-   ("recommend gsd_plan_review", no BLOCKED); quick → no gate. The mutation
+   ("recommend flow_plan_review", no BLOCKED); quick → no gate. The mutation
    gate is coherent with this: it hard-blocks on **heavy only** (`quick` /
    `standard` / null all fail open). standard stays advisory — hard-blocking
    every default-tier bash/edit until a plan-review pass over-reaches; only
    genuinely non-trivial work (heavy, including tasks the assessor UPGRADES to
    heavy) earns the hard gate.
-4. **Mutation gate** (`src/gsd/mutation-gate.ts`) — `evaluateMutationGate` runs
+4. **Mutation gate** (`src/workflow/mutation-gate.ts`) — `evaluateMutationGate` runs
    inside the tool-engine write-mutex wrapper (`src/orchestrator/tool-engine.ts`)
-   before every non-read-only, non-`respond_`, non-`gsd_*` tool. It reads depth
+   before every non-read-only, non-`respond_`, non-`flow_*` tool. It reads depth
    from `readState(cwd).depth` and **delegates to the SDK's `canExecute(cwd,
    depth)`** — no reimplemented gate. Fail-open: only explicit `standard`/`heavy`
    arm it; `null`/`quick` pass through. Blocked → `{success:false, output, error}`
    BEFORE the mutation runs.
-5. **Verify layer** (`gsd_verify` in `src/gsd/workflow-tools.ts`) — deterministic
+5. **Verify layer** (`flow_verify` in `src/workflow/workflow-tools.ts`) — deterministic
    floor first (tests/lint evidence); if the floor passes at standard/heavy,
-   `runVerifyCouncil` (`src/gsd/verify-council.ts`) adjudicates goal-achievement
+   `runVerifyCouncil` (`src/workflow/verify-council.ts`) adjudicates goal-achievement
    and its verdict **overrides** the model's self-reported `passed`. Parse
    failure → `revise`, never a silent approve. Writes `.planning/VERIFY-COUNCIL.md`.
 
-**Env flags** (all default ON with native GSD; opt out with `=0`), defined in
-`src/gsd/flags.ts`:
+**Env flags** (all default ON with native FLOW; opt out with `=0`), defined in
+`src/workflow/flags.ts`:
 
 | Flag | Effect |
 |---|---|
-| `MUONROI_GSD_NATIVE=0` | Disable native GSD entirely → legacy playbook rubric, no `gsd_*` tools. |
-| `MUONROI_GSD_ASSESSOR=0` | Skip the leader-tier assessor; depth comes only from layer1 classify. |
-| `MUONROI_GSD_HARD_GATE=0` | Disable the mutation gate; directives become advisory-only. |
+| `MUONROI_FLOW_NATIVE=0` | Disable native FLOW entirely → legacy playbook rubric, no `flow_*` tools. |
+| `MUONROI_FLOW_ASSESSOR=0` | Skip the leader-tier assessor; depth comes only from layer1 classify. |
+| `MUONROI_FLOW_HARD_GATE=0` | Disable the mutation gate; directives become advisory-only. |
 
-E2E coverage of the deterministic gate: `tests/harness/gsd-hard-gate.spec.ts`
+E2E coverage of the deterministic gate: `tests/harness/flow-hard-gate.spec.ts`
 (seeds `.planning/STATE.md` in a throwaway temp cwd; assessor OFF for
-determinism). Gate/assessor/verify logic is unit-covered under `src/gsd/__tests__/`.
+determinism). Gate/assessor/verify logic is unit-covered under `src/workflow/__tests__/`.
 
 ## Workflow: verify a new TUI feature
 

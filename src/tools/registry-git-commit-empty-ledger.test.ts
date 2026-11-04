@@ -16,7 +16,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -67,6 +67,28 @@ function namesBashRoute(output: string): boolean {
 }
 
 describe("git_commit refusal with an empty write ledger", () => {
+  it("explains a non-Git environment skip without claiming a commit or initializing a repository", async () => {
+    const dir = tempDir("muonroi-commit-no-repo-");
+    const bash = new BashTool(dir);
+    try {
+      const tools = createBuiltinTools(bash, "agent", { sessionId: "GC-NO-REPO" });
+      await tools.write_file.execute!({ file_path: "new.txt", content: "hello\n" }, {} as never);
+      const result = (await tools.git_commit.execute!({ message: "feat: add fixture" }, {} as never)) as {
+        success: boolean;
+        committed?: boolean;
+        skipped?: boolean;
+        reason?: string;
+        output: string;
+      };
+      expect(result).toMatchObject({ success: false, committed: false, skipped: true, reason: "not-a-repo" });
+      expect(result.output).toContain("not a Git worktree");
+      expect(result.output).toContain("No commit was created");
+      expect(result.output).toContain("Do not retry");
+      expect(existsSync(join(dir, ".git"))).toBe(false);
+    } finally {
+      await bash.cleanup();
+    }
+  });
   const dirs: string[] = [];
   let savedRunRoot: string | null = null;
 

@@ -45,7 +45,7 @@ describe("buildDirective", () => {
   });
 
   it("emits a human-facing question directive for informational/meta prompts (session 829a83888dd2)", () => {
-    // A self/meta CLI question routed through GSD must NOT get the
+    // A self/meta CLI question routed through FLOW must NOT get the
     // implement/verify scaffold — that leaked a "2-3 line plan" preamble +
     // process narration into the human-facing answer.
     const out = buildDirective({ tier: "quick", phase: null, informational: true });

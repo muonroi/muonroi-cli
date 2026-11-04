@@ -18,7 +18,6 @@
  * — it knows nothing about Driver internals.
  */
 
-import { resolve } from "node:path";
 import { createDriver, type Driver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
@@ -29,6 +28,7 @@ import { loadCatalog } from "../models/registry.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import { createProviderFactory, detectProviderForModel, resolveModelRuntime } from "../providers/runtime.js";
 import { type AgenticContextBlock, buildAgenticContext } from "./agentic-context.js";
+import { SELF_QA_ENTRY, SELF_QA_FIXTURES } from "./runtime-paths.js";
 
 // ── Zod schema for the decision union — used with generateObject to force
 // structured output instead of free-text JSON (which reasoning models
@@ -383,6 +383,7 @@ function tryParseDecisionSlice(slice: string): AgenticDecision | null {
 // ---------------------------------------------------------------------------
 
 export type AgenticLoopOptions = {
+  cwd?: string;
   goal: string;
   brain: AgenticBrain;
   maxTurns?: number;
@@ -407,10 +408,10 @@ export async function runAgenticLoop(opts: AgenticLoopOptions): Promise<AgenticR
   const events: LiveEvent[] = [];
   let lastFrame: LiveFrame | null = null;
 
-  const entry = opts.entry ?? resolve("src/index.ts");
+  const entry = opts.entry ?? SELF_QA_ENTRY;
   const args = [entry, "--agent-mode"];
   if (opts.mockLlmDir !== "none") {
-    const mockDir = opts.mockLlmDir ?? resolve("tests/harness/fixtures/llm");
+    const mockDir = opts.mockLlmDir ?? SELF_QA_FIXTURES;
     args.push("--mock-llm", mockDir);
   }
   if (opts.extraArgs) {
@@ -424,7 +425,7 @@ export async function runAgenticLoop(opts: AgenticLoopOptions): Promise<AgenticR
   };
 
   log(`[agentic] Spawning child: ${entry}`);
-  const spawn = await spawnAgentTui(args, { spawnOpts: { env } });
+  const spawn = await spawnAgentTui(args, { spawnOpts: { env, cwd: opts.cwd } });
   const driver = wireDriver(spawn.inWrite, spawn.outRead);
 
   // Collect every event into the bus.

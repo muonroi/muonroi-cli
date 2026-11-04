@@ -72,15 +72,17 @@ function parseCounts(json: string | null): SessionExperienceCounts | null {
 }
 
 /** Latest persisted counts for one session (or null if none). Fail-open. */
-export function selectSessionExperience(sessionId: string): SessionExperienceCounts | null {
+export function selectSessionExperience(sessionId: string, until?: string): SessionExperienceCounts | null {
   try {
     const row = getDatabase()
       .prepare(
         `SELECT metadata_json FROM interaction_logs
-         WHERE session_id = ? AND event_type = ?
+         WHERE session_id = ? AND event_type = ? ${until ? "AND created_at <= ?" : ""}
          ORDER BY created_at DESC, id DESC LIMIT 1`,
       )
-      .get(sessionId, EVENT_TYPE) as { metadata_json: string | null } | undefined;
+      .get(...(until ? [sessionId, EVENT_TYPE, until] : [sessionId, EVENT_TYPE])) as
+      | { metadata_json: string | null }
+      | undefined;
     return parseCounts(row?.metadata_json ?? null);
   } catch (err) {
     console.error(`[session-experience-store] select failed for ${sessionId}: ${(err as Error)?.message}`);

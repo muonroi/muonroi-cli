@@ -18,6 +18,7 @@ import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keycha
 import {
   createProviderFactoryAsync,
   detectProviderForModel,
+  hasProviderFactory,
   type ResolvedModelRuntime,
   resolveMaxOutputTokensParam,
   resolveModelRuntime,
@@ -75,6 +76,8 @@ import type {
  * is swallowed; unexpected errors propagate.
  */
 async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<void> {
+  // Keep the host's subscription/API selection and any bounded fallback latch.
+  if (hasProviderFactory(providerId)) return;
   let apiKey: string | undefined;
   try {
     apiKey = await loadKeyForProvider(providerId);
@@ -100,7 +103,7 @@ async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<vo
  * mutex) ran with NO bound at all — ahead of, and separate from, the deadline
  * signal `generate()`/`debate()`/`research()` combine further down via
  * `withTimeoutSignal`. A stuck refresh or a held mutex therefore hung the
- * ENTIRE call regardless of the caller's own deadline: e.g. the GSD
+ * ENTIRE call regardless of the caller's own deadline: e.g. the FLOW
  * complexity-assessor's `AbortSignal.timeout(PIL_GATE_DEADLINE_MS=2500)`
  * never even started ticking while this awaited.
  *
@@ -560,6 +563,8 @@ async function collectStreamText(args: {
   prepareStep?: (opts: { stepNumber: number; messages: readonly unknown[] }) => unknown;
   /** Called with the char length of every text/reasoning delta as it arrives. */
   onDelta?: (chars: number) => void;
+  /** Host-only durable capture, awaited before advancing the stream. */
+  onToolResult?: (result: import("./types.js").CouncilToolResult) => void | Promise<void>;
 }): Promise<{
   text: string;
   usage?: unknown;
@@ -594,8 +599,8 @@ async function collectStreamText(args: {
   let reasoningText = "";
   let usage: unknown;
   let finishReason: string | undefined;
-  const toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }> = [];
-  const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
+  const toolCalls: Array<{ toolCallId: string; toolName: string; input?: unknown; result?: unknown }> = [];
+  const byId = new Map<string, (typeof toolCalls)[number]>();
   try {
     for await (const part of result.fullStream) {
       // Re-arm on EVERY chunk (including reasoning-delta and step boundaries):
@@ -619,7 +624,7 @@ async function collectStreamText(args: {
         }
         case "tool-call": {
           const p = part as { toolCallId: string; toolName: string; input?: unknown };
-          const tc = { toolName: p.toolName, input: p.input };
+          const tc = { toolCallId: p.toolCallId, toolName: p.toolName, input: p.input };
           byId.set(p.toolCallId, tc);
           toolCalls.push(tc);
           break;
@@ -627,7 +632,29 @@ async function collectStreamText(args: {
         case "tool-result": {
           const p = part as { toolCallId: string; output?: unknown };
           const tc = byId.get(p.toolCallId);
-          if (tc) tc.result = p.output;
+          if (tc) {
+            tc.result = p.output;
+            await args.onToolResult?.({
+              toolCallId: p.toolCallId,
+              toolName: tc.toolName,
+              input: tc.input,
+              output: p.output,
+            });
+          }
+          break;
+        }
+        case "tool-error": {
+          const p = part as { toolCallId: string; error: unknown };
+          const tc = byId.get(p.toolCallId);
+          if (tc) {
+            tc.result = { error: p.error instanceof Error ? p.error.message : String(p.error) };
+            await args.onToolResult?.({
+              toolCallId: p.toolCallId,
+              toolName: tc.toolName,
+              input: tc.input,
+              output: tc.result,
+            });
+          }
           break;
         }
         case "finish":
@@ -742,6 +769,7 @@ export function createCouncilLLM(
   mode: AgentMode,
   sessionId: string | undefined,
   stats: CouncilStats,
+  onToolResult?: import("./types.js").CouncilToolEvidenceSink,
 ): CouncilLLM {
   // Stamp every subsequent breadcrumb with this session so a crash trail can be
   // tied back to the run in interaction_logs / usage_events.
@@ -1092,6 +1120,7 @@ export function createCouncilLLM(
                   // reasoning model runs near the 5-min ceiling, and the tick
                   // generator is not being pumped while Promise.all awaits.
                   onDelta: noteCouncilStreamDelta,
+                  onToolResult: onToolResult && ((result) => onToolResult({ ...result, modelId, phase: "debate" })),
                   ...(verificationTools && Object.keys(verificationTools).length > 0
                     ? {
                         tools: verificationTools,
@@ -1314,6 +1343,7 @@ export function createCouncilLLM(
                     return t === undefined ? {} : { temperature: t };
                   })(),
                   onDelta: noteCouncilStreamDelta,
+                  onToolResult: onToolResult && ((result) => onToolResult({ ...result, modelId, phase: "research" })),
                   // maxRetries:0 is baked into collectStreamText. Visible retry
                   // (src/utils/visible-retry.ts) replaces the SDK's silent
                   // exponential backoff (2,4,8,16,32s) so a SiliconFlow 429 reads

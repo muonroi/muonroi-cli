@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { heuristicEffort } from "../backlog-builder.js";
 
 // The LLM effort estimate falls back to this keyword heuristic instead of a flat
-// 3 when the cheap model returns garbage. Guards that the real gsd-migration
+// 3 when the cheap model returns garbage. Guards that the real flow-migration
 // backlog titles (which ALL scored a uniform 3 live, collapsing the sprint split
 // into a mechanical items-per-sprint bucketing) now differentiate by size.
 describe("heuristicEffort", () => {
@@ -11,12 +11,12 @@ describe("heuristicEffort", () => {
       5,
     );
     expect(heuristicEffort("Rewire dispatch to use native modules")).toBe(5); // "native"
-    expect(heuristicEffort("Migrate gsd core off the external dependency")).toBe(5);
+    expect(heuristicEffort("Migrate flow core off the external dependency")).toBe(5);
   });
 
   it("scores deletion / inventory / config work small (1)", () => {
     expect(heuristicEffort("Inventory affected .cjs blobs and mapping")).toBe(1);
-    expect(heuristicEffort("Remove @opengsd/gsd-core dependency")).toBe(1);
+    expect(heuristicEffort("Remove @openflow/flow-core dependency")).toBe(1);
   });
 
   it("scores unclassified work medium (3)", () => {
@@ -32,7 +32,7 @@ describe("heuristicEffort", () => {
       "Preserve parallel-debate behavior",
       "Add frozen persona-model registry with test",
       "Ensure existing test suite passes",
-      "Remove @opengsd/gsd-core dependency",
+      "Remove @openflow/flow-core dependency",
     ];
     const scores = titles.map(heuristicEffort);
     // The live run scored all of these 3 (flat). The heuristic must produce >1

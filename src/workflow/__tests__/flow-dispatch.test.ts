@@ -1,0 +1,84 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { ensurePlanningWorkspace } from "../config-bridge.js";
+import {
+  dispatchConfigEnsure,
+  dispatchInitProgress,
+  dispatchLoopRenderHooks,
+  dispatchStateJson,
+  invalidateFlowCache,
+  resolveLoopHooksInProcess,
+} from "../flow-dispatch.js";
+import { planningArtifact } from "../paths.js";
+
+describe("flow-dispatch", () => {
+  let tmp: string;
+
+  afterEach(() => {
+    if (tmp) rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  });
+
+  it("dispatchConfigEnsure ensures .planning/ (native)", () => {
+    tmp = mkdtempSync(join(tmpdir(), "flow-dispatch-"));
+    const result = dispatchConfigEnsure(tmp);
+    expect(result.ok).toBe(true);
+  });
+
+  it("dispatchLoopRenderHooks returns hooks for plan:post", () => {
+    tmp = mkdtempSync(join(tmpdir(), "flow-dispatch-"));
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    const result = dispatchLoopRenderHooks(tmp, "plan:post");
+    expect(result.ok).toBe(true);
+    expect(result.data?.point).toBe("plan:post");
+    expect(Array.isArray(result.data?.activeHooks)).toBe(true);
+  });
+
+  it("dispatchLoopRenderHooks wraps the in-process resolver", () => {
+    tmp = mkdtempSync(join(tmpdir(), "flow-dispatch-"));
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    const inProc = resolveLoopHooksInProcess(tmp, "execute:pre");
+    const dispatched = dispatchLoopRenderHooks(tmp, "execute:pre");
+    expect(inProc?.point).toBe("execute:pre");
+    expect(dispatched.data?.activeHooks?.length).toBe(inProc?.activeHooks.length);
+  });
+});
+
+describe("flow-dispatch read-through cache", () => {
+  let tmp: string;
+
+  afterEach(() => {
+    if (tmp) {
+      invalidateFlowCache(tmp);
+      rmSync(tmp, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  it("dispatchInitProgress spawns once when STATE.md stable, re-spawns after write", () => {
+    tmp = mkdtempSync(join(tmpdir(), "flow-cache-"));
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    // We assert via referential identity + mtime change instead of call-counting
+    // the subprocess (execFileSync timing is env-dependent). Contract:
+    // same mtime → same cached value object; new mtime → fresh value.
+    const first = dispatchInitProgress(tmp);
+    const second = dispatchInitProgress(tmp);
+    expect(second).toBe(first); // referential hit — cache served
+
+    // Mutate STATE.md mtime → cache invalidates.
+    const statePath = planningArtifact(tmp, "STATE.md");
+    const backdated = "# STATE\n\n| Field | Value |\n| --- | --- |\n| Phase | plan |\n";
+    writeFileSync(statePath, backdated, "utf8");
+    invalidateFlowCache(tmp);
+    const third = dispatchInitProgress(tmp);
+    expect(third).not.toBe(first); // miss after invalidation
+  });
+
+  it("dispatchStateJson returns cached value across calls until STATE.md changes", () => {
+    tmp = mkdtempSync(join(tmpdir(), "flow-cache-sj-"));
+    ensurePlanningWorkspace(tmp, "deepseek-v4-flash");
+    const a = dispatchStateJson(tmp);
+    const b = dispatchStateJson(tmp);
+    expect(b).toBe(a);
+  });
+});

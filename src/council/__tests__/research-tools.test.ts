@@ -79,6 +79,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({
         factory: {},
@@ -134,6 +135,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -193,6 +195,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -247,6 +250,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),

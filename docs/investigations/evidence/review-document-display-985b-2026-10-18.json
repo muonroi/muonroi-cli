@@ -1,0 +1,100 @@
+﻿{
+  "capturedAt": "2026-10-18T15:25:04.2139751Z",
+  "sessionId": "985b3540cc14",
+  "historical": {
+    "inspection": "Read-only saved job metadata and artifact",
+    "firstReview": "steady-indigo-badger: no parsed host verdict",
+    "secondReview": "nimble-copper-lynx: pass with unsuccessful verification_run",
+    "acceptanceAckAndSourceMutated": false
+  },
+  "regression": {
+    "tests": 166,
+    "files": 12,
+    "exitCode": 0,
+    "log": ".scratch/review-document-display-985b/regression.log",
+    "beforeFix": "2 failed /63passed; Markdown static acceptance already passed"
+  },
+  "nativeDisplay": {
+    "startedAt": "2026-10-18T15:22:56.305Z",
+    "boundary": "Built UI functions and actual native OpenTUI renderer with private HOME; read-only historical projection. No real workers/provider/acceptance changes.",
+    "checks": {
+      "builtProjectionKeepsWorkerVerbatim": true,
+      "rawEvidenceRetained": true,
+      "normalWorkerVisible": true,
+      "normalInternalEvidenceHidden": true,
+      "narrowWorkerVisible": true,
+      "narrowInternalEvidenceHidden": true,
+      "rawControlActuallyDisplaysSentinel": true,
+      "historicalSavedVersionMatches": true,
+      "historicalHostFooterHidden": true,
+      "historicalWorkerVerdictPreserved": true,
+      "historicalSavedBytesUnchanged": true,
+      "historicalRecordBytesUnchanged": true
+    },
+    "historical": {
+      "jobId": "nimble-copper-lynx",
+      "rawChars": 18693,
+      "displayChars": 5745,
+      "syntheticReadEnvelope": true,
+      "storedRecordUnchanged": true
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T15:22:56.352Z"
+  },
+  "nativeBoot": {
+    "pass": true,
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "artifact": ".scratch/review-document-display-985b/native-selfverify.json"
+  },
+  "buildExitCode": 0,
+  "typecheckExitCode": 0,
+  "hashes": [
+    {
+      "path": "src/orchestrator/delegations.ts",
+      "sha256": "0a4db60af02fa10986872f2902549a2acd93d5a911e1d0fdca84f0e7fd6e080c"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "35794b18cc745c2dd00fe1a8206244bd59927397572a5301297363f9916abb70"
+    },
+    {
+      "path": "src/orchestrator/orchestration-policy.ts",
+      "sha256": "316e03b1153e54d5491c120317610cfb23e5d39a62df7c7dececf3f769e99300"
+    },
+    {
+      "path": "src/tools/registry.ts",
+      "sha256": "14782e21637b26d18bff3c9501f49acac0ed1e9f9324ceb6ae926ba4330c265b"
+    },
+    {
+      "path": "src/tools/native-tools.ts",
+      "sha256": "cc726e443658298f7b459b7841d196b5556c8737f89de896f9e4d5a98797ff85"
+    },
+    {
+      "path": "src/ui/utils/delegation-display.ts",
+      "sha256": "85045d195b609013977368543cb0abff7e0df9e198df13e70729dafc72abbbe2"
+    },
+    {
+      "path": "src/orchestrator/__tests__/independent-review.test.ts",
+      "sha256": "7b57025241a6f5d3ef1f03a71a7fe945c77321181a78df6fb5e80e9b97dcbed2"
+    },
+    {
+      "path": "src/ui/utils/__tests__/delegation-display.test.ts",
+      "sha256": "7d4960f63ec55418dd1d636cae97f4c797f83a878f17e4799506df8eb4f0e2d5"
+    },
+    {
+      "path": "dist/src/index.js",
+      "sha256": "9bb3c08f7d825ab0a53f94c05bde7c2d70041347579a49817c09f9fc8284cf06"
+    }
+  ],
+  "limits": [
+    "No live provider/worker replay or historical acceptance mutation",
+    "Legacy unbound cards retain raw evidence; fresh reads get the display reference",
+    "No complete export reconciliation/full suite/push/deployment"
+  ]
+}

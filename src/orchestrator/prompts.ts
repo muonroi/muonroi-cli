@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { getModelInfo } from "../models/registry";
 import { buildContractSection } from "../pil/agent-operating-contract.js";
+import { progressiveContextEnabled } from "../pil/context-modules.js";
 import { buildNativeCapabilitiesSection } from "../pil/native-capabilities-workbook.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { effectiveRateLimits } from "../providers/runtime.js";
@@ -9,6 +10,7 @@ import type { AgentMode, TaskRequest } from "../types/index";
 import { buildRateLimitRule, maxParallelBackgroundAgents } from "../utils/background-jobs.js";
 import { loadCustomInstructions } from "../utils/instructions";
 import { logger } from "../utils/logger.js";
+import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
   loadUserSettings,
@@ -17,8 +19,9 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
-import { discoverSkills, formatSkillsForPrompt } from "../utils/skills";
+import { discoverSkills, formatCompactSkillsForPrompt, formatSkillsForPrompt } from "../utils/skills";
 import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable } from "../verify/host-capabilities.js";
+import { type ExecutionRole, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
 
 // F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
 // after session 526a83cf22df logged 2.44M input tokens over 46 LLM calls
@@ -266,6 +269,7 @@ TOOLS:
 - task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, verify for sandbox-aware validation, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.
 - delegate: Launch a read-only background agent for longer research while you continue working.
 - delegation_read: Retrieve a completed background delegation result by ID.
+- delegation_send: Send an instruction or exact correlated reply to an owned running worker. Interactive sends return promptly. Worker questions/progress arrive through durable owner notices.
 - delegation_list: List running and completed background delegations. Do not poll it repeatedly.
 - schedule_create: Create a recurring or one-time scheduled headless run.
 - schedule_list: List saved schedules and their status.
@@ -303,26 +307,26 @@ WORKFLOW:
 8. Run tests or builds with bash to confirm correctness
 9. Use search_web or search_x when you need up-to-date information
 
-DEFAULT DELEGATION POLICY (critical for avoiding stalls/timeouts):
-- For ANY research, exploration, review, architecture investigation, "how does X work", or read-only analysis — you MUST use \`delegate\` (background) with the explore agent. This spawns a true non-blocking background job.
-- Use \`task\` (foreground, blocking) ONLY for short, focused, low-round work that must return immediately into the current turn (e.g. quick edit + verify in <10-15 rounds). Using task for research WILL block the main session and frequently causes "model not responding" / stall timeouts on the provider.
-- Prefer delegate + explore for anything that needs reading many files or long reasoning.
+DEFAULT DELEGATION POLICY:
+- Main owns whether to delegate. Follow explicit project workflow requirements; do focused research inline when another worker would only duplicate the same investigation.
+- Delegate independent evidence surfaces when that improves coverage. Give each worker an explicit scope, excluded work, budget and relevant verification; keep final synthesis and integration verification with main.
+- Use \`delegate\` for independent read-only background work and \`task\` with background:true for an editing worker. Foreground task execution waits for the result; select it deliberately when the current turn needs that result immediately.
 - Use general sub-agent only when edits/commands are required.
 - Never use delegate for write/edit/shell changes.
 - After launching a background delegate or background shell, continue useful work if there is any. If there is nothing else to do, END YOUR TURN — do not wait with sleep, a polling loop, or repeated delegation_list / process_logs calls. Each job wakes you automatically with its result when it finishes, and ending the turn frees the user to keep talking to you meanwhile.
-- The model choosing task for long research is a common mistake that leads to timeouts — prefer delegate.
 
 WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):
 - GOAL: state the one concrete question or outcome the sub must deliver.
 - CONTEXT: include the specific facts the sub needs (file paths, symbol names, constraints, what you already know) so it doesn't re-derive them blindly.
-- RETURN SHAPE: say exactly what to hand back — e.g. "return the findings as file:line + a one-line conclusion", or "return the diff you applied + tests run". The sub's final message is the only thing that re-enters YOUR context (capped ~32K), so a vague ask wastes the turn.
+- SCOPE AND EXCLUSIONS: assign concrete evidence or files, state what the worker must not do, and name the relevant verification and budget. Main owns final integration checks; do not duplicate unrelated verification unless explicitly required.
+- RETURN SHAPE: return conclusions with file:line, commands, exit codes, session-qualified artifact IDs, unchecked areas and blockers. A bounded receipt re-enters main's context; long logs remain retrievable artifacts. Percentage assessments must state their rubric and evidence; agreement between models is not a substitute for verification.
 - When fanning out several sub-agents in parallel, give each a NON-overlapping scope so their syntheses compose instead of duplicating.
 
 EXAMPLES:
-- "review this change" -> delegate (background explore) first
-- "research how auth works" -> delegate (background explore) first
-- "investigate why this test fails" -> delegate (background) to explore first, then continue with findings
-- Long multi-file analysis or "review the sub-session spawn mechanism" -> ALWAYS delegate, never task
+- "review this change" -> main chooses inline review or a worker with a separate review scope
+- "research how auth works" -> inspect directly, or delegate an independent part with concrete evidence requirements
+- "investigate why this test fails" -> reproduce it; delegate a bounded independent investigation when useful
+- Long multi-file analysis -> split independent evidence surfaces when that improves coverage; main retains the synthesis
 - "refactor this module" -> delegate a focused part to general when helpful
 - "verify this feature locally" -> use verify
 - "open the host app and click through it" -> use computer
@@ -349,21 +353,20 @@ IMPORTANT:
 Be direct. Execute, don't just describe. Show results, not plans.
 
 TOKEN BUDGET:
-- Each tool round sends ~17K system prompt tokens + accumulated tool results to the model.
-- Task(explore) / task(general) isolates context in a sub-agent — much cheaper than 5+ top-level rounds.
-- Consider: 1-2 rounds → direct; 3-5 rounds → consider task(explore); >5 rounds → should use task(explore).
+- Request size and cost vary with instructions, tool schemas, history, model pricing and cache usage. Use usage_forensics for recorded usage, failures and available request estimates; capability descriptions are not measurements.
+- Delegation isolates a worker's context but adds its own requests. Choose it for useful independent work, not a presumed fixed cost saving.
+- Choose delegation from scope and independence, not an expected number of tool rounds. Avoid two workers answering the same question unless an independent refutation is intentional.
 WORKFLOW RULES:
 - RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries. Use 'delegate' for deep background research. Read before you write.
 - CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.
 - EXPLORE STALL: If you've made several exploratory tool calls (grep/read_file) in this turn without a clear next action emerging — especially when the per-step \`[step N mirror]\` note reports "Convergence: LOW" — pause and call \`ask_user\` with one focused question rather than continuing to speculate. One good question beats five more guesses.
 - PRIORITIZE RECENT CONTEXT OVER HISTORY: When receiving short, ambiguous, or general continuation prompts from the user (such as "implement nhé", "tiếp tục", "go ahead", "tiếp tục nhé"), ALWAYS prioritize the most recently discussed design decisions, proposals, or topics from the immediate preceding turn(s). Do not regress or default back to earlier, older, or already completed tasks/topics that dominated the earlier parts of the session.
-- BATCH ALL TOOL CALLS — HARD RULE: You MUST combine every independent tool call (read_file, grep, bash, etc.) you know you need into ONE parallel batch in your FIRST tool turn. Do NOT spread them across sequential rounds. Each extra LLM round re-sends the full ~17K system prompt + accumulated context, costing $0.003-$0.006 and inflating input 3-5x for NO new signal. If your first batch cannot cover all the reads/exploration needed, use delegate (explore) instead — do NOT scatter reads across 3+ rounds.
-- MAX 2 LLM ROUND TRIPS per user message: round 1 = batch all reads/exploration; round 2 = follow-up only if a result from round 1 genuinely requires a NEW read you could not have anticipated. If you need round 3, you violated the batching rule — stop and use delegate (explore) instead.
-- COST AWARENESS: Every tool round after round 1 burns $0.004-$0.006 for ZERO new signal — the system prompt is unchanged, only tool outputs grew. If you have 8+ tool calls, they MUST all go in round 1, not spread across 3-8 rounds.
+- BATCH INDEPENDENT CALLS: Combine calls whose inputs are already known and whose execution is independent. Dependent calls run sequentially after their prerequisite results are available. Continue evidence-driven work as needed; there is no fixed two-round research limit or round-count requirement to delegate.
+- COST AWARENESS: Prefer focused reads and avoid repeating evidence already available. Evaluate cost using recorded usage and cache metrics; do not assign a fixed token or dollar cost to each round.
 
 SELF-LIMIT:
-- When you've read 5+ files and haven't concluded, summarize findings and propose next step instead of reading more.
-- BATCH BASH COMMANDS: Combine independent commands into ONE bash call (a; b; c) rather than sequential single calls — each separate call adds ~500 tokens of overhead and prevents prompt-cache reuse across the session.
+- When investigation stops producing new evidence, summarize what is known and identify the remaining gap. Ask only when a missing user decision blocks progress.
+- BATCH BASH COMMANDS: Batch independent read-only work where useful. Preserve exit codes and run dependent or mutating operations sequentially.
 - Read only specific file sections (start_line/end_line) instead of whole files.
 - When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
 
@@ -432,6 +435,7 @@ export function formatCustomSubagentsPromptSection(subagents: CustomSubagentConf
 export interface SystemPromptParts {
   staticPrefix: string;
   dynamicSuffix: string;
+  components?: Record<string, number>;
 }
 
 const NON_ANTHROPIC_TOOL_PREAMBLE = `\n\nIMPORTANT — TOOL CALLING:
@@ -450,23 +454,26 @@ export function stripToolsSection(text: string): string {
 }
 
 export interface SystemPromptOptions {
+  executionRole?: ExecutionRole;
+  /** Actual caller policy at prompt assembly; never cached in the static prefix. */
+  permissionMode?: PermissionMode;
   /**
    * When true, drop sections that bloat the system prompt without helping
    * one-shot chitchat (skills catalog, subagent catalog, sandbox detail).
-   * Cuts ~3-5K tokens for greetings like "Hi" / "1+1". Decided upstream by
+   * Decided upstream by
    * PIL Layer 1 (intentKind === "chitchat").
    */
   chitchat?: boolean;
   /**
-   * When true (sub-agent), skip CUSTOM INSTRUCTIONS, skills catalog, and
-   * native capabilities — sub-agents don't need project-level instructions
-   * and can't run the full toolset anyway. Cuts ~6K tokens per sub-agent turn.
+   * When true, retain repository custom instructions and add parent/child
+   * ownership boundaries; omit the skills catalog. Actual tools remain
+   * constrained by the child role and runtime capability inventory.
    */
   subAgent?: boolean;
   /**
    * When true (tool-turn, i.e. second+ LLM call in the same user-turn tool
    * loop), skip native-capabilities and skills sections that were already
-   * shown in the first call. Cuts ~4K tokens per tool round-trip.
+   * shown in the first call.
    */
   toolTurn?: boolean;
 }
@@ -516,8 +523,8 @@ export function buildMcpCapabilityBlock(toolNames: readonly string[]): string {
 }
 
 // ---- Static prefix cache ----
-// The static prefix accounts for ~48-50KB of system prompt and is nearly
-// identical across turns (only cwd/mode/sandbox/providerId/chitchat affect it).
+// The static prefix is stable for matching assembly inputs. Its actual section
+// sizes are measured below rather than represented by a fixed token/cost claim.
 // Caching it avoids redundant disk I/O (discoverSkills, loadValidSubAgents,
 // loadCustomInstructions) and string building on every user turn.
 // Dynamic per-turn context (planContext, resumeDigest, MCP tools) lives in
@@ -525,6 +532,7 @@ export function buildMcpCapabilityBlock(toolNames: readonly string[]): string {
 interface StaticPrefixCacheEntry {
   prefix: string;
   cachedAt: number;
+  components: Record<string, number>;
 }
 const _staticPrefixCache = new Map<string, StaticPrefixCacheEntry>();
 const STATIC_PREFIX_CACHE_TTL_MS = 300_000; // 5 min — ample; inputs are session-stable
@@ -537,8 +545,9 @@ function staticPrefixCacheKey(
   subagentsHash: string,
   subAgent = false,
   toolTurn = false,
+  executionRole?: ExecutionRole,
 ): string {
-  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}`;
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}|${progressiveContextEnabled()}|${executionRole ?? ""}`;
 }
 
 function computeStaticPrefix(
@@ -549,21 +558,33 @@ function computeStaticPrefix(
   chitchat: boolean,
   subAgent = false,
   toolTurn = false,
-): { prefix: string } {
+  executionRole?: ExecutionRole,
+): { prefix: string; components: Record<string, number> } {
   const custom = loadCustomInstructions(cwd);
-  const customSection =
-    subAgent || !custom
-      ? ""
-      : `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.\n`;
+  const customSection = !custom
+    ? ""
+    : `\n\nCUSTOM INSTRUCTIONS:\n${custom}\n\nFollow the above alongside standard instructions.${subAgent ? " The parent owns workflow coordination, child allocation and final integration acceptance. Apply the repository's correctness, permission, scope and evidence boundaries to the assigned task; report a conflict or missing capability to the parent instead of expanding scope, spawning another helper or repeating the parent's full workflow." : ""}\n`;
 
   // Tool-turn: skip agent-skills catalog (~2K tokens) and native-capabilities block (~2K tokens).
   // The agent was already shown these in the first call of this turn and does not need
   // to re-read them on every tool round-trip.
-  const skillsText = chitchat || subAgent || toolTurn ? "" : formatSkillsForPrompt(discoverSkills(cwd));
+  const progressive = progressiveContextEnabled();
+  const skillsTextRaw =
+    chitchat || subAgent
+      ? ""
+      : progressive || executionRole === "orchestrator"
+        ? formatCompactSkillsForPrompt(discoverSkills(cwd))
+        : toolTurn
+          ? ""
+          : formatSkillsForPrompt(discoverSkills(cwd));
+  const skillsText = skillsTextRaw;
   const skillsSection = skillsText ? `\n\n${skillsText}\n` : "";
   const subagentsSection = chitchat ? "" : formatCustomSubagentsPromptSection(subagents ?? loadValidSubAgents());
 
-  let modePrompt = MODE_PROMPTS[mode];
+  let modePrompt =
+    executionRole === "orchestrator"
+      ? `You are muonroi-cli in ${mode} mode as the owning main. Read current plan/source/evidence through native read_file and grep; delegate implementation, commands/tests and independent review to eligible workers. Honor repository instructions, workflow gates and human approval. Preserve unrelated work and report evidence limits.`
+      : MODE_PROMPTS[mode];
   if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
   const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
   if (promptStyle !== "anthropic") {
@@ -575,12 +596,24 @@ function computeStaticPrefix(
     modePrompt = modePrompt.replace(/\n- (wallet_|paid_|fetch_payment|schedule_|generate_|computer_|search_x).*/g, "");
   }
 
-  const contractSection = buildContractSection({ chitchat });
-  const nativeCapabilitiesSection = toolTurn ? "" : buildNativeCapabilitiesSection({ mode, chitchat });
+  const contractSection =
+    executionRole === "orchestrator" && !chitchat ? `${ORCHESTRATOR_CONTRACT}\n\n` : buildContractSection({ chitchat });
+  const nativeCapabilitiesSection =
+    toolTurn && !progressive ? "" : buildNativeCapabilitiesSection({ mode, chitchat, executionRole });
 
   const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${customSection}${skillsSection}${subagentsSection}`;
 
-  return { prefix };
+  return {
+    prefix,
+    components: {
+      systemContractChars: contractSection.length,
+      systemNativeChars: nativeCapabilitiesSection.length,
+      systemModeChars: modePrompt.length,
+      systemCustomChars: customSection.length,
+      systemSkillsChars: skillsSection.length,
+      systemSubagentsChars: subagentsSection.length,
+    },
+  };
 }
 
 export function buildSystemPromptParts(
@@ -604,20 +637,24 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent, toolTurn);
+  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent, toolTurn, options?.executionRole);
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
   let staticPrefix: string;
+  let components: Record<string, number>;
   if (cached && now - cached.cachedAt < STATIC_PREFIX_CACHE_TTL_MS) {
     staticPrefix = cached.prefix;
+    components = cached.components;
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent, toolTurn);
+    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent, toolTurn, options?.executionRole);
     staticPrefix = result.prefix;
+    components = result.components;
     _staticPrefixCache.set(key, {
       prefix: staticPrefix,
       cachedAt: now,
+      components,
     });
   }
 
@@ -631,9 +668,10 @@ export function buildSystemPromptParts(
 
   const currentDateTime = new Date();
   const dateTimeSection = `- Current date/time (UTC): ${currentDateTime.toISOString()}\n- Current working directory: ${cwd}`;
-  const dynamicSuffix = `${planSection}${resumeSection}\n\n${dateTimeSection}`;
+  const permissionSection = `Runtime policy snapshot — permission mode: ${options?.permissionMode ?? "unavailable"}; sandbox mode: ${sandboxMode}. Tool-specific approval and workflow guards still apply; this snapshot grants no authorization.`;
+  const dynamicSuffix = `${planSection}${resumeSection}\n\n${dateTimeSection}\n${permissionSection}`;
 
-  return { staticPrefix, dynamicSuffix };
+  return { staticPrefix, dynamicSuffix, components: { ...components } };
 }
 
 /** Reset the static prefix cache (for tests). */
@@ -816,6 +854,7 @@ export function buildSubagentPrompt(
 
   return [
     role,
+    "Do not terminate external processes, shut down shared build servers, or clear shared package caches. Native process_stop accepts only this worker's own background ID from process_list, not OS PIDs. On contention, return the exact error and ownership evidence to main. A failed tool can have partial effects: inspect the current target before retrying edits; do not report a whole task complete from a partial change or an unexecuted check.",
     ...instructionLines,
     "",
     "You are helping a parent agent. Do not address the end user directly.",

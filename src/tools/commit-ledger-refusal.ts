@@ -79,7 +79,7 @@ export function emptyLedgerRefusalMessage(uncommitted: number | null): string {
         ? "the repository has no uncommitted changes"
         : `the repository has ${uncommitted} uncommitted change(s)`;
   return (
-    "git_commit stages only files you wrote via write_file/edit_file, and that ledger is empty this session — " +
+    "git_commit stages only files you wrote via write_file/edit_file, and that ledger is empty in this tool run — " +
     `so it has nothing to stage. That is this tool's scope, not the state of the repo: ${state}. ` +
     "To commit work made any other way, run `git commit` through the bash tool — it still passes the " +
     "git-safety checks and the LSP commit gate."

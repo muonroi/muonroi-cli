@@ -5,23 +5,23 @@ import { dynamicTool, jsonSchema } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { installMockModel, textOnlyStream, toolCallStream } from "../../agent-harness/mock-model.js";
 import { noteCouncilStreamDelta } from "../../council/llm.js";
-import { VERDICT_OUTPUT_CONTRACT } from "../../gsd/verdict-schema.js";
 import { loadCatalog } from "../../models/registry.js";
 import { closeDatabase, getDatabase } from "../../storage/db.js";
 import * as settings from "../../utils/settings.js";
+import { VERDICT_OUTPUT_CONTRACT } from "../../workflow/verdict-schema.js";
 import { Agent } from "../orchestrator.js";
 import { __resetToolActivityForTests } from "../tool-activity.js";
 
 vi.mock("../../pil/pipeline.js", () => ({ runPipeline: () => new Promise(() => {}) }));
 // Isolate the workflow policy; retain the real SDK tool execution and council bridge.
-vi.mock("../../gsd/workflow-tools.js", () => ({
-  registerGsdWorkflowTools: (tools: any, opts: any) => {
-    tools.gsd_status = dynamicTool({
+vi.mock("../../workflow/workflow-tools.js", () => ({
+  registerFlowWorkflowTools: (tools: any, opts: any) => {
+    tools.flow_status = dynamicTool({
       description: "Read workflow status",
       inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
       execute: async () => "PLAN_READY",
     });
-    tools.gsd_plan_review = dynamicTool({
+    tools.flow_plan_review = dynamicTool({
       description: "Review the plan",
       inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
       execute: async (_input, context) =>
@@ -35,6 +35,7 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
     "slow",
     "slow continuation",
     "streaming",
+    "research",
     "overdue",
     "cancelled",
   ])("handles a %s council without orphaning the tool", async (scenario) => {
@@ -54,7 +55,7 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
     process.env.HOME = home;
     process.env.USERPROFILE = home;
     process.env.MUONROI_EE_BASE_URL = "http://127.0.0.1:1";
-    process.env.MUONROI_TOOL_ACTIVITY_MAX_MS = "500";
+    process.env.MUONROI_TOOL_ACTIVITY_MAX_MS = scenario === "research" ? "1000" : "500";
     process.env.MUONROI_TOOL_ACTIVITY_GRACE_MS = "1";
     closeDatabase();
     await loadCatalog();
@@ -65,9 +66,9 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
         autoClassify: true,
         stream: [
           ...(scenario === "slow continuation"
-            ? [toolCallStream({ toolCallId: "status", toolName: "gsd_status", input: {} })]
+            ? [toolCallStream({ toolCallId: "status", toolName: "flow_status", input: {} })]
             : []),
-          toolCallStream({ toolCallId: "plan-review", toolName: "gsd_plan_review", input: {} }),
+          toolCallStream({ toolCallId: "plan-review", toolName: "flow_plan_review", input: {} }),
           textOnlyStream("IMPLEMENTATION_CONTINUES"),
         ],
       },
@@ -104,10 +105,14 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
         ),
       };
     });
-    const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 3, { persistSession: true });
+    const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 3, {
+      persistSession: true,
+      ...(scenario === "research" ? { permissionMode: "yolo" as const } : {}),
+    });
     let councilStarted = false;
     let childSignal: AbortSignal | undefined;
     let lateWrite = false;
+    let researchFailure: string | undefined;
     let cancelTimer: ReturnType<typeof setTimeout> | undefined;
     let workTimer: ReturnType<typeof setTimeout> | undefined;
     let deltaTimer: ReturnType<typeof setInterval> | undefined;
@@ -115,6 +120,48 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
       councilStarted = true;
       expect(opts?.synthesisOutputContract).toBe(VERDICT_OUTPUT_CONTRACT);
       childSignal = (opts as { abortSignal?: AbortSignal })?.abortSignal;
+      if (scenario === "research") {
+        fs.writeFileSync(path.join(home, "research-proof.txt"), "SCOPED_RESEARCH_PROGRESS");
+        const child = installMockModel({
+          fixture: {
+            stream: [
+              toolCallStream({
+                toolCallId: "nested-research-read",
+                toolName: "read_file",
+                input: { file_path: "research-proof.txt" },
+              }),
+              textOnlyStream("RESEARCH_STEP_COMPLETED"),
+            ],
+          },
+        });
+        try {
+          for (let i = 0; i < 4; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 350));
+            if (childSignal?.aborted) return;
+            const result = await agent.runTaskRequest(
+              {
+                agent: "explore",
+                modelId: agent.getModel(),
+                description: "Research fixture",
+                prompt: "Read research-proof.txt",
+                maxToolRounds: 3,
+              },
+              undefined,
+              childSignal,
+            );
+            if (!result.success) researchFailure = result.output;
+            expect(result.success).toBe(true);
+            expect(result.output).toContain("RESEARCH_STEP_COMPLETED");
+          }
+        } finally {
+          child.uninstall();
+        }
+        if (childSignal?.aborted) return;
+        lateWrite = true;
+        (agent as any).councilManager.setLastSynthesis(reviewSynthesis);
+        yield { type: "content", content: reviewSynthesis };
+        return;
+      }
       if (scenario === "cancelled") cancelTimer = setTimeout(() => agent.abort(), 30);
       if (scenario === "streaming") deltaTimer = setInterval(() => noteCouncilStreamDelta(1), 80);
       await new Promise<void>((resolve) => {
@@ -142,13 +189,14 @@ describe("nested plan review liveness (ea7378aab8f8)", () => {
       for await (const chunk of agent.processMessage("Review the migration plan and continue implementation"))
         chunks.push(chunk);
       expect(councilStarted).toBe(true);
+      expect(researchFailure).toBeUndefined();
       if (scenario === "slow continuation") expect(delayedContinuation).toBeGreaterThan(0);
       const transcriptAtEnd = JSON.stringify(
         getDatabase()
           .prepare("SELECT message_json FROM messages WHERE session_id=? ORDER BY seq")
           .all(agent.getSessionId()),
       );
-      if (scenario.startsWith("slow") || scenario === "streaming") {
+      if (scenario.startsWith("slow") || scenario === "streaming" || scenario === "research") {
         expect(chunks.filter((chunk) => chunk.type === "error")).toEqual([]);
         expect(chunks.map((chunk) => chunk.content ?? "").join("")).toContain("IMPLEMENTATION_CONTINUES");
         expect(lateWrite).toBe(true);
