@@ -48,18 +48,27 @@ describe("withFileLock", () => {
   });
 
   it("different paths do NOT block each other", async () => {
+    // Prove overlap directly instead of timing it: the first holder does not
+    // release until the second holder is INSIDE its own lock. If different
+    // paths blocked each other this would deadlock until the retry timeout.
+    // (A wall-clock bound of <90ms flaked at exactly 90ms on a loaded machine
+    // once acquisition also writes the holder pid.)
     const other = `${tmpFile}.other`;
-    const start = Date.now();
+    let secondEntered!: () => void;
+    const secondInside = new Promise<void>((r) => {
+      secondEntered = r;
+    });
+    let overlapped = false;
     await Promise.all([
       withFileLock(tmpFile, async () => {
-        await new Promise((r) => setTimeout(r, 50));
+        await secondInside;
+        overlapped = true;
       }),
       withFileLock(other, async () => {
-        await new Promise((r) => setTimeout(r, 50));
+        secondEntered();
       }),
     ]);
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(90);
+    expect(overlapped).toBe(true);
   });
 
   it("respects retry timeout", async () => {
