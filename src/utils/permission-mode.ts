@@ -199,8 +199,11 @@ export function toolNeedsApproval(
     return false;
   }
   if (mode === "auto-edit") {
-    // bash auto-approves when non-dangerous; only dangerous bash needs approval
-    if (toolName === "bash") return dangerous(context?.command);
+    // bash auto-approves when non-dangerous; only dangerous bash needs approval.
+    // run_gate (src/tools/run-gate.ts) executes a recipe command on the host just
+    // like bash, and its input carries that exact `command`, so it follows the
+    // same rule. safe mode below still always asks.
+    if (toolName === "bash" || toolName === "run_gate") return dangerous(context?.command);
     return !AUTO_EDIT_ALLOWED.has(toolName);
   }
   // "safe" — always confirm; dangerous patterns explicitly require (no bypass)

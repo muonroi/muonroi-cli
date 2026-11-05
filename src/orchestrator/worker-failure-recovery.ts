@@ -6,7 +6,7 @@ interface FailureRecord {
   toolArtifacts?: Array<{ toolCallId: string; toolName: string; digest: string }>;
 }
 const MUTATIONS = new Set(["edit_file", "write_file", "apply_patch"]);
-const COMMANDS = new Set(["bash", "verification_run"]);
+const COMMANDS = new Set(["bash", "verification_run", "run_gate"]);
 
 export function workerFailureRecovery(record: FailureRecord): DelegationFailureRecovery {
   const error = record.error ?? "";
