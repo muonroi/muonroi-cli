@@ -199,7 +199,7 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
-import { filterExecutionTools, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
+import { filterExecutionTools, withOrchestratorContract } from "./orchestration-policy.js";
 import {
   appendNoticeToFinalMessages,
   buildOutputLimitContinuationPrompt,
@@ -1599,8 +1599,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // (non-cached) system message via the slice below.
         const mcpCapabilityBlock = buildMcpCapabilityBlock(Object.keys(tools));
         const capabilitySystem = mcpCapabilityBlock ? `${systemWithShell}${mcpCapabilityBlock}` : systemWithShell;
-        const systemWithCaps =
-          deps.executionRole === "orchestrator" ? `${capabilitySystem}\n\n${ORCHESTRATOR_CONTRACT}` : capabilitySystem;
+        // The static prefix already carries the contract on non-chitchat
+        // orchestrator turns; appending it again re-sent ~10k chars per call
+        // (sessions 4edc02516a92 / 8a5bd89c2be0, systemContractChars=10104).
+        const systemWithCaps = withOrchestratorContract(capabilitySystem, deps.executionRole);
 
         // Task 3 — non-Claude prompt-cache prefix stability. On non-Claude the
         // system is a single string; per-turn-dynamic content (dynamicSuffix +

@@ -1382,7 +1382,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const readDelegation = opts.readDelegation;
       tools.delegation_read = dynamicTool({
         description:
-          "Retrieve a completed background delegation result by ID, with execution/delivery/acknowledgement states. Main must call delegation_ack with the returned jobId and resultVersion AFTER processing the evidence; reading alone does not ACK or verify it. Helpers forward the reference to main.",
+          "Retrieve a completed background delegation result by ID, with execution/delivery/acknowledgement states. A completion notice already carries the result inline (or its first part); read only the remainder (offset/maxChars page the saved result), a raw tool artifact (toolCallId) or a council dossier file. Main must call delegation_ack with the jobId and resultVersion AFTER processing the evidence; reading alone does not ACK or verify it. Helpers forward the reference to main.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -1402,11 +1402,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           required: ["id"],
         }),
         execute: async (input: any) => {
+          // Without toolCallId, offset/maxChars page the saved result itself
+          // (they were silently ignored before: session 4edc02516a92 asked for
+          // maxChars=3000 and received 9-11k chars).
+          const paged = input.offset !== undefined || input.maxChars !== undefined;
           const result = await readDelegation(
             input.id,
-            input.toolCallId
+            input.toolCallId || paged
               ? {
-                  toolCallId: input.toolCallId,
+                  ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
                   resultVersion: input.resultVersion,
                   offset: input.offset,
                   maxChars: input.maxChars,
