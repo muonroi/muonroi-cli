@@ -164,6 +164,22 @@ export interface StoredDelegation {
   failureRecovery?: import("../types/index.js").DelegationFailureRecovery;
 }
 
+/** One owned job as carried verbatim across compaction (see `DelegationManager.ledgerSnapshot`). */
+export interface DelegationLedgerEntry {
+  id: string;
+  agent: string;
+  description: string;
+  status: DelegationStatus;
+  startedAt: string;
+  completedAt?: string;
+  /** Absent = the worker is unscoped. */
+  writeScope?: string[];
+  resultVersion?: string;
+  acknowledged: boolean;
+  /** Open worker question awaiting main's reply. */
+  pendingQuestionId?: string;
+}
+
 export interface DelegationNotification {
   id: string;
   message: string;
@@ -748,6 +764,34 @@ export class DelegationManager {
       .filter((item) => this.canAccess(item))
       .sort((a, b) => b.startedAt.localeCompare(a.startedAt))
       .map(toDelegationRun);
+  }
+
+  /**
+   * Read-only snapshot for the host-carried post-compaction delegation ledger
+   * (delegation-ledger.ts). Same visibility and reconcile semantics as `list()`;
+   * never marks delivery, ACK or notification.
+   */
+  async ledgerSnapshot(): Promise<DelegationLedgerEntry[]> {
+    const items = await Promise.all((await this.jobPaths()).map((jobPath) => this.reconcile(jobPath)));
+    return items
+      .filter((item): item is StoredDelegation => item !== null)
+      .filter((item) => this.canAccess(item))
+      .sort((a, b) => a.startedAt.localeCompare(b.startedAt))
+      .map((record) => {
+        const question = pendingQuestion(record);
+        return {
+          id: record.id,
+          agent: record.agent,
+          description: record.description,
+          status: record.status,
+          startedAt: record.startedAt,
+          ...(record.completedAt ? { completedAt: record.completedAt } : {}),
+          ...(record.writeScope !== undefined ? { writeScope: [...record.writeScope] } : {}),
+          ...(record.resultVersion ? { resultVersion: record.resultVersion } : {}),
+          acknowledged: !!record.resultVersion && record.acknowledgedVersion === record.resultVersion,
+          ...(question ? { pendingQuestionId: question.id } : {}),
+        };
+      });
   }
 
   async read(id: string, deliverToOwner = true): Promise<string> {
