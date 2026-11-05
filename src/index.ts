@@ -1817,18 +1817,25 @@ usage
   .option("--home <dir>", "muonroi home holding delegations/ and usage/ (default ~/.muonroi-cli)")
   .option("--db <path>", "Session database to read (default <home>/muonroi.db); opened read-only")
   .option("--impl-ext <exts>", "Comma-separated extensions that count as implementation (e.g. .cs,.csproj)")
-  .action(async (sessionPrefixes: string[], opts: { json?: boolean; home?: string; db?: string; implExt?: string }) => {
-    const { runFlowMetrics } = await import("./cli/flow-metrics.js");
-    await runFlowMetrics(sessionPrefixes, {
-      json: opts.json,
-      home: opts.home,
-      db: opts.db,
-      implExtensions: opts.implExt
-        ?.split(",")
-        .map((e) => e.trim())
-        .filter(Boolean),
-    });
-  });
+  .option("--baseline <sessionPrefix>", "Also print a before/after table of each session against this baseline")
+  .action(
+    async (
+      sessionPrefixes: string[],
+      opts: { json?: boolean; home?: string; db?: string; implExt?: string; baseline?: string },
+    ) => {
+      const { runFlowMetrics } = await import("./cli/flow-metrics.js");
+      await runFlowMetrics(sessionPrefixes, {
+        json: opts.json,
+        baseline: opts.baseline,
+        home: opts.home,
+        db: opts.db,
+        implExtensions: opts.implExt
+          ?.split(",")
+          .map((e) => e.trim())
+          .filter(Boolean),
+      });
+    },
+  );
 
 usage
   .command("experience")

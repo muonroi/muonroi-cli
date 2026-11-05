@@ -39,6 +39,7 @@ import {
   type TokenTotals,
 } from "./flow-metrics-aggregate.js";
 import { DELEGATION_PURPOSES, FILE_WRITE_TOOLS, writeTargetOf } from "./flow-metrics-classify.js";
+import { compareFlowMetrics, formatComparison } from "./flow-metrics-compare.js";
 
 // ---------------------------------------------------------------------------
 // Read-only SQLite
@@ -580,20 +581,35 @@ export async function computeFlowMetrics(prefix: string, opts: FlowMetricsOption
   }
 }
 
-export async function runFlowMetrics(prefixes: string[], opts: FlowMetricsOptions & { json?: boolean }): Promise<void> {
+export async function runFlowMetrics(
+  prefixes: string[],
+  opts: FlowMetricsOptions & { json?: boolean; baseline?: string },
+): Promise<void> {
   const reports: FlowMetricsReport[] = [];
-  for (const prefix of prefixes) {
+  let baseline: FlowMetricsReport | undefined;
+  for (const prefix of opts.baseline ? [opts.baseline, ...prefixes] : prefixes) {
     try {
-      reports.push(await computeFlowMetrics(prefix, opts));
+      const report = await computeFlowMetrics(prefix, opts);
+      if (opts.baseline && baseline === undefined) baseline = report;
+      else reports.push(report);
     } catch (err) {
       process.stderr.write(`flow-metrics: ${err instanceof Error ? err.message : String(err)}\n`);
       process.exitCode = 1;
       return;
     }
   }
+  // --baseline: the before/after view — the same table the replay runner
+  // prints, so a live replay and a hand-picked pair of sessions read alike.
+  const comparisons = baseline
+    ? reports.map((r, i) => ({ session: prefixes[i]!, rows: compareFlowMetrics(baseline, r) }))
+    : [];
   if (opts.json) {
-    process.stdout.write(`${JSON.stringify(reports.length === 1 ? reports[0] : reports, null, 2)}\n`);
+    const body = reports.length === 1 ? reports[0] : reports;
+    process.stdout.write(`${JSON.stringify(baseline ? { baseline, reports, comparisons } : body, null, 2)}\n`);
     return;
   }
-  process.stdout.write(`${reports.map(formatFlowMetrics).join("\n\n")}\n`);
+  const blocks = reports.map(formatFlowMetrics);
+  for (const c of comparisons)
+    blocks.push(formatComparison(c.rows, { baseline: opts.baseline!.slice(0, 14), replay: c.session.slice(0, 14) }));
+  process.stdout.write(`${blocks.join("\n\n")}\n`);
 }

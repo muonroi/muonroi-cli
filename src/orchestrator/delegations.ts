@@ -57,6 +57,7 @@ import {
   readRevalidationSource,
 } from "./plan-revalidation.js";
 import { parseReviewVerdict, sourceFingerprint } from "./review-evidence.js";
+import { STALL_ERROR_MESSAGE } from "./stall-watchdog.js";
 import {
   applyWorkerPermissionMode,
   decideWorkerApproval,
@@ -73,7 +74,7 @@ import {
   type WriterLike,
   workerCommandCapabilityError,
 } from "./worker-dispatch-guard.js";
-import { failureRecoveryGuidance, workerFailureRecovery } from "./worker-failure-recovery.js";
+import { failureRecoveryGuidance, isMutationTool, workerFailureRecovery } from "./worker-failure-recovery.js";
 
 const ID_ADJECTIVES = ["brisk", "calm", "clever", "eager", "gentle", "keen", "lively", "nimble", "quiet", "steady"];
 
@@ -1433,6 +1434,31 @@ export async function loadDelegation(jobPath: string): Promise<StoredDelegation>
 function toolArtifactDir(jobPath: string): string {
   return jobPath.replace(/\.json$/, ".tools");
 }
+
+/** Saved inputs of a failed job's captured edit/write calls (for attemptedWritePaths). */
+async function readMutationCaptures(
+  jobPath: string,
+  record: StoredDelegation,
+): Promise<Array<{ toolName: string; input?: unknown }>> {
+  const captures: Array<{ toolName: string; input?: unknown }> = [];
+  for (const artifact of record.toolArtifacts ?? []) {
+    if (!isMutationTool(artifact.toolName)) continue;
+    try {
+      const saved = JSON.parse(await fs.readFile(path.join(toolArtifactDir(jobPath), artifact.fileName), "utf8")) as {
+        input?: unknown;
+      };
+      captures.push({ toolName: artifact.toolName, input: saved.input });
+    } catch (err) {
+      // The manifest stays authoritative; a missing capture only drops one path hint.
+      logger.warn("orchestrator", "Failed worker capture unreadable for attemptedWritePaths", {
+        jobPath,
+        toolCallId: artifact.toolCallId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return captures;
+}
 async function verifiedArtifactManifest(record: StoredDelegation, jobPath: string): Promise<void> {
   if (record.status === "running") throw new Error("Artifact job is still running.");
   if (path.resolve(record.outputPath) !== path.resolve(path.dirname(jobPath), `${record.id}.md`))
@@ -1703,7 +1729,12 @@ export async function completeDelegation(
  * Generic across providers: reads only the error's shape/phrasing.
  */
 export function delegationFailureKind(failure: unknown): DelegationFailureKind | undefined {
-  if (typeof failure === "string") return isRateLimitFailureText(failureTail(failure)) ? "rate-limited" : undefined;
+  if (typeof failure === "string") {
+    // The stall message itself lists "rate-limited" among possible causes; a
+    // stall is not a 429 and must not tell the main agent to back off.
+    if (failureTail(failure).startsWith(STALL_ERROR_MESSAGE)) return undefined;
+    return isRateLimitFailureText(failureTail(failure)) ? "rate-limited" : undefined;
+  }
   if (isRateLimitRetryExhausted(failure) || isRateLimitError(failure)) return "rate-limited";
   return undefined;
 }
@@ -1715,6 +1746,12 @@ export function delegationFailureKind(failure: unknown): DelegationFailureKind |
  * rate limits "rate-limited", and quoting it would bury the provider's words.
  */
 function failureTail(text: string): string {
+  // A host-labelled incomplete result is "<worker_incomplete: …>\n<partial
+  // answer>": only the marker line is the failure. Judging the whole string
+  // made keen-blue-lynx (session 8a5bd89c2be0) — an output-limit cut of a
+  // 53141-char corpus inventory that quoted handbook "rate limit" rows — a
+  // "rate-limited (HTTP 429)" failure telling the main agent to back off.
+  if (text.startsWith("worker_incomplete:")) return text.split("\n", 1)[0] ?? text;
   const idx = text.lastIndexOf("Task failed:");
   return idx >= 0 ? text.slice(idx) : text;
 }
@@ -1782,7 +1819,7 @@ export async function failDelegation(
     if (record.toolArtifacts?.length || record.artifactError) record.toolArtifactsDigest = toolArtifactsDigest(record);
     record.completedAt = new Date().toISOString();
     record.error = safeError;
-    record.failureRecovery = workerFailureRecovery(record);
+    record.failureRecovery = workerFailureRecovery(record, await readMutationCaptures(jobPath, record));
     record.title = record.description;
     record.summary = `Worker ${record.status}; ${record.failureRecovery.capturedToolCalls} captured tool results, ${record.failureRecovery.mutationToolCalls} edit/write calls, ${record.failureRecovery.commandToolCalls} command calls. Effects require reconciliation; no completion accepted.`;
 

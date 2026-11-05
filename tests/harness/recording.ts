@@ -10,6 +10,7 @@
 
 import type { LanguageModelV3CallOptions, LanguageModelV3Prompt } from "@ai-sdk/provider";
 import { WORKER_DUMP_INFIX } from "../../src/agent-harness/mock-model.js";
+import { ORCHESTRATOR_ROLE_PREFIX } from "../../src/orchestrator/orchestration-policy.js";
 
 export type CallRole = "top-level" | "sub-agent" | "unknown";
 
@@ -182,7 +183,7 @@ export function loadDumpedRecordings(path: string): InspectedCall[] {
  * Ancillary calls (title, classify, compaction proposer) and worker calls
  * ("You are the General sub-agent") never contain it.
  */
-export const MAIN_AGENT_MARKER = "You are the main orchestrator.";
+export const MAIN_AGENT_MARKER = ORCHESTRATOR_ROLE_PREFIX;
 
 /** True for a recorded MAIN-agent (orchestrator) call. */
 export function isMainAgentCall(call: InspectedCall): boolean {
