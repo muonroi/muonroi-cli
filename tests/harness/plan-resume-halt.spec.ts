@@ -10,6 +10,9 @@
  * plan content (no re-ask).
  */
 import type { ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawnHarness } from "./helpers.js";
@@ -18,11 +21,19 @@ describe("plan creation → user-halt (ESC) → resume on 'tiếp tục'", () =>
   let proc: ChildProcess;
   let driver: Driver;
   let cleanup: () => void;
+  // "Continue as council brainstorm" writes spec.md into the CWD
+  // (src/scaffold/continue-as-council.ts). Spawned in the repo root, this spec
+  // left an untracked spec.md ("Injected by --inject-halt for E2E testing") in
+  // the developer checkout after every harness run.
+  let workDir: string;
 
   beforeAll(async () => {
+    workDir = mkdtempSync(join(tmpdir(), "muonroi-plan-resume-halt-"));
     const ctx = await spawnHarness({
+      cwd: workDir,
       extraArgs: ["-k", "FAKE_KEY_FOR_TESTS", "-m", "deepseek-v4-flash", "--inject-halt"],
-      fixturesDir: "tests/harness/fixtures/llm/plan-resume",
+      // Absolute: the child's cwd is the temp dir, so a relative path would miss.
+      fixturesDir: resolve("tests/harness/fixtures/llm/plan-resume"),
     });
     proc = ctx.proc;
     driver = ctx.driver;
@@ -35,6 +46,12 @@ describe("plan creation → user-halt (ESC) → resume on 'tiếp tục'", () =>
   afterAll(() => {
     proc?.kill();
     cleanup?.();
+    try {
+      rmSync(workDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    } catch (err) {
+      // Best-effort temp cleanup; a Windows handle still closing must not fail the suite.
+      process.stderr.write(`[plan-resume-halt] temp cleanup failed (${workDir}): ${(err as Error).message}\n`);
+    }
   });
 
   it("select 'Continue as council brainstorm' from halt card", async () => {
