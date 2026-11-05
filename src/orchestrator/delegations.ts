@@ -1874,10 +1874,25 @@ function resolveCliArgs(): string[] {
     throw new Error("Could not resolve the CLI entrypoint for background delegation.");
   }
   // A fixture-backed parent must never launch a worker against a real provider.
-  const mockArg = process.argv.find((arg) => arg.startsWith("--mock-llm="));
-  if (mockArg) return [entry, mockArg];
-  const mockIndex = process.argv.indexOf("--mock-llm");
-  return mockIndex >= 0 && process.argv[mockIndex + 1] ? [entry, "--mock-llm", process.argv[mockIndex + 1]!] : [entry];
+  const mockDir = resolveMockLlmDir(process.argv);
+  return mockDir !== undefined ? [entry, "--mock-llm", mockDir] : [entry];
+}
+
+/**
+ * The `--mock-llm` dir THIS process actually loaded. Commander keeps the LAST
+ * occurrence of a repeated single-value option, so the worker must forward the
+ * last one too — the first-match lookup this replaces handed workers a different
+ * fixture dir than the parent whenever the flag appeared twice (the harness
+ * helper passes a default dir and then the spec's own).
+ */
+export function resolveMockLlmDir(argv: readonly string[]): string | undefined {
+  let dir: string | undefined;
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
+    if (arg.startsWith("--mock-llm=")) dir = arg.slice("--mock-llm=".length);
+    else if (arg === "--mock-llm" && argv[i + 1] !== undefined) dir = argv[++i];
+  }
+  return dir;
 }
 
 function getProjectId(cwd: string): string {

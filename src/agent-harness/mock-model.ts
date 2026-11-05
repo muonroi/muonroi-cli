@@ -90,6 +90,22 @@ export interface MockModelFixture {
    * Setting `classify` implies opting in.
    */
   autoClassify?: boolean;
+  /**
+   * Per-role stream queues, chosen by the call's system prompt. The first route
+   * whose `systemIncludes` substring occurs in the system text serves the call
+   * from ITS OWN cursor (same exhaust-repeats-last rule as `stream`); a call no
+   * route matches falls through to `stream`.
+   *
+   * Why: the TUI's top-level agent is the orchestrator, which has no write/shell
+   * tools and dispatches workers as detached background processes
+   * (src/orchestrator/delegations.ts). Each worker process loads the SAME
+   * `--mock-llm` dir with a fresh cursor, so a single shared `stream` queue
+   * would replay the orchestrator's `task` round to the worker. Routing on the
+   * worker role line ("You are the General sub-agent", src/orchestrator/
+   * prompts.ts) gives each role a deterministic script regardless of which
+   * process serves it.
+   */
+  routes?: ReadonlyArray<{ systemIncludes: string; stream: StreamChunks | StreamChunks[] }>;
 }
 
 /**
@@ -186,6 +202,11 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
  */
 export function createMockModel(fx: MockModelFixture): MockModelHandle {
   const streams: StreamChunks[] = isNestedArray(fx.stream) ? fx.stream : [fx.stream];
+  const routes = (fx.routes ?? []).map((route) => ({
+    systemIncludes: route.systemIncludes,
+    streams: isNestedArray(route.stream) ? route.stream : [route.stream],
+    cursor: 0,
+  }));
   const generates: string[] = fx.generate === undefined ? [] : Array.isArray(fx.generate) ? fx.generate : [fx.generate];
   let callIdx = 0;
   let genIdx = 0;
@@ -236,6 +257,26 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
               chunks: textOnlyStream(ancillary.reply),
               initialDelayInMs: null,
               chunkDelayInMs: null,
+            }),
+          };
+        }
+      }
+      if (routes.length > 0) {
+        const sys = systemPromptText(options);
+        const route = routes.find((r) => sys.includes(r.systemIncludes));
+        if (route) {
+          const routed = route.streams[Math.min(route.cursor, route.streams.length - 1)]!;
+          route.cursor += 1;
+          if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+            process.stderr.write(
+              `[mock-model] doStream route "${route.systemIncludes}" #${route.cursor} → ${routed.length} parts, types=${routed.map((c) => c.type).join(",")}\n`,
+            );
+          }
+          return {
+            stream: simulateReadableStream<LanguageModelV3StreamPart>({
+              chunks: routed,
+              initialDelayInMs: chunkDelayMs || null,
+              chunkDelayInMs: chunkDelayMs || null,
             }),
           };
         }
@@ -291,6 +332,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       model.doStreamCalls.length = 0;
       callIdx = 0;
       genIdx = 0;
+      for (const route of routes) route.cursor = 0;
     },
   };
 }
@@ -641,6 +683,16 @@ export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModel
       stream: isNestedArray(raw.model.stream)
         ? raw.model.stream.map(normalizeStreamChunks)
         : normalizeStreamChunks(raw.model.stream),
+      ...(raw.model.routes
+        ? {
+            routes: raw.model.routes.map((route) => ({
+              systemIncludes: route.systemIncludes,
+              stream: isNestedArray(route.stream)
+                ? route.stream.map(normalizeStreamChunks)
+                : normalizeStreamChunks(route.stream),
+            })),
+          }
+        : {}),
     };
     const base = createMockModel(normalized);
     log(
@@ -713,6 +765,22 @@ export interface InstalledMockHandle extends MockModelHandle {
  * throws (e.g. circular tool refs). Each fallback entry preserves the fields
  * cost-leak specs actually assert against.
  */
+/** Infix that marks a background-worker dump next to the parent's dump file. */
+export const WORKER_DUMP_INFIX = ".worker-";
+
+/**
+ * Where THIS process dumps its recordings. A background delegation worker
+ * (MUONROI_BACKGROUND_CHILD=1, see src/orchestrator/delegations.ts) inherits the
+ * parent's MUONROI_MOCK_MODEL_DUMP; writing the same file would overwrite the
+ * orchestrator's recording after every worker doStream. Each worker therefore
+ * writes a sibling `<base>.worker-<pid>.json` the spec reads separately.
+ */
+export function resolveMockDumpPath(basePath: string, env: NodeJS.ProcessEnv, pid: number): string {
+  if (env.MUONROI_BACKGROUND_CHILD !== "1") return basePath;
+  const stem = basePath.endsWith(".json") ? basePath.slice(0, -".json".length) : basePath;
+  return `${stem}${WORKER_DUMP_INFIX}${pid}.json`;
+}
+
 export function dumpRecordings(
   path: string,
   model: MockLanguageModelV3 | { doStreamCalls: ReadonlyArray<unknown> },

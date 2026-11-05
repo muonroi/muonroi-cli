@@ -36,6 +36,13 @@ export interface ModelFixture {
   defaultProviderOptions?: Record<string, unknown>;
   provider?: string;
   modelId?: string;
+  /**
+   * Per-role queues keyed by a system-prompt substring (see `routes` in
+   * src/agent-harness/mock-model.ts). Use it to script a background worker —
+   * which runs in its own process with a fresh fixture cursor — separately from
+   * the orchestrator's `stream`.
+   */
+  routes?: ReadonlyArray<{ systemIncludes: string; stream: StreamChunks | StreamChunks[] }>;
 }
 
 export interface CostLeakHarness {
@@ -87,6 +94,18 @@ export interface SpawnCostLeakOptions {
    * Layer-1 deterministically falls back to the LLM (mock) classifier.
    */
   env?: Record<string, string>;
+  /**
+   * `--permission` mode for the spawned TUI. Omitted → the CLI default (safe).
+   * Safe mode is documented as "every tool call prompts the user for approval"
+   * (src/utils/permission-mode.ts) and since the orchestrator contract it is
+   * enforced: main's read_file/grep carry `needsApproval` in safe mode
+   * (src/orchestrator/tool-engine.ts) and every worker tool goes through the
+   * owner approval channel (src/orchestrator/worker-approval.ts). A spec whose
+   * subject is NOT approval (compaction, bash cache, scope reminder) must pick
+   * `auto-edit` so file reads/writes and non-dangerous shell auto-approve —
+   * otherwise the turn parks on an approval card the spec never answers.
+   */
+  permission?: "safe" | "auto-edit" | "yolo";
 }
 
 /**
@@ -114,7 +133,15 @@ export async function spawnCostLeakHarness(
   const apiKey = opts.apiKey ?? "FAKE_KEY_FOR_TESTS";
 
   const ctx = await spawnHarness({
-    extraArgs: ["-k", apiKey, "-m", modelId, "--mock-llm", fixDir],
+    extraArgs: [
+      "-k",
+      apiKey,
+      "-m",
+      modelId,
+      "--mock-llm",
+      fixDir,
+      ...(opts.permission ? ["--permission", opts.permission] : []),
+    ],
     env: {
       MUONROI_MOCK_MODEL_DUMP: dumpPath,
       MUONROI_NO_SHELL_HOLD: "1",

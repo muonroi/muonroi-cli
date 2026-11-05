@@ -13,7 +13,14 @@ import { afterAll, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { humanizeApiError } from "../../orchestrator/error-utils.js";
-import { createMockModel, loadMockModelFromDir, textOnlyStream, toolCallStream } from "../mock-model.js";
+import {
+  createMockModel,
+  loadMockModelFromDir,
+  resolveMockDumpPath,
+  textOnlyStream,
+  toolCallStream,
+  WORKER_DUMP_INFIX,
+} from "../mock-model.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
 async function drainStream(result: { fullStream: AsyncIterable<any> }): Promise<void> {
@@ -295,5 +302,54 @@ describe("loadMockModelFromDir", () => {
 
     expect(handle?.calls.length).toBe(2);
     expect(handle?.calls[1]?.prompt.length).toBeGreaterThan(handle?.calls[0]?.prompt.length ?? 0);
+  });
+
+  it("loads per-role routes from the fixture file", async () => {
+    const dir = mkFixtureDir({
+      stream: [textOnlyStream("main")],
+      routes: [{ systemIncludes: "You are the General sub-agent", stream: [textOnlyStream("worker")] }],
+    });
+    const handle = await loadMockModelFromDir(dir);
+    expect(handle).not.toBeNull();
+    const worker = streamText({ model: handle!.model, system: "You are the General sub-agent.", prompt: "go" });
+    expect(await worker.text).toBe("worker");
+    const main = streamText({ model: handle!.model, system: "You are the main orchestrator.", prompt: "go" });
+    expect(await main.text).toBe("main");
+  });
+});
+
+describe("createMockModel routes", () => {
+  it("serves each role from its own cursor so a fresh worker process starts at its own round 0", async () => {
+    const handle = createMockModel({
+      stream: [textOnlyStream("main-1"), textOnlyStream("main-2")],
+      routes: [
+        { systemIncludes: "You are the General sub-agent", stream: [textOnlyStream("w-1"), textOnlyStream("w-2")] },
+      ],
+    });
+    const say = async (system: string) => streamText({ model: handle.model, system, prompt: "x" }).text;
+
+    expect(await say("You are the main orchestrator.")).toBe("main-1");
+    expect(await say("You are the General sub-agent. Do work.")).toBe("w-1");
+    // The worker call did NOT advance the main queue, and vice versa.
+    expect(await say("You are the main orchestrator.")).toBe("main-2");
+    expect(await say("You are the General sub-agent. Do work.")).toBe("w-2");
+    // Exhausted route repeats its last entry, like `stream`.
+    expect(await say("You are the General sub-agent. Do work.")).toBe("w-2");
+    expect(handle.calls.length).toBe(5);
+
+    handle.reset();
+    expect(await say("You are the General sub-agent. Do work.")).toBe("w-1");
+  });
+});
+
+describe("resolveMockDumpPath", () => {
+  it("keeps the parent's path outside a background worker", () => {
+    expect(resolveMockDumpPath("/tmp/calls.json", {}, 42)).toBe("/tmp/calls.json");
+  });
+
+  it("gives a background worker its own sibling file so it cannot overwrite the parent's dump", () => {
+    expect(resolveMockDumpPath("/tmp/calls.json", { MUONROI_BACKGROUND_CHILD: "1" }, 42)).toBe(
+      `/tmp/calls${WORKER_DUMP_INFIX}42.json`,
+    );
   });
 });

@@ -15,15 +15,31 @@
  *   4. Registry slices the cached stdout and returns just the matching
  *      lines. Mock LLM emits a final stop.
  *
- * Assertions over the dumped doStreamCalls:
- *   - At least 3 LLM calls (user → bash result → bash_output_get result → stop).
- *   - Call #2 input (the prompt sent after `bash` returned) contains the
+ * Who runs bash: since b014c9b9 the TUI top-level agent is the ORCHESTRATOR,
+ * whose tool set is filtered to coordination + read_file/grep
+ * (filterExecutionTools / ORCHESTRATION_TOOLS in
+ * src/orchestrator/orchestration-policy.ts) — it has no `bash` and no
+ * `bash_output_get`. Shell work is delegated: the orchestrator dispatches a
+ * `task` (agent=general, explicit modelId, background=false so the host waits)
+ * and a background worker process runs the bash → bash_output_get loop. The
+ * worker loads the same `--mock-llm` dir with a fresh cursor, so its rounds are
+ * scripted as a `routes` entry keyed on its role line ("You are the General
+ * sub-agent") and it dumps to `<calls>.worker-<pid>.json`
+ * (resolveMockDumpPath, src/agent-harness/mock-model.ts).
+ *
+ * Assertions over the dumped WORKER doStreamCalls:
+ *   - At least 3 worker LLM calls (prompt → bash result → bash_output_get
+ *     result → stop).
+ *   - Worker call #2 input (the prompt sent after `bash` returned) contains the
  *     `bash_run_id: bash-` substring — proves the registry footer fired.
- *   - Call #3 input (sent after `bash_output_get` returned) contains the
+ *   - Worker call #3 input (sent after `bash_output_get` returned) contains the
  *     specific MARKER-42 line — proves the slice came from cache, not a
  *     re-run.
- *   - System prompt for the deepseek-fast model contains the
- *     CHEAP_MODEL_PLAYBOOK opening line — proves Bước 1 injection fires.
+ *   - System prompt for the deepseek-fast WORKER contains CHEAP_MODEL_PLAYBOOK
+ *     verbatim, front-loaded after the [ENV] line — proves Bước 1 injection
+ *     fires for the model that actually runs bash.
+ * Plus, on the orchestrator side: the `task` result fed back to it reports the
+ * worker's execution as complete.
  *
  * The mock LLM does NOT autonomously "decide" to call bash_output_get.
  * What this spec verifies is the PLUMBING: when the model does call it,
@@ -36,24 +52,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
+import { CHEAP_MODEL_PLAYBOOK } from "../../src/pil/cheap-model-playbook.js";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
-import { loadDumpedRecordings } from "./recording.js";
+import { isMainAgentCall, loadDumpedRecordings, loadWorkerDumpedRecordings } from "./recording.js";
 
 let scriptPath = "";
 let workDir = "";
 
-/**
- * True when a recorded doStream call is a MAIN-agent call (system prompt starts
- * with "You are muonroi-cli in Agent mode"), as opposed to PIL Layer 1's
- * classifier call. Shared by the completion poll and the final assertion.
- */
-function isAgentCall(c: { options?: { prompt?: unknown } } | null | undefined): boolean {
-  const p = c?.options?.prompt;
-  if (!Array.isArray(p) || p.length === 0) return false;
-  const sys = p[0] as { content?: unknown };
-  const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-  return sysText.includes("muonroi-cli in Agent mode");
-}
+/** Role line of the general worker (src/orchestrator/prompts.ts buildSubagentPrompt). */
+const WORKER_ROLE_LINE = "You are the General sub-agent";
 
 /**
  * Build the bash command that prints ~150KB of deterministic output with a
@@ -142,29 +149,53 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
       {
         provider: "deepseek",
         modelId: "deepseek-v4-flash",
+        // Orchestrator (unrouted calls). PIL's classifier, the session title and
+        // the compaction proposer are intercepted by mock-model.ts without
+        // advancing a cursor, so round 1 IS the orchestrator's first turn.
         stream: [
-          // NOTE: PIL Layer-1's model-first classifier doStream is now
-          // intercepted by mock-model.ts (CLASSIFY_SIGNATURE) and returns a
-          // canned classification line WITHOUT advancing the fixture cursor —
-          // so it no longer consumes a fixture round. The old round-0 absorber
-          // was therefore orphaned and got mis-fed to the main agent (a
-          // text-stop round → the turn ended after one round). The fixture now
-          // starts directly at the main-agent's first turn.
-          // Round 1: main-agent first turn → bash with big output.
-          buildToolCallRound("bash-1", "bash", { command: bigOutputCmd() }),
-          // Round 2: after bash returns, model picks bash_output_get with the
-          // run_id the registry handed back. The mock fixture hard-codes
-          // "bash-1" because BashTool's runId counter resets per process.
-          buildToolCallRound("bog-1", "bash_output_get", {
-            run_id: "bash-1",
-            mode: "grep",
-            pattern: "MARKER-42",
+          // Round 1: delegate the shell work. background=false makes the host
+          // wait for the worker (durable host wait) so its result returns
+          // in-turn; the TUI default is a background receipt.
+          buildToolCallRound("task-1", "task", {
+            agent: "general",
+            description: "inspect big command output",
+            prompt: "Execute the generator script and find the MARKER-42 line in its cached output.",
+            modelId: "deepseek-v4-flash",
+            background: false,
           }),
-          // Round 3: final stop.
+          // Round 2: the worker finished; close the turn.
           buildFinalTextRound("done"),
+        ],
+        routes: [
+          {
+            systemIncludes: WORKER_ROLE_LINE,
+            stream: [
+              // Worker round 1 → bash with big output.
+              buildToolCallRound("bash-1", "bash", { command: bigOutputCmd() }),
+              // Worker round 2: after bash returns, pick bash_output_get with the
+              // run_id the registry handed back. Hard-coded "bash-1" because
+              // BashTool's runId counter starts fresh in each worker process.
+              buildToolCallRound("bog-1", "bash_output_get", {
+                run_id: "bash-1",
+                mode: "grep",
+                pattern: "MARKER-42",
+              }),
+              // Worker round 3: final stop.
+              buildFinalTextRound("found MARKER-42"),
+            ],
+          },
         ],
       },
       {
+        // Every worker tool goes through toolNeedsApproval in its permission mode
+        // (src/orchestrator/worker-approval.ts gateWorkerTools). Safe asks for
+        // everything; auto-edit auto-approves non-dangerous bash but NOT
+        // bash_output_get (absent from AUTO_EDIT_ALLOWED,
+        // src/utils/permission-mode.ts), so the worker would park on an owner
+        // approval card this spec never answers (measured: worker stopped after
+        // round 2). This spec is about the output cache, not approval, so it
+        // selects yolo — the mode that auto-approves every tool.
+        permission: "yolo",
         // Force EE classification unreachable so PIL Layer-1 deterministically
         // falls back to the LLM (mock) classifier, which consumes the round-0
         // JSON absorber. Without this, the classifier's EE /api/classify call
@@ -201,22 +232,19 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     handle.driver.press("Enter");
 
     await handle.driver.wait_for({ selector: "role=log", timeoutMs: 20_000 });
-    // Wait for the 3 main-agent rounds to actually be RECORDED before exiting.
-    // The H3 hook (src/index.ts) rewrites the dump after every doStream call, so
-    // polling it directly tracks round completion — the exact thing the
-    // assertion below needs. This replaces a fixed 25s sleep that flaked under
-    // full-suite load (the spawned child is CPU-starved, so the 3rd round had
-    // not been recorded yet when the dump was taken). 110s budget (440×250ms):
-    // under full-suite CPU contention the 3 real-bash rounds are slow (observed
-    // only 2/3 rounds recorded at 72s with the old 70s window) — 110s plus the
-    // lighter payload above give them room. (EE-down env removes the separate
-    // 1-round abort; this window covers factor #2, the round slowness.)
+    // Wait for the rounds to actually be RECORDED before exiting. The H3 hook
+    // (src/index.ts) rewrites the dump after every doStream call, so polling it
+    // directly tracks round completion. The orchestrator's SECOND round is fed
+    // the task result, which exists only after the worker finished all three of
+    // its rounds (background=false waits). 110s budget (440×250ms): under
+    // full-suite CPU contention the real-bash worker rounds are slow.
     for (let i = 0; i < 440; i++) {
       if (existsSync(handle.dumpPath)) {
         try {
-          if (loadDumpedRecordings(handle.dumpPath).filter(isAgentCall).length >= 3) break;
-        } catch {
-          // dump mid-rotation — atomic rename means the next read is clean
+          if (loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall).length >= 2) break;
+        } catch (err) {
+          // Dump mid-rotation — the atomic rename means the next read is clean.
+          console.debug(`[bash-output-get spec] dump not readable yet: ${(err as Error).message}`);
         }
       }
       await new Promise((r) => setTimeout(r, 250));
@@ -224,14 +252,22 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
 
     await exitTuiAndWaitForDump(handle, 20_000);
 
-    const calls = loadDumpedRecordings(handle.dumpPath);
+    const mainCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
+    const workerCalls = loadWorkerDumpedRecordings(handle.dumpPath).filter((c) =>
+      c.systemText.includes(WORKER_ROLE_LINE),
+    );
+    const diagnose = () =>
+      `main rounds=${mainCalls.length}, worker rounds=${workerCalls.length}; main round2 tail: ${JSON.stringify(
+        mainCalls[1]?.options?.prompt ?? {},
+      ).slice(-600)}`;
 
-    // PIL Layer 1 runs its own classifier call before the main agent, so we
-    // expect 4 dumped calls: [pil-classifier, agent#1 user-only, agent#2
-    // after-bash, agent#3 after-bog]. Filter to main-agent calls to make the
-    // spec robust to upstream PIL changes.
-    const agentCalls = calls.filter(isAgentCall);
-    expect(agentCalls.length).toBeGreaterThanOrEqual(3);
+    // The orchestrator dispatched the worker and was told it completed.
+    expect(mainCalls.length, diagnose()).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(mainCalls[1]?.options?.prompt ?? {}), diagnose()).toContain("Execution: complete");
+
+    // Worker calls: [prompt, after-bash, after-bog].
+    const agentCalls = workerCalls;
+    expect(agentCalls.length, diagnose()).toBeGreaterThanOrEqual(3);
 
     // Agent call #2 (after bash returned) must carry the bash_run_id footer
     // — proves registry truncation footer fires when output > 32K cap.
@@ -248,8 +284,9 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     expect(after_bog).toMatch(/\[bash-1 mode=grep/);
 
     // Verify the cheap-model playbook landed at the TOP of the system prompt
-    // for fast tier (Bước 3-2 — prepend with CRITICAL marker). PIL's
-    // classifier has a different system, so check agentCalls only.
+    // for the fast-tier WORKER (Bước 3-2 — prepend with CRITICAL marker). The
+    // orchestrator runs on the provider's top-tier model and never runs bash,
+    // so the worker is where the playbook must land.
     const agentSystems = agentCalls.map((c) => {
       const p = c?.options?.prompt;
       const sys = Array.isArray(p) && p[0] ? p[0] : null;
@@ -264,9 +301,10 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
     expect(agentSystems[0]?.indexOf("[ENV]")).toBeLessThan(
       agentSystems[0]?.indexOf("[CRITICAL TOOL-USE RULES") ?? Number.MAX_SAFE_INTEGER,
     );
-    // Playbook content still present.
-    const joined = agentSystems.join("\n");
-    expect(joined).toContain("bash_output_get");
-    expect(joined).toMatch(/EVERY bash call/);
+    // Playbook content present verbatim. b014c9b9 rewrote rule 1 (the old
+    // "This applies to EVERY bash call" line is gone), so pin the exported
+    // constant rather than a phrase that drifts.
+    expect(agentSystems[0]).toContain(CHEAP_MODEL_PLAYBOOK);
+    expect(agentSystems[0]).toContain("bash_output_get");
   }, 180_000);
 });

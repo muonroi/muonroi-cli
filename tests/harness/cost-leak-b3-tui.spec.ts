@@ -5,15 +5,21 @@
  * tool_result parts into short summary stubs once cumulative message-chars
  * exceed MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS.
  *
- * Strategy: emit a top-level `task` tool-call → orchestrator runs
- * runTaskRequest which spawns a sub-agent streamText loop. The same mock
- * model instance handles BOTH calls in sequence (one shared
- * doStreamCalls). The fixture is laid out as:
+ * Strategy: the TUI top-level agent is the ORCHESTRATOR (default execution
+ * role since b014c9b9). Its `task` dispatch always goes through runDelegation
+ * (Agent.runTask, src/orchestrator/orchestrator.ts), which launches the worker
+ * as a DETACHED background process (src/orchestrator/delegations.ts) that runs
+ * runTaskRequest → StreamRunner — the sub-agent loop that owns the compactor.
+ * That process loads the same `--mock-llm` dir with its own fresh cursor and
+ * dumps to `<calls>.worker-<pid>.json`, so the fixture is split by role:
  *
- *   #1 top-level: tool-call "task" → orchestrator dispatches sub-agent
- *   #2-4 sub-agent: tool-call "read_file" (3 rounds, ~30k each)
- *   #5 sub-agent: final text "subagent done"
- *   #6 top-level: final text "all done"
+ *   orchestrator `stream`:
+ *     #1 tool-call "task" (agent=general, explicit modelId, background=false
+ *        so the host waits and returns the result in-turn)
+ *     #2 final text "all done"
+ *   worker route ("You are the General sub-agent"):
+ *     #1-3 tool-call "read_file" (3 rounds, ~30k each)
+ *     #4 final text "subagent done"
  *
  * With MUONROI_SUBAGENT_COMPACT_THRESHOLD_CHARS=20000 (minimum allowed by
  * the settings validator) and ~30k payload per read, sub-agent compaction
@@ -32,7 +38,10 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
-import { inspectByRole, loadDumpedRecordings } from "./recording.js";
+import { isMainAgentCall, loadDumpedRecordings, loadWorkerDumpedRecordings } from "./recording.js";
+
+/** Role line of the general worker (src/orchestrator/prompts.ts buildSubagentPrompt). */
+const WORKER_ROLE_LINE = "You are the General sub-agent";
 
 const LARGE_PAYLOAD_CHARS = 30_000;
 
@@ -99,33 +108,46 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     // keeps dedup ON (default); only this accumulation test opts out.
     process.env.MUONROI_SUBAGENT_CAP_DEDUP = "0";
 
-    handle = await spawnCostLeakHarness({
-      provider: "deepseek",
-      modelId: "deepseek-v4-flash",
-      stream: [
-        // Top-level: dispatch to sub-agent.
-        // Use a FOREGROUND agent type ("general"), NOT "explore": the task tool
-        // auto-routes agent==="explore" (and maxToolRounds>25) to the background
-        // `delegate` executor (src/tools/registry.ts:667), which runs detached and
-        // never issues a synchronous sub-agent streamText for the mock to record —
-        // that is why this spec previously saw only top-level calls. "general"
-        // blocks the turn and drives a real sub-agent loop through the mock.
-        buildToolCallRound("task-1", "task", {
-          agent: "general",
-          description: "scan source files",
-          prompt: "read the three big payload files and summarize them",
-        }),
-        // Sub-agent rounds — each reads a different file (distinct content
-        // avoids the cross-turn dedup wrapper masking the payload before
-        // compaction can see it).
-        buildToolCallRound("sub-1", "read_file", { file_path: join(payloadDir, "big1.txt") }),
-        buildToolCallRound("sub-2", "read_file", { file_path: join(payloadDir, "big2.txt") }),
-        buildToolCallRound("sub-3", "read_file", { file_path: join(payloadDir, "big3.txt") }),
-        buildFinalTextRound("subagent done"),
-        // Top-level closes with a stop after the task tool returns.
-        buildFinalTextRound("all done"),
-      ],
-    });
+    handle = await spawnCostLeakHarness(
+      {
+        provider: "deepseek",
+        modelId: "deepseek-v4-flash",
+        stream: [
+          // Orchestrator: dispatch the reads to a worker. Use "general", NOT
+          // "explore": the task tool routes explore to the read-only `delegate`
+          // research executor (src/tools/registry.ts). The orchestrator must
+          // name a catalog modelId (validateWorkerSelection), and
+          // background=false makes the host wait so the result returns in-turn.
+          buildToolCallRound("task-1", "task", {
+            agent: "general",
+            description: "scan source files",
+            prompt: "read the three big payload files and summarize them",
+            modelId: "deepseek-v4-flash",
+            background: false,
+          }),
+          // Orchestrator closes with a stop after the task tool returns.
+          buildFinalTextRound("all done"),
+        ],
+        routes: [
+          {
+            systemIncludes: WORKER_ROLE_LINE,
+            stream: [
+              // Worker rounds — each reads a different file (distinct content
+              // avoids the cross-turn dedup wrapper masking the payload before
+              // compaction can see it).
+              buildToolCallRound("sub-1", "read_file", { file_path: join(payloadDir, "big1.txt") }),
+              buildToolCallRound("sub-2", "read_file", { file_path: join(payloadDir, "big2.txt") }),
+              buildToolCallRound("sub-3", "read_file", { file_path: join(payloadDir, "big3.txt") }),
+              buildFinalTextRound("subagent done"),
+            ],
+          },
+        ],
+      },
+      // Safe mode routes every worker tool through owner approval
+      // (src/orchestrator/worker-approval.ts gateWorkerTools); auto-edit
+      // auto-approves read_file so the worker's reads run unattended.
+      { permission: "auto-edit" },
+    );
   }, 120_000);
 
   afterAll(() => {
@@ -141,14 +163,18 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     handle.driver.type("please dispatch a sub-agent to read every payload file and summarize");
     handle.driver.press("Enter");
 
-    // Poll the dump file for >=3 recorded calls (event-driven, not wall-clock).
-    // The dump is written after every doStream call by writeDumpAlways.
+    // Poll the orchestrator's dump (event-driven, not wall-clock; rewritten after
+    // every doStream). Its SECOND round is fed the task result, which exists
+    // only once the worker process has finished all of its rounds.
     const deadline_b3 = Date.now() + 60_000;
-    let calls_b3: ReturnType<typeof loadDumpedRecordings> = [];
     while (Date.now() < deadline_b3) {
       if (existsSync(handle.dumpPath)) {
-        calls_b3 = loadDumpedRecordings(handle.dumpPath);
-        if (calls_b3.length >= 3) break;
+        try {
+          if (loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall).length >= 2) break;
+        } catch (err) {
+          // Dump mid-rotation — the atomic rename means the next read is clean.
+          console.debug(`[b3 spec] dump not readable yet: ${(err as Error).message}`);
+        }
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
@@ -156,24 +182,25 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
     await exitTuiAndWaitForDump(handle, 30_000);
 
     expect(existsSync(handle.dumpPath)).toBe(true);
-    const calls = loadDumpedRecordings(handle.dumpPath);
-    expect(calls.length).toBeGreaterThanOrEqual(3);
+    const mainCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
+    const workerCalls = loadWorkerDumpedRecordings(handle.dumpPath);
+    const roles = () =>
+      `main rounds=${mainCalls.length}; worker calls: ${workerCalls.map((c) => `[${c.index}] ${c.role}`).join(", ")}`;
+    // The orchestrator dispatched the worker and was told it completed.
+    expect(mainCalls.length, roles()).toBeGreaterThanOrEqual(2);
+    expect(JSON.stringify(mainCalls[1]?.options.prompt ?? {}), roles()).toContain("Execution: complete");
 
-    // Filter to sub-agent calls (system prompt begins "You are the * sub-agent").
-    const subCalls = inspectByRole({ calls: calls.map((c) => c.options) }, "sub-agent");
+    // Sub-agent calls, classified by the role line (inferRole in recording.ts).
+    const subCalls = workerCalls.filter((c) => c.role === "sub-agent" && c.systemText.includes(WORKER_ROLE_LINE));
     if (subCalls.length === 0) {
-      const roles = calls.map((c) => `[${c.index}] ${c.role}`).join(", ");
-      throw new Error(`No sub-agent calls detected. Roles seen: ${roles}`);
+      throw new Error(`No sub-agent calls detected. ${roles()}`);
     }
     expect(subCalls.length).toBeGreaterThanOrEqual(2);
 
-    const elidedSubCalls = subCalls.filter((c) => {
-      try {
-        return JSON.stringify(c.options.prompt).includes("elided by sub-agent compactor");
-      } catch {
-        return false;
-      }
-    });
+    // Dumped prompts are parsed JSON, so re-serialising them cannot throw.
+    const elidedSubCalls = subCalls.filter((c) =>
+      JSON.stringify(c.options.prompt).includes("elided by sub-agent compactor"),
+    );
     if (elidedSubCalls.length === 0) {
       const sizes = subCalls.map((c) => c.promptChars).join(", ");
       throw new Error(`No sub-agent compaction marker across ${subCalls.length} sub-agent calls. Sizes: ${sizes}`);
