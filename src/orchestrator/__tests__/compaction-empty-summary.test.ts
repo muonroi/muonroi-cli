@@ -88,6 +88,19 @@ function makeAgent() {
   return { agent, a };
 }
 
+async function compactAndReadSummaryWithAgent() {
+  const { agent, a } = makeAgent();
+  await a.compactForContext(
+    "deepseek",
+    "You are a helpful assistant.",
+    8000,
+    new AbortController().signal,
+    undefined,
+    true,
+  );
+  return { agent, a };
+}
+
 async function compactAndReadSummary() {
   const { agent, a } = makeAgent();
   const ok = await a.compactForContext(
@@ -138,6 +151,44 @@ describe("compactForContext rejects unusable summaries through the existing fall
     const { summary, models } = await compactAndReadSummary();
     expect(models).toEqual([COMPACT_MODEL]);
     expect(summary).toContain("progress detail");
+  }, 15_000);
+
+  it("a rejected summary's billed tokens are recorded to usage_events under the model that spent them", async () => {
+    replies.set(COMPACT_MODEL, { text: "", finishReason: "length", outputTokens: 4096, reasoningText: "r".repeat(50) });
+    const { agent } = await compactAndReadSummaryWithAgent();
+    const rows = getDatabase()
+      .prepare(
+        "SELECT model, input_tokens, output_tokens FROM usage_events WHERE session_id = ? AND source = 'compaction' ORDER BY id",
+      )
+      .all(agent.getSessionId()!) as Array<{ model: string; input_tokens: number; output_tokens: number }>;
+    expect(rows).toEqual([
+      { model: COMPACT_MODEL, input_tokens: 100, output_tokens: 4096 }, // the rejected, billed attempt
+      { model: MAIN_MODEL, input_tokens: 100, output_tokens: 20 }, // the fallback that produced the summary
+    ]);
+  }, 15_000);
+
+  it("a rejected model is cooled down: the NEXT compaction skips it and goes straight to the fallback", async () => {
+    replies.set(COMPACT_MODEL, { text: "", finishReason: "length", outputTokens: 4096 });
+    const { a } = await compactAndReadSummaryWithAgent();
+    expect(calls.map((c) => c.modelId)).toEqual([COMPACT_MODEL, MAIN_MODEL]);
+
+    calls.length = 0;
+    const out: Array<{ role: "user" | "assistant"; content: string }> = [];
+    for (let i = 0; i < 60; i++) {
+      out.push({ role: "user", content: `Question ${i}: ${"detail ".repeat(2000)}` });
+      out.push({ role: "assistant", content: `Answer ${i}: ${"context ".repeat(2000)}` });
+    }
+    a.messages = out;
+    a.messageSeqs = out.map((_, i) => i + 1);
+    await a.compactForContext(
+      "deepseek",
+      "You are a helpful assistant.",
+      8000,
+      new AbortController().signal,
+      undefined,
+      true,
+    );
+    expect(calls.map((c) => c.modelId)).toEqual([MAIN_MODEL]);
   }, 15_000);
 
   it("both models empty: never stores an empty summary — the mechanical stub is used", async () => {

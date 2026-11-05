@@ -831,6 +831,29 @@ export function assertUsableCompactionSummary(
   );
 }
 
+/**
+ * Tokens a FAILED summarizer attempt was billed for, keyed by the thrown error.
+ *
+ * A rejected summary (see {@link CompactionSummaryRejectedError}) is a call that
+ * RETURNED: the provider billed its full input and every output token it spent
+ * reasoning. Session 4edc02516a92 shows that spend is the whole problem (15
+ * empty summaries, each at its output cap), yet once rejection became a throw
+ * the caller recorded nothing — cost became invisible exactly where it leaks.
+ * The caller reads this to attribute the waste in usage_events.
+ */
+const billedUsageByError = new WeakMap<object, CompactionUsage>();
+
+function attachBilledCompactionUsage(err: unknown, usage: CompactionUsage): void {
+  if (typeof err !== "object" || err === null) return;
+  billedUsageByError.set(err, usage);
+}
+
+/** Tokens billed by the failed attempt(s) behind `err`; zero when none were (e.g. the provider threw first). */
+export function getBilledCompactionUsage(err: unknown): CompactionUsage {
+  if (typeof err !== "object" || err === null) return emptyUsage();
+  return billedUsageByError.get(err) ?? emptyUsage();
+}
+
 function readUsage(usage: unknown): CompactionUsage {
   if (!isRecord(usage)) return { promptTokens: 0, completionTokens: 0 };
   const prompt =
@@ -901,7 +924,14 @@ async function summarizeConversation(
   });
 
   const usage = readUsage(result.usage);
-  assertUsableCompactionSummary(modelId, result, usage.completionTokens, dropMaxOutput ? undefined : effectiveMax);
+  try {
+    assertUsableCompactionSummary(modelId, result, usage.completionTokens, dropMaxOutput ? undefined : effectiveMax);
+  } catch (err) {
+    // Rethrown, not swallowed: assertUsableCompactionSummary already logged the
+    // rejection; this only carries the billed tokens to the caller.
+    attachBilledCompactionUsage(err, usage);
+    throw err;
+  }
   return { summary: result.text.trim(), usage };
 }
 
@@ -925,7 +955,10 @@ export async function generateCompactionSummary(
   const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, settings } = preparation;
 
   if (isSplitTurn && turnPrefixMessages.length > 0) {
-    const [historyResult, prefixResult] = await Promise.all([
+    // allSettled, not all: when one half fails, the OTHER half was still billed,
+    // and that spend must reach the caller with the error (see
+    // getBilledCompactionUsage) instead of vanishing with the dropped result.
+    const settled = await Promise.allSettled([
       messagesToSummarize.length > 0
         ? summarizeConversation(
             modelId,
@@ -947,6 +980,19 @@ export async function generateCompactionSummary(
         signal,
       ),
     ]);
+
+    const failure = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+    if (failure) {
+      let billed = emptyUsage();
+      for (const s of settled) {
+        billed = addUsage(billed, s.status === "fulfilled" ? s.value.usage : getBilledCompactionUsage(s.reason));
+      }
+      attachBilledCompactionUsage(failure.reason, billed);
+      throw failure.reason;
+    }
+    const [historyResult, prefixResult] = settled.map(
+      (s) => (s as PromiseFulfilledResult<CompactionSummaryResult>).value,
+    ) as [CompactionSummaryResult, CompactionSummaryResult];
 
     const usage = addUsage(historyResult.usage, prefixResult.usage);
     if (historyResult.summary && prefixResult.summary) {
