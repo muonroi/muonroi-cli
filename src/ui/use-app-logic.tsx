@@ -5136,12 +5136,19 @@ export function useAppLogic(props: AppLogicProps) {
                     revertLatestCompaction(sessionId);
                   }
                   agent.setMessages(restoredMessages);
+                  // The restored pre-compaction history may carry a stale ledger snapshot; replace it
+                  // with the live registry state (same contract as /compact).
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   const text = lines.slice(2).join("\n");
                   setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                   return;
                 } catch (e) {
-                  // fallback
+                  // Fall through to the plain-text restore below.
+                  logger.warn("ui", "[/expand] JSON history restore failed; showing plain-text context", {
+                    sessionId,
+                    error: e instanceof Error ? e.message : String(e),
+                  });
                 }
               }
               const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
@@ -6024,12 +6031,19 @@ export function useAppLogic(props: AppLogicProps) {
                       revertLatestCompaction(sessionId);
                     }
                     agent.setMessages(restoredMessages);
+                    // The restored pre-compaction history may carry a stale ledger snapshot; replace it
+                    // with the live registry state (same contract as /compact).
+                    await agent.carryDelegationLedgerAfterCompaction();
                     setMessages(groupToolEntries(agent.getChatEntries()));
                     const text = lines.slice(2).join("\n");
                     setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                     return;
                   } catch (e) {
-                    // fallback
+                    // Fall through to the plain-text restore below.
+                    logger.warn("ui", "[/expand] JSON history restore failed; showing plain-text context", {
+                      sessionId,
+                      error: e instanceof Error ? e.message : String(e),
+                    });
                   }
                 }
                 const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
