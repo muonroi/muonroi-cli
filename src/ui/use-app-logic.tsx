@@ -42,6 +42,7 @@ import { subscribeNeedsKey } from "../mcp/needs-key-bus";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
+import type { ToolApprovalAskInfo } from "../orchestrator/tool-approval.js";
 import { ASK_USER_DISMISSED, buildAskUserQuestion } from "../orchestrator/ask-user.js";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
 import { Agent } from "../orchestrator/orchestrator";
@@ -1097,10 +1098,16 @@ export function useAppLogic(props: AppLogicProps) {
     amount: string;
     network: string;
     asset: string;
-    approvalId?: string;
+    /** Main agent's own must-confirm tool call (safe mode); resolved via toolApprovalQueueRef. */
+    toolApproval?: ToolApprovalAskInfo;
     workerApproval?: import("../orchestrator/worker-approval.js").WorkerApprovalView;
     selected: number;
   } | null>(null);
+  // Main-agent tool approvals awaiting a decision, FIFO. The card shows the head;
+  // each entry's resolve() unblocks the tool's execute inside the live turn.
+  const toolApprovalQueueRef = useRef<
+    Array<{ info: ToolApprovalAskInfo; resolve: (verdict: "allow" | "deny") => void }>
+  >([]);
   const workerApprovalDecisionsRef = useRef(new Set<string>());
   const workerApprovalScrollRef = useRef<ScrollBoxRenderable>(null);
   useEffect(() => {
@@ -3381,6 +3388,71 @@ export function useAppLogic(props: AppLogicProps) {
     };
   }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
 
+  // Safe-mode approval for main's own tool calls (read_file/grep). The tool's
+  // execute awaits this promise INSIDE the live turn, so approve → the tool runs
+  // and its result reaches the model; deny → a denial result. Replaces the old
+  // SDK pause + "[Payment approved]" resume that left the call without a result.
+  const toolApprovalCard = useCallback(
+    (info: ToolApprovalAskInfo) => ({
+      url: info.toolName,
+      description: info.preview,
+      security: "",
+      securityLabel: "",
+      securityUrl: "",
+      amount: "",
+      network: "",
+      asset: "",
+      toolApproval: info,
+      selected: 0,
+    }),
+    [],
+  );
+  const settleToolApproval = useCallback(
+    (info: ToolApprovalAskInfo, verdict: "allow" | "deny") => {
+      const queue = toolApprovalQueueRef.current;
+      const idx = queue.findIndex((entry) => entry.info === info);
+      if (idx < 0) {
+        logger.file("warn", "ui", "Tool approval settled twice or after reset — ignored", {
+          toolName: info.toolName,
+          toolCallId: info.toolCallId,
+        });
+        return;
+      }
+      const [entry] = queue.splice(idx, 1);
+      entry!.resolve(verdict);
+      const next = queue[0];
+      setPendingPaymentApproval(next ? toolApprovalCard(next.info) : null);
+    },
+    [toolApprovalCard],
+  );
+  useEffect(() => {
+    const queue = toolApprovalQueueRef.current;
+    agent.setToolApprovalHandler(
+      (info: ToolApprovalAskInfo, signal?: AbortSignal) =>
+        new Promise<"allow" | "deny">((resolve) => {
+          queue.push({ info, resolve });
+          // Show it unless another main tool approval already owns the card; a
+          // worker approval yields (the snapshot poll re-offers it afterwards).
+          setPendingPaymentApproval((current) => (current?.toolApproval ? current : toolApprovalCard(info)));
+          // The turn was cancelled while the card was open: nobody awaits the
+          // answer any more, so withdraw the card instead of leaving it stale.
+          signal?.addEventListener(
+            "abort",
+            () => {
+              if (queue.some((entry) => entry.info === info)) settleToolApproval(info, "deny");
+            },
+            { once: true },
+          );
+        }),
+    );
+    return () => {
+      agent.setToolApprovalHandler(null);
+      // Never strand an awaiting execute: unmount/agent swap denies what is open.
+      for (const entry of queue.splice(0)) entry.resolve("deny");
+      setPendingPaymentApproval((current) => (current?.toolApproval ? null : current));
+    };
+  }, [agent, toolApprovalCard, settleToolApproval]);
+
   const finalizeActiveTurn = useCallback(
     ({ wasInterrupted = false, hadError = false }: { wasInterrupted?: boolean; hadError?: boolean } = {}) => {
       const activeTurn = activeTurnRef.current;
@@ -4274,29 +4346,6 @@ export function useAppLogic(props: AppLogicProps) {
                     },
                   ]);
                   setTimeout(scrollToBottom, 10);
-                }
-                break;
-              case "tool_approval_request":
-                if (chunk.toolCall && chunk.approvalId) {
-                  let args: Record<string, string> = {};
-                  try {
-                    args = JSON.parse(chunk.toolCall.function.arguments);
-                  } catch {
-                    /* ignore */
-                  }
-                  const pc = chunk.paymentPrecheck;
-                  setPendingPaymentApproval({
-                    url: args?.url ?? "",
-                    description: pc?.description ?? "",
-                    security: pc?.security ?? "",
-                    securityLabel: pc?.securityLabel ?? "",
-                    securityUrl: pc?.securityUrl ?? "",
-                    amount: pc?.amount ?? "",
-                    network: pc?.network ?? "",
-                    asset: pc?.asset ?? "",
-                    approvalId: chunk.approvalId,
-                    selected: 0,
-                  });
                 }
                 break;
               case "council_question":
@@ -8126,7 +8175,9 @@ export function useAppLogic(props: AppLogicProps) {
         if (isEscapeKey(key)) {
           const request = pendingPaymentApproval.workerApproval;
           setPendingPaymentApproval(null);
-          if (request) {
+          if (pendingPaymentApproval.toolApproval) {
+            settleToolApproval(pendingPaymentApproval.toolApproval, "deny");
+          } else if (request) {
             workerApprovalDecisionsRef.current.add(request.id);
             void agent
               .respondToWorkerApproval(request, false)
@@ -8150,7 +8201,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (key.name === "return") {
           const approved = pendingPaymentApproval.selected === 0;
-          const aid = pendingPaymentApproval.approvalId;
+          const toolApproval = pendingPaymentApproval.toolApproval;
           const request = pendingPaymentApproval.workerApproval;
           setPendingPaymentApproval(null);
           if (request) {
@@ -8168,11 +8219,10 @@ export function useAppLogic(props: AppLogicProps) {
                 workerApprovalDecisionsRef.current.delete(request.id);
                 refreshBackgroundSnapshot();
               });
-          } else if (aid) {
-            agent.respondToToolApproval(aid, approved);
-            if (approved) {
-              processMessage("[Payment approved]");
-            }
+          } else if (toolApproval) {
+            // Resolves the awaiting execute in the SAME turn: the tool runs (or
+            // returns a denial result) and the model continues — no new turn.
+            settleToolApproval(toolApproval, approved ? "allow" : "deny");
           }
           return;
         }

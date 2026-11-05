@@ -231,6 +231,7 @@ import { planSteerInjection } from "./steer-inbox.js";
 import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { applyAnthropicPromptCaching, compactSubAgentMessages, cumulativeMessageChars } from "./subagent-compactor.js";
 import { detectTextEmittedToolCall, parseDsmlToolCalls } from "./text-tool-call-detector.js";
+import type { ToolApprovalAskInfo, ToolApprovalVerdict } from "./tool-approval.js";
 import { executeToolEngine } from "./tool-engine.js";
 import { createToolLoopCapPredicate, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -759,7 +760,8 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   buildRecentTurnsSummary(): string | null;
   estimateProjectSize(): "small" | "medium" | "large" | null;
   countFilesTouched(): number;
-  respondToToolApproval(approvalId: string, approved: boolean): void;
+  /** Host approval for a must-confirm tool call (safe mode) — see tool-approval.ts. */
+  askToolApproval?: (info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<ToolApprovalVerdict>;
   /**
    * Tool-loop cap askcard hook (Claude-Code-style "continue?" prompt).
    *

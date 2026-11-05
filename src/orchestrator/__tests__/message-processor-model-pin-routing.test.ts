@@ -143,7 +143,6 @@ describe("MessageProcessor — project model pin skips per-turn downgrade routin
         appendCompletedTurn: () => {},
         discardAbortedTurn: () => {},
         recordUsage: () => {},
-        respondToToolApproval: () => {},
         runCouncilV2: async function* () {},
         processMessage: async function* () {},
         processMessageBatchTurn: async function* () {

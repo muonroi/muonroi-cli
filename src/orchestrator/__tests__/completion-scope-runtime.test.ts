@@ -102,7 +102,10 @@ describe("actual main completion scope", () => {
           .join("");
         const prompts = JSON.stringify(handle.model.doStreamCalls);
         if (permissionMode === "safe") {
-          expect(chunks.some((chunk) => chunk.type === "tool_approval_request")).toBe(true);
+          // Safe mode asks inside the read's execute (tool-approval.ts). This
+          // headless Agent has no approval handler, so each read is answered
+          // with a denial tool-result — never run, never left without a result.
+          expect(prompts).toContain("no approval decision could be obtained");
           expect(prompts).not.toContain("TODO: server implementation");
           expect(prompts).not.toContain("TODO: executable acceptance");
           expect(output).not.toContain("Native Flow evidence");

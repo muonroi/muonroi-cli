@@ -198,7 +198,8 @@ export function PaymentApprovalPanel({
     amount: string;
     network: string;
     asset: string;
-    approvalId?: string;
+    /** Main agent's own must-confirm tool call; `url` holds the tool name, `description` the input preview. */
+    toolApproval?: import("../../orchestrator/tool-approval.js").ToolApprovalAskInfo;
     workerApproval?: import("../../orchestrator/worker-approval.js").WorkerApprovalView;
     selected: number;
   };
@@ -209,10 +210,14 @@ export function PaymentApprovalPanel({
    */
   focused?: boolean;
 }) {
+  // The x402 payment flow this panel was built for was removed (e1101dde); the
+  // only producers left are tool approvals — the main agent's own (safe mode)
+  // and a worker's.
   const worker = payment.workerApproval;
-  const options = worker ? ["Allow once", "Deny"] : ["Approve payment", "Reject"];
+  const title = worker ? "Worker tool approval" : "Tool approval";
+  const options = ["Allow once", "Deny"];
   return (
-    <Dialog id="payment-approval" name={worker ? "Worker tool approval" : "Approve payment"} focused={focused}>
+    <Dialog id="payment-approval" name={title} value={options[payment.selected]} focused={focused}>
       <box
         flexDirection="column"
         border={["left"]}
@@ -239,7 +244,7 @@ export function PaymentApprovalPanel({
       >
         <text>
           <span style={{ fg: t.planTitle ?? t.primary }}>
-            <b>{worker ? "Worker tool approval" : "Payment required"}</b>
+            <b>{title}</b>
           </span>
         </text>
         <box marginTop={1} flexDirection="column">
@@ -257,15 +262,6 @@ export function PaymentApprovalPanel({
               <span style={{ fg: "#60a5fa" }}>{payment.securityLabel}</span>
             </text>
           ) : null}
-          {!worker && (
-            <text>
-              <span style={{ fg: t.textMuted }}>{"Price: "}</span>
-              <span style={{ fg: "#22c55e" }}>
-                <b>{`${payment.amount} USDC`}</b>
-              </span>
-              <span style={{ fg: t.textMuted }}>{` on ${payment.network}`}</span>
-            </text>
-          )}
         </box>
         <box marginTop={1} flexDirection="column">
           {options.map((label, i) => {
@@ -289,7 +285,7 @@ export function PaymentApprovalPanel({
           </text>
           <text>
             <span style={{ fg: t.text }}>{"esc"}</span>
-            <span style={{ fg: t.textMuted }}>{" reject"}</span>
+            <span style={{ fg: t.textMuted }}>{" deny"}</span>
           </text>
         </box>
       </box>
