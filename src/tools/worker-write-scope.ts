@@ -19,15 +19,20 @@ export const SCOPED_WORKER_TOOL_NAMES = [
   "context_load",
   "list_tools",
   "describe_tool",
+  // Host-executed verification gate (src/tools/run-gate.ts): a catalog id, never
+  // free-form argv. Registered only when the verify recipe yields at least one gate.
+  "run_gate",
 ] as const;
 const SCOPED_TOOLS: ReadonlySet<string> = new Set(SCOPED_WORKER_TOOL_NAMES);
 export const WORKER_ISOLATION_CAPABILITIES = {
   fileScope: true,
   osSandbox: false,
   scopedCommands: false,
+  scopedGates:
+    "run_gate runs only build/test commands from the project's verify recipe, selected by id. Out-of-scope effects are DETECTED after the run (git status diff inside the repository), not prevented; writes outside the git repository or to git-ignored paths are not detected.",
   scopeUpdates:
     "Owner delegation_send(writeScope) changes the next write boundary; prose alone does not. [] revokes all workspace writes.",
-  note: "File-scoped workers receive bounded native file tools, not shell/MCP/LSP. Omitted writeScope is legacy shared execution, not isolation.",
+  note: "File-scoped workers receive bounded native file tools plus run_gate, not shell/MCP/LSP. Omitted writeScope is legacy shared execution, not isolation.",
 } as const;
 
 function inside(root: string, target: string): boolean {
@@ -113,6 +118,32 @@ export class WorkerWriteScope {
       const error = err instanceof Error ? err.message : String(err);
       logger.file("warn", "orchestrator", "Worker write scope refused", { error });
       return `worker_write_scope_refused: ${error} No write performed. Ask main with worker_message(kind=question); main must issue an explicit writeScope decision before an out-of-scope repair. Do not route around the boundary.`;
+    }
+  }
+
+  /**
+   * Membership only: is the absolute path inside a current scope entry? Unlike
+   * {@link refusal} this does not require a regular file (a changed path may be
+   * deleted or a directory) and does not log — it classifies effects observed
+   * after the fact (run_gate), it does not authorize a write.
+   */
+  covers(absolute: string): boolean {
+    try {
+      if (realpathSync(this.cwd) !== this.binding.root) return false;
+      const target = canonicalTarget(path.resolve(absolute));
+      const relative = path.relative(this.binding.root, target);
+      return (
+        inside(this.binding.root, target) &&
+        safeSegments(relative) &&
+        this.entries.some((e) => (e.recursive ? inside(e.target, target) : e.target === target))
+      );
+    } catch (err) {
+      // Unresolvable path: classify as NOT covered (fail closed) and say why.
+      logger.file("warn", "orchestrator", "Worker write scope membership check failed", {
+        path: absolute,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 }

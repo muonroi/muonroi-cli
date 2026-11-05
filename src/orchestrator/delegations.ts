@@ -10,6 +10,7 @@ import {
   isRateLimitFailureText,
   isRateLimitRetryExhausted,
 } from "../providers/rate-limit-backoff.js";
+import { resolveGateCatalog } from "../tools/run-gate.js";
 import { WorkerWriteScope, type WorkerWriteScopeBinding } from "../tools/worker-write-scope.js";
 import type { DelegationFailureKind, DelegationRun, DelegationStatus, TaskRequest, ToolResult } from "../types/index";
 import type { DelegationAcceptanceInput, ReviewToolEvidence, ReviewVerdict } from "../types/index.js";
@@ -566,7 +567,10 @@ export class DelegationManager {
     if (grantError) return { success: false, output: grantError };
     // Host-composed council/plan-review prompts are not model task briefs.
     const modelDispatch = kind !== "council" && !planReview && !planRevalidation;
-    const capabilityError = modelDispatch ? workerCommandCapabilityError(request) : undefined;
+    const gateCwd = request.cwd ? path.resolve(this.getCwd(), request.cwd) : this.getCwd();
+    const capabilityError = modelDispatch
+      ? workerCommandCapabilityError(request, () => resolveGateCatalog(gateCwd))
+      : undefined;
     if (capabilityError) return { success: false, output: capabilityError };
     if (process.env.MUONROI_BACKGROUND_CHILD === "1") {
       return { success: false, output: "Nested background delegations are disabled." };

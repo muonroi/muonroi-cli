@@ -11,14 +11,20 @@
  *    RUNNING write-capable job (same session 02:07Z steady-ivory-panda and 02:16Z
  *    steady-indigo-heron, both unscoped, both writing src/src/TCIS.MCP.Docs/).
  *
- * Why no scoped command capability: build/test runners execute project-controlled
- * code (MSBuild targets, npm scripts, conftest.py, test bodies) that a scoped
- * worker can author inside its own writeScope, so a command allowlist does not
- * bound file effects without an OS sandbox (WORKER_ISOLATION_CAPABILITIES.osSandbox
- * is false; BashTool's sandboxMode is ignored).
+ * Why no scoped SHELL: build/test runners execute project-controlled code
+ * (MSBuild targets, npm scripts, conftest.py, test bodies) that a scoped worker
+ * can author inside its own writeScope, so a command allowlist does not bound
+ * file effects without an OS sandbox (WORKER_ISOLATION_CAPABILITIES.osSandbox is
+ * false; BashTool's sandboxMode is ignored). Routing the build to an unscoped
+ * verify worker has the SAME exposure plus a round trip, so a scoped worker may
+ * instead run the verify recipe's own gates via `run_gate` (src/tools/run-gate.ts),
+ * whose out-of-scope effects inside the repository are detected after the run.
+ * A run directive is therefore admitted for a scoped worker only when a recipe
+ * gate serves it ({@link findServingGate}); anything else is still refused.
  */
 import { realpathSync } from "node:fs";
 import path from "node:path";
+import { describeGateCatalog, findServingGate, type GateCatalog } from "../tools/run-gate.js";
 import { SCOPED_WORKER_TOOL_NAMES } from "../tools/worker-write-scope.js";
 import type { TaskRequest } from "../types/index.js";
 import { logger } from "../utils/logger.js";
@@ -31,6 +37,10 @@ export interface CommandRequirement {
   kind: "command" | "tests";
   /** Bounded excerpt of the instruction that triggered detection. */
   evidence: string;
+  /** Explicit command text (code span, `Run: <cmd>` line, verify-with span). */
+  command?: string;
+  /** The command noun the directive named (build, lint, commands, ...), lowercased. */
+  object?: string;
 }
 
 const W = "[\\p{L}\\p{N}_]";
@@ -38,12 +48,12 @@ const W = "[\\p{L}\\p{N}_]";
 const RUN_VERB = new RegExp(`(?<!${W}|-)(?:re-?run|run|execute|exec|invoke|chạy)(?!${W}|-)`, "giu");
 // Objects must sit in the same clause as the verb (no sentence or comma boundary).
 const COMMAND_OBJECT = new RegExp(
-  `^[^\\n.;!?,]{0,60}?(?<!${W})(?:build|compile|commands?|pack|lint|gate|script|scanner|lệnh)(?!${W})`,
+  `^[^\\n.;!?,]{0,60}?(?<!${W})(build|compile|commands?|pack|lint|gate|script|scanner|lệnh)(?!${W})`,
   "iu",
 );
 const TESTS_OBJECT = new RegExp(`^[^\\n.;!?,]{0,60}?(?<!${W})(?:tests?|test\\s+suite|suite|kiểm\\s+thử)(?!${W})`, "iu");
 const CODE_SPAN = /^([^\n.;!?,]{0,80}?)`([^`\n]+)`/u;
-const COLON_COMMAND = /^\s*:\s*\S/u;
+const COLON_COMMAND = /^\s*:\s*(\S[^\n]*)/u;
 /** "run from `dir`": the code span is a location, not a command. */
 const LOCATION_LEAD = new RegExp(`(?<!${W})(?:from|in|inside|under|at|against|on|từ|trong|tại)\\s*$`, "iu");
 /** "run command" (noun compound), "run low/out" (idiom): no command object follows. */
@@ -122,22 +132,30 @@ export function detectCommandRequirements(text: string): CommandRequirement[] {
     const span = CODE_SPAN.exec(rest);
     const commandSpan = (span && !LOCATION_LEAD.test(span[1] ?? "") ? span[2] : undefined) ?? listedCommand(rest);
     if (commandSpan !== undefined && NATIVE_READ_COMMAND.test(commandSpan)) continue;
+    const colon = COLON_COMMAND.exec(rest)?.[1]?.trim();
+    const object = COMMAND_OBJECT.exec(rest)?.[1]?.toLowerCase();
     const kind: CommandRequirement["kind"] | undefined =
-      COLON_COMMAND.test(rest) || commandSpan !== undefined || COMMAND_OBJECT.test(rest)
+      colon !== undefined || commandSpan !== undefined || object !== undefined
         ? "command"
         : TESTS_OBJECT.test(rest)
           ? "tests"
           : undefined;
     if (!kind) continue;
     const listed = commandSpan !== undefined && !lineAt(text, index).includes(commandSpan) ? ` → ${commandSpan}` : "";
-    hits.push({ kind, evidence: `${lineAt(text, index).trim()}${listed}`.slice(0, 160) });
+    const command = commandSpan ?? colon?.replace(/^`([^`]+)`.*$/u, "$1");
+    hits.push({
+      kind,
+      evidence: `${lineAt(text, index).trim()}${listed}`.slice(0, 160),
+      ...(command !== undefined ? { command } : {}),
+      ...(object !== undefined && command === undefined ? { object } : {}),
+    });
   }
   for (const match of text.matchAll(VERIFY_WITH)) {
     const index = match.index ?? 0;
     const command = match[1] ?? "";
     if (!COMMAND_LINE_SPAN.test(command) || NATIVE_READ_COMMAND.test(command) || directiveBlocked(text, index))
       continue;
-    hits.push({ kind: "command", evidence: lineAt(text, index).trim().slice(0, 160) });
+    hits.push({ kind: "command", evidence: lineAt(text, index).trim().slice(0, 160), command });
   }
   return hits;
 }
@@ -146,23 +164,45 @@ export function detectCommandRequirements(text: string): CommandRequirement[] {
  * Refuse a dispatch whose task explicitly requires command execution that the
  * requested worker's effective grant cannot perform. Returns undefined when the
  * grant can run it or the task has no explicit run directive.
+ *
+ * A scoped (writeScope) agent-mode worker can run exactly the verify recipe's
+ * gates through `run_gate`; `gateCatalog` supplies them for the dispatch cwd
+ * (resolved lazily, only when a scoped run directive is present). Omitted → no
+ * gates, so every scoped run directive is refused as before.
  */
-export function workerCommandCapabilityError(request: TaskRequest): string | undefined {
+export function workerCommandCapabilityError(
+  request: TaskRequest,
+  gateCatalog?: () => GateCatalog,
+): string | undefined {
   const scoped = request.writeScope !== undefined;
   if (!scoped && !request.reviewOf) return undefined;
-  const hits = detectCommandRequirements(`${request.description ?? ""}\n${request.prompt ?? ""}`).filter(
+  const detected = detectCommandRequirements(`${request.description ?? ""}\n${request.prompt ?? ""}`).filter(
     (hit) =>
       // A reviewOf worker has verification_run for existing JS/TS/Python test
       // files, so generic "run the tests" or a runnable test file is not refused.
       scoped || (hit.kind === "command" && !VERIFICATION_RUNNABLE.test(hit.evidence)),
   );
+  if (detected.length === 0) return undefined;
+  // run_gate is registered only for agent-mode scoped workers (explore runs in
+  // ask mode) and never for reviewOf.
+  const gateEligible = scoped && !request.reviewOf && !ASK_MODE_WORKER_AGENTS.has(request.agent);
+  const catalog: GateCatalog | undefined = gateEligible && gateCatalog ? gateCatalog() : undefined;
+  const hits = catalog ? detected.filter((hit) => !findServingGate(hit, catalog)) : detected;
   const hit = hits[0];
-  if (!hit) return undefined;
+  if (!hit) {
+    logger.file("info", "orchestrator", "Worker dispatch admitted: run directives served by run_gate", {
+      agent: request.agent,
+      gates: catalog ? describeGateCatalog(catalog) : undefined,
+      evidence: detected.map((h) => h.evidence),
+    });
+    return undefined;
+  }
+  const gates = catalog ? describeGateCatalog(catalog) : "none resolved";
   const grant = scoped
-    ? `agent=${request.agent} with writeScope receives native file tools only (${SCOPED_WORKER_TOOL_NAMES.join(", ")}); no shell, MCP, LSP or verification_run`
+    ? `agent=${request.agent} with writeScope receives native file tools (${SCOPED_WORKER_TOOL_NAMES.filter((n) => n !== "run_gate").join(", ")}) plus run_gate for the verify recipe's gates only (${gates}); no shell, MCP, LSP, verification_run or free-form commands`
     : `agent=${request.agent} with reviewOf receives the static review toolset only (${REVIEW_TOOL_NAMES.join(", ")}); verification_run executes existing JS/TS/Python test files only and there is no shell`;
   const route = scoped
-    ? "Keep the edit in this scoped worker without the run instruction, then dispatch the command step separately to an execution-capable worker: task agent=verify without writeScope/reviewOf (build/test), or agent=general without writeScope (legacy shared execution, not isolated)."
+    ? "Either restate the run step as one of the listed run_gate gates (its exact command, or plain build/tests), or keep the edit in this scoped worker without the run instruction and dispatch the command step separately to an execution-capable worker: task agent=verify without writeScope/reviewOf (build/test), or agent=general without writeScope (legacy shared execution, not isolated)."
     : "Dispatch the command step to task agent=verify without reviewOf (execution-capable), then use reviewOf for static acceptance of that saved result.";
   logger.file("warn", "orchestrator", "Worker dispatch refused: task requires commands the grant cannot run", {
     agent: request.agent,

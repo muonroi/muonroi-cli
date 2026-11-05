@@ -144,6 +144,65 @@ describe("workerCommandCapabilityError", () => {
   });
 });
 
+describe("workerCommandCapabilityError with run_gate (verify-recipe gates)", () => {
+  const catalog =
+    (...gates: Array<[string, "build" | "test", string]>) =>
+    () => ({
+      source: "fixture",
+      gates: gates.map(([id, kind, command]) => ({ id, kind, command })),
+    });
+  const WITH_GATES = catalog(["build-1", "build", "dotnet build X.sln --nologo"], ["test-1", "test", "npm test"]);
+  const scoped = (prompt: string, agent = "general") => ({
+    agent,
+    description: "Fix + gate",
+    prompt,
+    writeScope: ["src/X/"],
+  });
+
+  it("admits a scoped worker whose run directives a recipe gate serves", () => {
+    for (const prompt of [
+      "Fix the compile error, then run build and report raw evidence.",
+      "Then run the tests and report counts.",
+      "Run `dotnet build X.sln --nologo` and report the exit code.",
+      "Run: npm test",
+      "Verify your own build with `dotnet build  X.sln   --nologo`.",
+    ])
+      expect(workerCommandCapabilityError(scoped(prompt), WITH_GATES), prompt).toBeUndefined();
+  });
+
+  it("still refuses directives no gate serves, naming the gates and the execution-capable route", () => {
+    for (const prompt of [
+      "Run `dotnet build X.sln --nologo -v q` and report.", // not the exact recipe command
+      "Run all commands from cwd D:\\repo\\src.",
+      "Run `git status --short` and paste it.",
+      "Run `node -e \"require('fs').writeFileSync('../outside.txt','x')\"` to generate the fixture.",
+      "Run build, then run `npm pack`.", // one served, one not -> refused
+    ]) {
+      const error = workerCommandCapabilityError(scoped(prompt), WITH_GATES);
+      expect(error, prompt).toMatch(/^worker_capability_refused:/);
+      expect(error).toContain(
+        "plus run_gate for the verify recipe's gates only (build-1 `dotnet build X.sln --nologo`; test-1 `npm test`)",
+      );
+      expect(error).toContain("agent=verify without writeScope/reviewOf");
+    }
+  });
+
+  it("refuses when the recipe has no gates, and never serves ask-mode or reviewOf workers", () => {
+    expect(workerCommandCapabilityError(scoped("Then run the tests."), catalog())).toMatch(
+      /^worker_capability_refused:.*none \(the verify recipe has no build\/test commands\)/s,
+    );
+    expect(workerCommandCapabilityError(scoped("Then run the tests.", "explore"), WITH_GATES)).toMatch(
+      /^worker_capability_refused:/,
+    );
+    expect(
+      workerCommandCapabilityError(
+        { agent: "verify", description: "Review", prompt: "Run `dotnet build X.sln --nologo`.", reviewOf: REVIEW },
+        WITH_GATES,
+      ),
+    ).toMatch(/^worker_capability_refused:/);
+  });
+});
+
 describe("findWriteOverlap", () => {
   it("detects scoped overlap (recursive dir vs file inside it) and ignores disjoint scopes", () => {
     const cwd = tempDir("muonroi-overlap-");
@@ -224,6 +283,40 @@ describe("DelegationManager dispatch guards", () => {
     expect(result.success).toBe(false);
     expect(result.output).toMatch(/^worker_capability_refused:/);
     expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("admits a scoped build/test dispatch when the workspace verify recipe defines the gate", async () => {
+    const home = tempDir("muonroi-guard-home-");
+    const cwd = tempDir("muonroi-guard-cwd-");
+    fs.mkdirSync(path.join(cwd, "src"));
+    fs.mkdirSync(path.join(cwd, ".muonroi-cli"));
+    fs.writeFileSync(
+      path.join(cwd, ".muonroi-cli", "environment.json"),
+      JSON.stringify({ recipe: { buildCommands: ["node build.js"], testCommands: ["node test.js"] } }),
+    );
+    const spawnMock = liveSpawn();
+    const mod = await importDelegations(home, spawnMock);
+    const manager = new mod.DelegationManager(
+      () => cwd,
+      () => "owner",
+    );
+    const admitted = await manager.startTask(
+      {
+        agent: "general",
+        description: "Fix + build gate",
+        prompt: "Fix the error, then run `node build.js` and run the tests.",
+        writeScope: ["src/"],
+      },
+      OPTIONS,
+    );
+    expect(admitted.success).toBe(true);
+    expect(spawnMock).toHaveBeenCalledTimes(1);
+    const refused = await manager.startTask(
+      { agent: "general", description: "Pack", prompt: "Run `npm pack` afterwards.", writeScope: ["src/other/"] },
+      OPTIONS,
+    );
+    expect(refused.success).toBe(false);
+    expect(refused.output).toContain("build-1 `node build.js`; test-1 `node test.js`");
   });
 
   it("refuses a second unscoped writer while the first runs, naming the running jobId", async () => {

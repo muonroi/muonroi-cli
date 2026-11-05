@@ -61,6 +61,7 @@ import {
 import { executeGrep } from "./grep.js";
 import { registerNativeMuonroiTools } from "./native-tools.js";
 import { registerNativeResearchTools } from "./research.js";
+import { type GateCatalog, registerRunGateTool, resolveGateCatalog } from "./run-gate.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 import { workerProcessRefusal } from "./worker-process-boundary.js";
 import { filterScopedWorkerTools, WORKER_ISOLATION_CAPABILITIES, WorkerWriteScope } from "./worker-write-scope.js";
@@ -69,6 +70,12 @@ interface ToolRegistryOpts {
   writeScope?: string[];
   boundWriteScope?: WorkerWriteScope;
   runScopedWrite?: (operation: (scope: WorkerWriteScope) => Promise<FileResult>) => Promise<FileResult>;
+  /** run_gate: current host scope (durable jobs re-read their record); defaults to boundWriteScope. */
+  currentWriteScope?: () => Promise<WorkerWriteScope>;
+  /** run_gate: host observation sink for out-of-scope effects / failed detection. */
+  onGateViolation?: (observation: string) => void;
+  /** run_gate: precomputed catalog (tests); defaults to resolveGateCatalog(cwd). */
+  gateCatalog?: GateCatalog;
   /** Final permitted set for this child; never borrow the parent's global inventory. */
   getToolSet?: () => ToolSet;
   executionRole?: ExecutionRole;
@@ -1205,7 +1212,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               maxItems: 64,
               items: { type: "string" },
               description:
-                "Host-enforced task write paths relative to cwd: exact files or recursive directories ending in '/'. [] allows no workspace writes. Scoped workers use native file tools only; shell/MCP/LSP are not granted. Set for every bounded editing task. Omitted means legacy shared execution, not isolation.",
+                "Host-enforced task write paths relative to cwd: exact files or recursive directories ending in '/'. [] allows no workspace writes. Scoped workers use native file tools plus run_gate (the verify recipe's build/test gates by id; out-of-scope effects are detected after the run, not prevented); shell/MCP/LSP are not granted. Set for every bounded editing task. Omitted means legacy shared execution, not isolation.",
             },
             background: {
               type: "boolean",
@@ -2408,6 +2415,17 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // required:["pattern"] and still received 94 keyless calls), so this is the
   // only layer that can stop a keyless / elision-marker call before it runs.
   // See src/tools/arg-guard.ts for the measured failure it exists for.
+  // Host-executed recipe gates for file-scoped agent workers (src/tools/run-gate.ts).
+  // Registered before the arg guard so it gets the same malformed-args protection.
+  if (boundWriteScope && mode === "agent")
+    registerRunGateTool(tools, {
+      cwd: bash.getCwd(),
+      catalog: opts?.gateCatalog ?? resolveGateCatalog(bash.getCwd()),
+      boundScope: boundWriteScope,
+      currentScope: opts?.currentWriteScope,
+      onViolation: opts?.onGateViolation,
+    });
+
   installArgGuards(tools, gitSafetyKey);
 
   return opts?.writeScope !== undefined ? filterScopedWorkerTools(tools, tools) : tools;
