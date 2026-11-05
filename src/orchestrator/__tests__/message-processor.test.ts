@@ -130,7 +130,6 @@ function makeDeps(overrides: Partial<MessageProcessorDeps> = {}): MessageProcess
     appendCompletedTurn: () => {},
     discardAbortedTurn: () => {},
     recordUsage: () => {},
-    respondToToolApproval: () => {},
     runCouncilV2: async function* () {
       /* no-op */
     },

@@ -358,16 +358,6 @@ export interface ChatEntry {
   reasoning?: string;
 }
 
-export interface PaymentPrecheck {
-  security?: string;
-  securityLabel?: string;
-  securityUrl?: string;
-  amount?: string;
-  network?: string;
-  asset?: string;
-  description?: string;
-}
-
 export interface StructuredResponse {
   taskType: string;
   data: Record<string, unknown>;
@@ -805,7 +795,6 @@ export interface StreamChunk {
     | "content"
     | "tool_calls"
     | "tool_result"
-    | "tool_approval_request"
     | "council_question"
     /**
      * The counterpart to `council_question`: the waiter that opened it gave up
@@ -847,8 +836,6 @@ export interface StreamChunk {
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
   toolResult?: ToolResult;
-  approvalId?: string;
-  paymentPrecheck?: PaymentPrecheck;
   isAuthError?: boolean;
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;

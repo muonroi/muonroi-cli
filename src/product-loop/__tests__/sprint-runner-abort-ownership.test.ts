@@ -261,7 +261,6 @@ function makeRealProcessMessageFn(holder: ReturnType<typeof makeAgentAbortHolder
       appendCompletedTurn: () => {},
       discardAbortedTurn: () => {},
       recordUsage: () => {},
-      respondToToolApproval: () => {},
       runCouncilV2: async function* () {
         /* no-op */
       },

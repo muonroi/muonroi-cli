@@ -239,6 +239,7 @@ import {
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
+import type { ToolApprovalAskInfo } from "./tool-approval.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
@@ -1251,19 +1252,21 @@ export class Agent {
     this._askUserHandler = fn;
   }
 
-  respondToToolApproval(approvalId: string, approved: boolean): void {
-    const toolApprovalResponse: ModelMessage = {
-      role: "tool",
-      content: [
-        {
-          type: "tool-approval-response" as const,
-          approvalId,
-          approved,
-        },
-      ],
-    };
-    this.messages.push(toolApprovalResponse);
-    this.messageSeqs.push(null);
+  // Tool-approval handler — set by the UI. Invoked from INSIDE a must-confirm
+  // tool's execute (safe mode: main's read_file/grep) and resolves "allow" or
+  // "deny"; the turn waits and then continues with the real tool-result or a
+  // denial result. Unset (headless) → "no-approver". The signal aborts when the
+  // turn does, so the UI can withdraw a card nobody is waiting on any more. See
+  // tool-approval.ts for why this replaced the SDK needsApproval + "[Payment
+  // approved]" resume.
+  private _toolApprovalHandler:
+    | ((info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<"allow" | "deny">)
+    | null = null;
+
+  setToolApprovalHandler(
+    fn: ((info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<"allow" | "deny">) | null,
+  ): void {
+    this._toolApprovalHandler = fn;
   }
 
   async clearHistory(): Promise<void> {
@@ -5512,7 +5515,31 @@ export class Agent {
       appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
-      respondToToolApproval: (id, ok) => self.respondToToolApproval(id, ok),
+      askToolApproval: async (info, signal) => {
+        const h = self._toolApprovalHandler;
+        if (!h || signal?.aborted) {
+          logger.warn("orchestrator", "askToolApproval: no approval decision possible — not running the tool", {
+            toolName: info.toolName,
+            toolCallId: info.toolCallId,
+            reason: h ? "turn aborted" : "no approval handler registered",
+          });
+          return "no-approver";
+        }
+        // Hold both watchdogs open while the human decides (see interactive-pause.ts).
+        beginInteractivePause();
+        try {
+          return await h(info, signal);
+        } catch (err) {
+          logger.error("orchestrator", "askToolApproval handler crashed — not running the tool", {
+            toolName: info.toolName,
+            toolCallId: info.toolCallId,
+            error: err,
+          });
+          return "no-approver";
+        } finally {
+          endInteractivePause();
+        }
+      },
       askToolLoopContinue: async (info) => {
         const h = self._toolLoopCapHandler;
         if (!h) return "stop";

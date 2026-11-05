@@ -155,7 +155,7 @@ import { setLoopBreadcrumb } from "../utils/event-loop-monitor.js";
 import { abortableStream } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { openUrl } from "../utils/open-url.js";
-import { appendAudit, type PermissionMode, toolNeedsApproval } from "../utils/permission-mode.js";
+import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   effectiveCompactionWindowTokens,
   getAutoCouncilMinRoles,
@@ -279,6 +279,12 @@ import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { projectTaskContext, TaskContext } from "./task-context.js";
 import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity, isToolActivityLive, withToolActivity } from "./tool-activity.js";
+import {
+  buildToolApprovalInfo,
+  type ToolApprovalAskInfo,
+  type ToolApprovalVerdict,
+  toolApprovalDeniedResult,
+} from "./tool-approval.js";
 import { getToolLimitAutoRecoverCap, shouldAutoRecoverToolLimit } from "./tool-limit-auto-recover.js";
 import { createToolLoopCapPredicate, resolveTurnStepLimits, type ToolLoopCapAsk } from "./tool-loop-cap.js";
 import {
@@ -446,7 +452,12 @@ export interface MessageProcessorDeps extends TurnRunnerDepsBase {
   buildRecentTurnsSummary(): string | null;
   estimateProjectSize(): "small" | "medium" | "large" | null;
   countFilesTouched(): number;
-  respondToToolApproval(approvalId: string, approved: boolean): void;
+  /**
+   * Host approval for a tool call that must be confirmed (safe mode: main's own
+   * read_file/grep). Awaited inside the tool's execute so the turn continues
+   * with the real result or a denial result — see tool-approval.ts.
+   */
+  askToolApproval?: (info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<ToolApprovalVerdict>;
   /**
    * Tool-loop cap askcard hook (Claude-Code-style "continue?" prompt).
    *
@@ -1431,10 +1442,16 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         for (const name of Object.keys(tools)) {
           const tool = tools[name];
           if (!tool || typeof tool.execute !== "function") continue;
-          // Main's new direct reads use the existing SDK/UI approval path in safe mode.
-          if (deps.executionRole === "orchestrator" && (name === "read_file" || name === "grep")) {
-            tool.needsApproval = deps.permissionMode === "safe";
-          }
+          // Safe mode asks before main's own direct reads. The ask happens INSIDE
+          // execute (host-owned, see tool-approval.ts), never via the SDK's
+          // needsApproval: an SDK approval pauses the loop and this host cannot
+          // resume it, so any SDK policy present is folded into the same gate.
+          const sdkApprovalPolicy = tool.needsApproval;
+          const mainReadNeedsApproval =
+            deps.executionRole === "orchestrator" &&
+            (name === "read_file" || name === "grep") &&
+            deps.permissionMode === "safe";
+          tool.needsApproval = false;
           const originalExecute = tool.execute;
           // Read-only tools skip the mutation gate and the write mutex, but ALL
           // tools get a breadcrumb: a freeze can start under any of them, and a
@@ -1447,6 +1464,28 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // why this is not a stack: with parallel tool calls, last-writer-
             // wins is the honest summary; the CPU profile is the real evidence.
             setLoopBreadcrumb(`tool:${name}`);
+            let mustAsk = mainReadNeedsApproval;
+            if (!mustAsk && typeof sdkApprovalPolicy === "function") {
+              mustAsk =
+                (await sdkApprovalPolicy.call(tool, input, {
+                  toolCallId: context?.toolCallId,
+                  messages: context?.messages ?? [],
+                  experimental_context: context?.experimental_context,
+                })) === true;
+            } else if (!mustAsk) {
+              mustAsk = sdkApprovalPolicy === true;
+            }
+            if (mustAsk) {
+              // Waits on a human — outside the tool-activity window below, whose
+              // deadline is for work; askToolApproval holds the watchdogs itself.
+              const verdict: ToolApprovalVerdict = deps.askToolApproval
+                ? await deps.askToolApproval(
+                    buildToolApprovalInfo(name, input, context?.toolCallId),
+                    combineAbortSignals(signal, context?.abortSignal),
+                  )
+                : "no-approver";
+              if (verdict !== "allow") return toolApprovalDeniedResult(name, verdict);
+            }
             // Tell the top-level turn watchdog this turn is WORKING, not hung,
             // for as long as this call stays inside its own declared deadline.
             // Without it a single long tool call (session 708f0fc4ac8b ran
@@ -3596,55 +3635,23 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             }
 
             case "tool-approval-request": {
-              const approvalPart = part as unknown as {
-                approvalId: string;
-                toolCall: { toolCallId: string; toolName: string; input: unknown };
-              };
-              const toolCallId = approvalPart.toolCall?.toolCallId ?? "";
-              const pendingTc = activeToolCalls.find((tc) => tc.id === toolCallId);
-              const tcForChunk = pendingTc ?? {
-                id: toolCallId,
-                type: "function" as const,
-                function: {
-                  name: approvalPart.toolCall?.toolName ?? "paid_request",
-                  arguments: JSON.stringify(approvalPart.toolCall?.input ?? {}),
-                },
-              };
-
-              // Payment pre-check disabled — Stripe billing pending.
-              const paymentPrecheck: import("../types/index").PaymentPrecheck | undefined = undefined;
-
-              // Plan 03-01: check permission mode before yielding approval request to UI.
-              // auto-edit auto-approves file ops; yolo auto-approves everything.
-              const toolName = approvalPart.toolCall?.toolName ?? "";
-              const input = approvalPart.toolCall?.input ?? {};
-              const context =
-                toolName === "bash"
-                  ? { command: String((input as any).command ?? "") }
-                  : toolName === "write_file" ||
-                      toolName === "edit_file" ||
-                      toolName === "read_file" ||
-                      toolName === "grep"
-                    ? { path: String((input as any).path ?? (input as any).file_path ?? "") }
-                    : undefined;
-              if (!toolNeedsApproval(toolName, deps.permissionMode, context)) {
-                // Auto-approve: respond directly without surfacing to UI.
-                deps.respondToToolApproval(approvalPart.approvalId, true);
-                appendAudit({
-                  kind: deps.permissionMode === "yolo" ? "yolo-override" : "permission-override",
-                  tool: toolName,
-                  mode: deps.permissionMode,
-                  context,
-                  ts: Date.now(),
-                });
-                break;
-              }
-
+              // Unreachable by construction: every executable tool gets
+              // needsApproval=false in the wrap loop above, because approval is
+              // host-owned inside execute (tool-approval.ts). An SDK approval ends
+              // the loop with a tool-call this host cannot resume (the old
+              // "[Payment approved]" resume dropped it — no tool-result ever
+              // reached the model), so if a tool ever slips through, say so.
+              const approvalPart = part as unknown as { toolCall?: { toolCallId?: string; toolName?: string } };
+              const pausedTool = approvalPart.toolCall?.toolName ?? "unknown";
+              logger.error("orchestrator", "Unexpected SDK tool-approval-request — host cannot resume it", {
+                toolName: pausedTool,
+                toolCallId: approvalPart.toolCall?.toolCallId,
+                sessionId: deps.session?.id,
+              });
               yield {
-                type: "tool_approval_request",
-                approvalId: approvalPart.approvalId,
-                toolCall: tcForChunk,
-                paymentPrecheck,
+                type: "error",
+                content: `Internal error: tool ${pausedTool} paused for an SDK approval this CLI cannot resume; the call did not run.`,
+                isAuthError: false,
               };
               break;
             }

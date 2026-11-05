@@ -1,0 +1,2 @@
+SAFE_MODE_APPROVAL_MARKER_7f3a
+This file is read by tests/harness/safe-mode-tool-approval.spec.ts.
