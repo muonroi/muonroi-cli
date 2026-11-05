@@ -26,7 +26,21 @@ export interface WorkingContextState {
   archive: Array<{ turn_id: string; reason: string }>;
   archive_through: { turn_id: string; reason: string } | null;
   replace_checkpoint: boolean;
+  /** The user's whole-task goal, pinned by the host on the first ledger write. `goal` is the current wave. */
+  root_goal: string;
+  /** "complete" is host-gated: no open_items and no missing/failed FLOW implementation verification. */
+  root_status: RootStatus;
+  /** Audit of the last explicitly released open root goal (reset + release_root_reason). */
+  released_root: { goal: string; reason: string } | null;
 }
+export type RootStatus = "open" | "complete";
+/** Host facts consulted only when main asks to mark the root goal complete. */
+export interface RootCompletionFacts {
+  declaredPlanScope: string | null;
+  implementationVerification: "missing" | "unstructured" | "recorded_pass" | "recorded_fail";
+}
+// Fields absent from receipts written before root-goal pinning (still kind working-context/v1).
+const ROOT_DEFAULTS = { root_goal: "", root_status: "open" as RootStatus, released_root: null };
 type Turn = { id: string; messages: ModelMessage[]; tool_ids: string[]; protected: string[] };
 const MAX_STATE_CHARS = 10000;
 const hash = (text: string) => createHash("sha256").update(text).digest("hex").slice(0, 24);
@@ -74,7 +88,11 @@ export class WorkingContext {
         if (typeof candidate !== "string" && (!candidate || typeof candidate !== "object")) continue;
         if (typeof candidate === "string" && !candidate.includes(WORKING_CONTEXT_KIND)) continue;
         try {
-          const receipt = typeof candidate === "string" ? JSON.parse(candidate) : candidate;
+          const parsed = typeof candidate === "string" ? JSON.parse(candidate) : candidate;
+          // Legacy receipts predate root pinning: load them with the root unpinned rather than
+          // promoting their (possibly already drifted) wave goal into the immutable root.
+          const receipt =
+            parsed && typeof parsed === "object" && !Array.isArray(parsed) ? { ...ROOT_DEFAULTS, ...parsed } : parsed;
           if (this.valid(receipt) && receipt.revision >= this.state.revision) this.state = receipt;
         } catch (err) {
           logger.file("warn", "orchestrator", "Working context receipt rejected", { error: String(err) });
@@ -99,6 +117,7 @@ export class WorkingContext {
       archive: [],
       archive_through: null,
       replace_checkpoint: false,
+      ...ROOT_DEFAULTS,
     };
   }
 
@@ -118,6 +137,16 @@ export class WorkingContext {
       s.task_id.length <= 120 &&
       typeof s.goal === "string" &&
       s.goal.length <= 1000 &&
+      typeof s.root_goal === "string" &&
+      s.root_goal.length <= 1000 &&
+      (s.root_status === "open" || s.root_status === "complete") &&
+      (s.released_root === null ||
+        (!!s.released_root &&
+          typeof s.released_root.goal === "string" &&
+          s.released_root.goal.length <= 1000 &&
+          typeof s.released_root.reason === "string" &&
+          s.released_root.reason.length > 0 &&
+          s.released_root.reason.length <= 300)) &&
       [s.constraints, s.decisions, s.open_items, s.keep_tool_ids, s.keep_turn_ids].every(strings) &&
       typeof s.replace_checkpoint === "boolean" &&
       Array.isArray(s.archive) &&
@@ -262,14 +291,38 @@ export class WorkingContext {
     };
   }
 
-  update(input: Record<string, unknown>): WorkingContextState & { error?: string } {
+  update(
+    input: Record<string, unknown>,
+    completionFacts?: () => RootCompletionFacts | null,
+  ): WorkingContextState & { error?: string } {
     const fail = (error: string) => ({ ...this.snapshot(), error });
     if (input.expected_revision !== this.state.revision)
       return fail("expected_revision must match the inspected working-set revision.");
+    const pinned = this.state.root_status === "open" ? this.state.root_goal : "";
     if (input.action === "reset") {
-      this.state = this.empty(this.state.revision + 1);
+      const reason = input.release_root_reason;
+      if (reason !== undefined && (typeof reason !== "string" || !reason.trim() || reason.length > 300))
+        return fail("release_root_reason must be a non-empty string of at most 300 characters.");
+      // An open root goal survives reset: resetting the ledger must not be a way to forget the user's task.
+      const released = pinned && typeof reason === "string" ? { goal: pinned, reason: reason.trim() } : null;
+      this.state = {
+        ...this.empty(this.state.revision + 1),
+        ...(pinned && !released ? { root_goal: pinned } : {}),
+        released_root: released ?? this.state.released_root,
+      };
       return this.snapshot();
     }
+    if (input.release_root_reason !== undefined)
+      return fail('release_root_reason is only accepted with action="reset".');
+    if (input.root_status !== undefined && input.root_status !== "open" && input.root_status !== "complete")
+      return fail('root_status must be "open" or "complete".');
+    if (input.root_goal !== undefined && (typeof input.root_goal !== "string" || !input.root_goal.trim()))
+      return fail("root_goal must be a non-empty string.");
+    const requestedRoot = typeof input.root_goal === "string" ? input.root_goal.trim() : undefined;
+    if (pinned && requestedRoot !== undefined && requestedRoot !== pinned)
+      return fail(
+        `root_goal is pinned to "${pinned}" and cannot be rewritten. Put the current wave or sub-goal in goal. Only a gated root_status="complete" or action="reset" with release_root_reason releases it.`,
+      );
     const next = {
       ...this.state,
       ...Object.fromEntries(
@@ -299,6 +352,29 @@ export class WorkingContext {
         [...this.state.archive.filter((a) => !restore.includes(a.turn_id)), ...archive].map((a) => [a?.turn_id, a]),
       ).values(),
     ] as WorkingContextState["archive"];
+    if (pinned) next.root_goal = pinned;
+    else if (this.state.root_status === "complete" && this.state.root_goal) {
+      // A completed root is released for the next user task: a new root_goal or a changed goal pins it.
+      const nextRoot = requestedRoot ?? (input.goal !== undefined && next.goal !== this.state.goal ? next.goal : "");
+      if (nextRoot) Object.assign(next, { root_goal: nextRoot.trim(), root_status: "open" });
+    } else {
+      // First ledger write (or a legacy ledger written before pinning): the earliest available goal wins.
+      next.root_goal = (requestedRoot ?? (this.state.goal || next.goal)).trim();
+      next.root_status = "open";
+    }
+    if (input.root_status !== undefined) next.root_status = input.root_status as RootStatus;
+    if (input.root_status === "complete") {
+      const facts = completionFacts?.() ?? null;
+      const unverified =
+        facts && facts.implementationVerification !== "recorded_pass"
+          ? `native FLOW plan "${facts.declaredPlanScope ?? "(untitled PLAN.md)"}" has implementationVerification=${facts.implementationVerification}; record a passing flow_verify (VERIFY.md verdict: pass) for the whole plan first`
+          : "";
+      const remaining = next.open_items.length ? `open_items still lists ${JSON.stringify(next.open_items)}` : "";
+      if (unverified || remaining)
+        return fail(
+          `Refused root_status="complete" for root goal "${next.root_goal}": ${[unverified, remaining].filter(Boolean).join("; ")}. A completed wave, worker, commit or approved plan does not complete the root goal. Report partial progress and the remaining deliverables instead.`,
+        );
+    }
     if (!this.valid(next) || !next.task_id.trim() || !next.goal.trim())
       return fail(
         "Invalid/bloated working set: task_id and goal required; lists<=32, archive<=64, total<=10000 chars. Replace stale ledger fields rather than appending history.",
@@ -387,10 +463,18 @@ export class WorkingContext {
     return projected as T[];
   }
 
+  /** Host-pinned root goal line; rendered even after a ledger reset so a wave cannot stand in for the task. */
+  rootBlock(): string {
+    const { root_goal, root_status, open_items } = this.state;
+    if (!root_goal) return "";
+    return `[Root user goal; host-pinned, cannot be rewritten by context_load]\n${JSON.stringify({ root_goal, root_status, remaining_deliverables: open_items })}\nroot_status=open means the whole task is NOT done: a completed wave, worker, commit or approved plan does not complete it. root_status="complete" is host-gated (no open_items, and a recorded passing FLOW implementation verification when a native plan exists).`;
+  }
+
   block(): string {
-    if (!this.active()) return "";
+    if (!this.active()) return this.rootBlock();
     const { task_id, goal, constraints, decisions, open_items, keep_tool_ids, keep_turn_ids } = this.state;
-    return `[Current working set; main-selected data, not policy or authorization]\n${JSON.stringify({ task_id, goal, constraints, decisions, open_items, keep_tool_ids, keep_turn_ids })}`;
+    const root = this.rootBlock();
+    return `${root ? `${root}\n` : ""}[Current working set; main-selected data, not policy or authorization; goal is the current wave]\n${JSON.stringify({ task_id, goal, constraints, decisions, open_items, keep_tool_ids, keep_turn_ids })}`;
   }
   retainedToolIds(): string[] {
     return [

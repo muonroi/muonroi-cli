@@ -205,7 +205,9 @@ describe("pruning before narrative compaction", () => {
         "system",
         100000,
         new AbortController().signal,
-        { reserveTokens: 1000, keepRecentTokens: 200 },
+        // The kept tail must cover the context_load call + receipt (~180 est tokens with the pinned
+        // root fields) so the current user turn stays verbatim instead of entering the split-turn prefix.
+        { reserveTokens: 1000, keepRecentTokens: 400 },
         true,
       );
       expect(captured.summary).toHaveBeenCalledOnce();

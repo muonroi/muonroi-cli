@@ -962,6 +962,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // SDK onStepFinish can precede consumption/persistence of fullStream tool-call chunks.
       // Only a completed result from an exposed native Flow tool establishes ownership here.
       let currentTurnFlowUsed = false;
+      // Same owned-scope facts the per-step completion guidance shows; context_load consults them
+      // before accepting root_status="complete" (session 4edc02516a92 seq 680 claimed done; its plan dir has no VERIFY.md).
+      taskContext.completionFacts = () =>
+        ownedCompletionScope(deps.bash.getCwd(), deps.session?.id, deps.executionRole, currentTurnFlowUsed);
       // Decide whether a fired stall watchdog should re-prompt (re-issue the
       // same request) instead of falling through to rescue/error. Returns the
       // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
