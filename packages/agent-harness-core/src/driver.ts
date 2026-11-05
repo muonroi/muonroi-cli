@@ -144,7 +144,10 @@ export type Driver = {
    *  visual frame yet. */
   visual_quality: () => VisualQualityReport | null;
   _ingest: (m: Ingested) => void;
-  /** Called when the TUI exits. Cleanly terminates all active `events()` iterables. */
+  /** Called when the TUI exits. Cleanly terminates all active `events()` iterables,
+   *  rejects every pending `wait_for()` with `Error("Driver transport closed")`
+   *  (clearing its timeout timer), and makes every later `wait_for()` reject
+   *  immediately with the same error. */
   _closeAllSubscribers: () => void;
 };
 
