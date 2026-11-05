@@ -94,6 +94,33 @@ describe("C3 — the agent is consulted before an automatic compaction", () => {
     ).toBeNull();
   });
 
+  it("never defers at turn start (step 0) — compacts now and only informs", () => {
+    // Session 4edc02516a92: a step-0 deferral sent the carried-in history
+    // uncached (avg 293k chars) and step 1 rewrote it (avg 83k) — two misses.
+    for (const ctxFill of [0.05, 0.3, 0.59, 0.9]) {
+      const d = evaluateCompactionConsult({ ...baseConsult, stepNumber: 0, ctxFill });
+      expect(d?.action).toBe("compact-at-turn-start");
+      expect(d?.note).toContain("turn start");
+      expect(d?.note).not.toContain("before your NEXT step");
+      // Inviting a `compact` call would force a second rewrite on step 1.
+      expect(d?.note).not.toContain("`compact` tool");
+    }
+    // Unknown window at step 0: still compact now, never defer.
+    expect(
+      evaluateCompactionConsult({ ...baseConsult, stepNumber: 0, contextWindowTokens: 0, ctxFill: 0 })?.action,
+    ).toBe("compact-at-turn-start");
+    // The silence rules still win at step 0.
+    expect(evaluateCompactionConsult({ ...baseConsult, stepNumber: 0, wouldCompact: false })).toBeNull();
+    expect(evaluateCompactionConsult({ ...baseConsult, stepNumber: 0, alreadyAsked: true })).toBeNull();
+    // Over a replayed prefix step 0 is a cached append of the previous request:
+    // deferring is no worse, and a single-step turn then pays no rewrite at all.
+    expect(evaluateCompactionConsult({ ...baseConsult, stepNumber: 0, carriedPrefixReplayed: true })?.action).toBe(
+      "defer",
+    );
+    // Mid-turn deferral is unchanged (step N-1 was already sent at that size).
+    expect(evaluateCompactionConsult({ ...baseConsult, stepNumber: 1 })?.action).toBe("defer");
+  });
+
   it("uses the compactor's own first-escalation fill (0.6) as the headroom line", () => {
     // Derived from computeDynamicParams in subagent-compactor.ts: 0.6 is where
     // the compactor FIRST starts shrinking the verbatim keep window.
@@ -109,6 +136,8 @@ describe("C3 — the agent is consulted before an automatic compaction", () => {
     // Deferral must return the UN-compacted history with the note attached.
     expect(src).toContain('_consult?.action === "defer"');
     expect(src).toContain("compactConsultAskedThisTurn = true");
+    // A turn-start decision must reach the compact-now branch, not fall through.
+    expect(src).toContain('_consult?.action === "compact-at-turn-start"');
   });
 });
 

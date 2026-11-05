@@ -2619,6 +2619,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     contextWindowTokens,
                     estPromptTokens: _pressure.estPromptTokens,
                     stepNumber: sn,
+                    carriedPrefixReplayed: (historyReplay?.savedChars ?? 0) > 0 && !historyReplayRestored,
                   });
                 }
               } catch (err) {
@@ -2650,10 +2651,15 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               // compaction counter drives the cache-churn telemetry this fixes.
               if (_hyst.didRecompact) recordCompaction(sn);
 
-              if (_consult?.action === "ask-and-compact") {
-                // No headroom to spend a step waiting: the compaction already
-                // ran above, and the note says so rather than promising a
-                // deferral that did not happen.
+              if (_consult?.action === "ask-and-compact" || _consult?.action === "compact-at-turn-start") {
+                // The compaction already ran above, and the note says so rather
+                // than promising a deferral that did not happen. Either no
+                // headroom to wait (ask-and-compact), or step 0 of a turn with no
+                // replayed prefix, where a deferral re-sends the whole carried-in
+                // history uncached and
+                // rewrites it on step 1 (compact-at-turn-start). The flag also
+                // stops a later step re-consulting on the UN-compacted `stripped`
+                // and handing the full history back mid-turn.
                 compactConsultAskedThisTurn = true;
                 return withSteers({
                   messages: attachReminderToMessages(coalesceReadOnlyMessages(compacted), _consult.note),
