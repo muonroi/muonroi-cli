@@ -1006,10 +1006,17 @@ describe("StreamRunner provider errors (steady-copper-badger)", () => {
         description: "Scoped task",
         prompt: "Return the final result",
       });
-      expect(handle.model.doStreamCalls).toHaveLength(2);
+      // An empty terminal step cut by the output limit (no text, no tool call:
+      // the budget went to reasoning — calm-copper-otter, session 8a5bd89c2be0)
+      // now gets ONE tool-free re-ask; a still-empty answer stays incomplete.
+      expect(handle.model.doStreamCalls).toHaveLength(mode === "normal" ? 2 : 3);
       expect(result.success).toBe(mode === "normal");
       if (mode === "normal") expect(result.output).toBe("Final scoped result and remaining limits");
-      else expect(result.error).toContain("output limit");
+      else {
+        expect(result.error).toContain("output limit");
+        expect(handle.model.doStreamCalls[2].tools ?? []).toHaveLength(0);
+        expect(JSON.stringify(handle.model.doStreamCalls[2].prompt)).toContain("spent its whole output budget");
+      }
     } finally {
       handle.uninstall();
     }
@@ -1078,7 +1085,7 @@ describe("StreamRunner provider errors (steady-copper-badger)", () => {
       handle.uninstall();
     }
   });
-  it("reports a truncated final as incomplete without retrying tools", async () => {
+  it("reports a truncated final as incomplete after bounded tool-free continuations", async () => {
     const parts = textOnlyStream("Truncated final");
     const finish = parts.at(-1)!;
     if (finish.type === "finish") finish.finishReason = { unified: "length", raw: "length" };
@@ -1094,7 +1101,11 @@ describe("StreamRunner provider errors (steady-copper-badger)", () => {
       expect(result.error).toContain("configuredOutputTokens=");
       expect(result.error).toContain("effectiveMaxOutputTokens=");
       expect(result.output).toContain("Truncated final");
-      expect(handle.model.doStreamCalls).toHaveLength(1);
+      // keen-blue-lynx (session 8a5bd89c2be0): a cut answer gets at most
+      // MAX_LENGTH_CONTINUATIONS tool-free follow-ups; the fixture keeps
+      // answering "length", so the result stays labelled incomplete.
+      expect(handle.model.doStreamCalls).toHaveLength(3);
+      for (const call of handle.model.doStreamCalls.slice(1)) expect(call.tools ?? []).toHaveLength(0);
     } finally {
       handle.uninstall();
     }

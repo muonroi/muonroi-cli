@@ -36,6 +36,8 @@ export interface ModelFixture {
   defaultProviderOptions?: Record<string, unknown>;
   provider?: string;
   modelId?: string;
+  /** Prompt-routed rounds (see MockModelFixture.routes) — e.g. a worker child's own script. */
+  routes?: Array<{ systemIncludes: string; stream: StreamChunks[] }>;
 }
 
 export interface CostLeakHarness {

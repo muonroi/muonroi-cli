@@ -1233,7 +1233,14 @@ program
         // Phase H3 — exfiltrate recordings to a file at exit so the parent
         // vitest spec can assert across the child-process boundary. Activated
         // only when MUONROI_MOCK_MODEL_DUMP is set; otherwise no-op.
-        const dumpPath = process.env.MUONROI_MOCK_MODEL_DUMP;
+        // A delegated worker runs in its own child process with the same env;
+        // give it its own file so it neither clobbers nor is clobbered by the
+        // parent TUI's dump (both rewrite the whole file after every call).
+        const baseDumpPath = process.env.MUONROI_MOCK_MODEL_DUMP;
+        const dumpPath =
+          baseDumpPath && process.env.MUONROI_BACKGROUND_CHILD === "1"
+            ? `${baseDumpPath}.worker-${process.pid}.json`
+            : baseDumpPath;
         if (typeof dumpPath === "string" && dumpPath.length > 0) {
           const { dumpRecordings } = await import("./agent-harness/mock-model.js");
           let dumped = false;

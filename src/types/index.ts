@@ -81,12 +81,14 @@ export type DelegationFailureKind = "rate-limited";
 
 /** Host observations, never a diagnosis of why a provider/harness failed. */
 export interface DelegationFailureRecovery {
-  symptom: "missing-final-answer" | "output-limit" | "model-message-schema" | "unclassified";
+  symptom: "missing-final-answer" | "output-limit" | "model-message-schema" | "provider-stall" | "unclassified";
   rootCause: "not-established";
   capturedToolCalls: number;
   mutationToolCalls: number;
   commandToolCalls: number;
   artifactError?: string;
+  /** Files named by captured edit/write calls (attempted, not proof of a landed change). */
+  attemptedWritePaths?: string[];
   /** Last bounded mutation/command references; the full manifest remains authoritative. */
   inspect: Array<{ toolCallId: string; toolName: string; digest: string }>;
 }

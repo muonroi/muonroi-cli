@@ -90,6 +90,15 @@ export interface MockModelFixture {
    * Setting `classify` implies opting in.
    */
   autoClassify?: boolean;
+  /**
+   * Prompt-routed rounds. A `doStream` call whose system prompt contains
+   * `systemIncludes` consumes rounds from THIS route's stream (own cursor; last
+   * entry repeats), not from `stream`. Lets one fixture script two parties that
+   * share it — e.g. the main TUI and a delegated worker, which runs in its own
+   * child process with a fresh copy of the fixture and would otherwise start at
+   * the main agent's round 0.
+   */
+  routes?: Array<{ systemIncludes: string; stream: StreamChunks[] }>;
 }
 
 /**
@@ -199,6 +208,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
   // DEFAULT_CLASSIFY_LINE and make every classification collapse to "generate".
   const interceptClassify = fx.autoClassify === true || fx.classify !== undefined;
   const chunkDelayMs = Math.max(0, fx.chunkDelayMs ?? 0);
+  const routeCursors = new Map<object, number>();
 
   const model = new MockLanguageModelV3({
     provider,
@@ -240,8 +250,34 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
           };
         }
       }
-      const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
-      callIdx += 1;
+      const route = fx.routes?.length
+        ? fx.routes.find((r) => r.stream.length > 0 && systemPromptText(options).includes(r.systemIncludes))
+        : undefined;
+      let chunks: StreamChunks;
+      if (route) {
+        const at = routeCursors.get(route) ?? 0;
+        chunks = route.stream[Math.min(at, route.stream.length - 1)]!;
+        routeCursors.set(route, at + 1);
+      } else {
+        chunks = streams[Math.min(callIdx, streams.length - 1)]!;
+        callIdx += 1;
+      }
+      // A round whose chunk is `{type:"error", rejectRequest:true, error}` makes
+      // doStream itself REJECT — the shape of a real provider answering with an
+      // HTTP error status before any chunk (e.g. 503 "engine overloaded"), as
+      // opposed to an in-stream `error` part. Retry layers that wrap the request
+      // initiation can only be exercised this way.
+      const rejection = chunks.find(
+        (c) =>
+          (c as { type?: string; rejectRequest?: boolean }).type === "error" &&
+          (c as { rejectRequest?: boolean }).rejectRequest === true,
+      ) as { error?: unknown } | undefined;
+      if (rejection) {
+        if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+          process.stderr.write(`[mock-model] doStream #${callIdx} → rejecting request\n`);
+        }
+        throw rejection.error instanceof Error ? rejection.error : new Error(String(rejection.error));
+      }
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
         // Useful when diagnosing harness specs that stall before streamText —
         // a missing log line means doStream was never invoked.
@@ -291,6 +327,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       model.doStreamCalls.length = 0;
       callIdx = 0;
       genIdx = 0;
+      routeCursors.clear();
     },
   };
 }
@@ -641,6 +678,14 @@ export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModel
       stream: isNestedArray(raw.model.stream)
         ? raw.model.stream.map(normalizeStreamChunks)
         : normalizeStreamChunks(raw.model.stream),
+      ...(raw.model.routes
+        ? {
+            routes: raw.model.routes.map((r) => ({
+              systemIncludes: r.systemIncludes,
+              stream: r.stream.map(normalizeStreamChunks),
+            })),
+          }
+        : {}),
     };
     const base = createMockModel(normalized);
     log(
