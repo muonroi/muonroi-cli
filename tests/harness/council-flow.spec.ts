@@ -120,11 +120,23 @@ describe.skipIf(!!process.env.CI)("council flow E2E", () => {
     await driver.wait_for({ selector: 'role=listitem name~="Delegation started:"', timeoutMs: 30_000 });
     expect(driver.query("id=msg-0")?.name).toMatch(/^user:\/council analyze trade-offs/);
     const receipt = driver.query('role=listitem name~="Delegation started:"')?.name ?? "";
-    const jobId = /Delegation started: ([a-z]+-[a-z]+-[a-z]+)/.exec(receipt)?.[1];
-    expect(jobId).toBeDefined();
+    // The listitem name is display text and can be clipped mid-id (measured in a
+    // full-suite run: "launched nimble-emerald-badge" vs record id
+    // "nimble-emerald-badger"), so the screen gives a PREFIX of the job id. Find
+    // the record by what it is (the council job for this topic), then prove the
+    // receipt names that same job.
+    const shownId = /Delegation started: ([a-z]+-[a-z]+-[a-z]+)/.exec(receipt)?.[1];
+    expect(shownId).toBeDefined();
 
     // 2) That job is a durable infrastructure council carrying the user's topic.
-    const launched = await waitForDelegation(cliHome, (r) => r.id === jobId, 10_000, `launched ${jobId}`);
+    const launched = await waitForDelegation(
+      cliHome,
+      (r) => r.kind === "council" && r.council?.topic === TOPIC,
+      10_000,
+      `council job for "${TOPIC}"`,
+    );
+    expect(launched.id.startsWith(shownId!)).toBe(true);
+    const jobId = launched.id;
     expect(launched.kind).toBe("council");
     expect(launched.executionRole).toBe("infrastructure");
     expect(launched.council?.topic).toBe(TOPIC);

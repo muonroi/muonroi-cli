@@ -125,11 +125,21 @@ describe("council intent gate + plan card — user-facing main (orchestrator rol
     // The launch receipt names the background job; read the job id off it.
     await driver.wait_for({ selector: 'role=listitem name~="Delegation started:"', timeoutMs: 30_000 });
     const receipt = driver.query('role=listitem name~="Delegation started:"')?.name ?? "";
-    const jobId = /Delegation started: ([a-z]+-[a-z]+-[a-z]+)/.exec(receipt)?.[1];
-    expect(jobId).toBeDefined();
+    // Display text can clip mid-id (council-flow measured "...-badge" for
+    // "...-badger"), so the screen yields an id PREFIX: find the record by what
+    // it is, then prove the receipt names that same job.
+    const shownId = /Delegation started: ([a-z]+-[a-z]+-[a-z]+)/.exec(receipt)?.[1];
+    expect(shownId).toBeDefined();
 
     // The job carries the user's topic verbatim and runs as infrastructure.
-    const launched = await waitForDelegation(cliHome, (r) => r.id === jobId, 10_000, `launched ${jobId}`);
+    const launched = await waitForDelegation(
+      cliHome,
+      (r) => r.kind === "council" && r.council?.topic === TOPIC,
+      10_000,
+      `council job for "${TOPIC}"`,
+    );
+    expect(launched.id.startsWith(shownId!)).toBe(true);
+    const jobId = launched.id;
     expect(launched.kind).toBe("council");
     expect(launched.executionRole).toBe("infrastructure");
     expect(launched.council?.topic).toBe(TOPIC);
