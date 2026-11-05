@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
+import { minimalReasoningProviderOptions } from "../providers/capabilities.js";
 import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
@@ -758,6 +759,78 @@ export interface CompactionSummaryResult {
   usage: CompactionUsage;
 }
 
+/**
+ * Below this many characters, a summary the provider cut off at the output
+ * limit (`finishReason: "length"`) carries less than the deterministic
+ * mechanical stub does, so it is rejected instead of replacing history.
+ */
+export const COMPACTION_TRUNCATED_MIN_CHARS = 400;
+
+/**
+ * A summarizer call that RETURNED but produced no usable summary. Thrown so the
+ * caller's existing fallback chain (other model, then the mechanical stub)
+ * handles it exactly like a provider error.
+ *
+ * Measured (session 4edc02516a92): 15 of 74 compactions stored an EMPTY
+ * summary - ids 315, 324, 328, 331, 333, 345, 348, 367, 382, 383, 384, 386,
+ * 387, 390, 394 - each billed exactly its output cap (1536/3072/4096/5632/8192
+ * output tokens, step-3.7-flash) with zero text, and `compactForContext`
+ * replaced history with it because it only fell back on a THROW.
+ */
+export class CompactionSummaryRejectedError extends Error {
+  constructor(
+    readonly reason: "empty" | "truncated-short",
+    readonly modelId: string,
+    readonly finishReason: string | undefined,
+    readonly outputTokens: number,
+    readonly budget: number | undefined,
+    readonly textChars: number,
+    readonly reasoningChars: number,
+  ) {
+    super(
+      `compaction summary rejected (${reason}): model=${modelId} finishReason=${finishReason ?? "unknown"} ` +
+        `outputTokens=${outputTokens} budget=${budget ?? "provider-default"} textChars=${textChars} reasoningChars=${reasoningChars}`,
+    );
+    this.name = "CompactionSummaryRejectedError";
+  }
+}
+
+/** Throws {@link CompactionSummaryRejectedError} when a returned summary is unusable. */
+export function assertUsableCompactionSummary(
+  modelId: string,
+  result: { text: string; finishReason?: string; reasoningText?: string },
+  outputTokens: number,
+  budget: number | undefined,
+): void {
+  const text = result.text.trim();
+  const reason =
+    text.length === 0
+      ? "empty"
+      : result.finishReason === "length" && text.length < COMPACTION_TRUNCATED_MIN_CHARS
+        ? "truncated-short"
+        : null;
+  if (!reason) return;
+  const reasoningChars = result.reasoningText?.length ?? 0;
+  logger.warn("orchestrator", "[compaction] summarizer returned an unusable summary; using fallback chain", {
+    reason,
+    modelId,
+    finishReason: result.finishReason,
+    outputTokens,
+    budget,
+    textChars: text.length,
+    reasoningChars,
+  });
+  throw new CompactionSummaryRejectedError(
+    reason,
+    modelId,
+    result.finishReason,
+    outputTokens,
+    budget,
+    text.length,
+    reasoningChars,
+  );
+}
+
 function readUsage(usage: unknown): CompactionUsage {
   if (!isRecord(usage)) return { promptTokens: 0, completionTokens: 0 };
   const prompt =
@@ -807,6 +880,12 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(modelId);
+  const dropMaxOutput = shouldDropParam(runtime, "maxOutputTokens");
+  // Ask for the cheapest reasoning the provider exposes: output tokens are
+  // shared with reasoning, and a summary whose budget is spent thinking comes
+  // back empty (see CompactionSummaryRejectedError). Providers with no knob
+  // return undefined and the merge is a no-op.
+  const providerOptions = minimalReasoningProviderOptions(runtime);
   const result = await generateTextStreamed({
     model: runtime.model,
     system: SUMMARIZATION_SYSTEM_PROMPT,
@@ -817,11 +896,13 @@ async function summarizeConversation(
     // See proposeCompaction — the OAuth registry veto must be honoured here too.
     // This call has NO caller-side catch (compactForContext awaits it directly),
     // so a 400 here aborts the user's turn outright.
-    ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: effectiveMax }),
-    ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
+    ...(dropMaxOutput ? {} : { maxOutputTokens: effectiveMax }),
+    ...(providerOptions ? { providerOptions } : {}),
   });
 
-  return { summary: result.text.trim(), usage: readUsage(result.usage) };
+  const usage = readUsage(result.usage);
+  assertUsableCompactionSummary(modelId, result, usage.completionTokens, dropMaxOutput ? undefined : effectiveMax);
+  return { summary: result.text.trim(), usage };
 }
 
 function emptyUsage(): CompactionUsage {
