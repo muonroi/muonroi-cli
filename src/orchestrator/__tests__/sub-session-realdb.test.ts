@@ -1590,6 +1590,54 @@ describe("sub-session resume vs. fork — round 4 (G9)", () => {
     const children = db.prepare("SELECT id FROM sessions WHERE parent_session_id = ?").all(parentId);
     expect(children).toHaveLength(1);
   });
+
+  // 0ce416b0 gap: the absorb step reloads main from storage, where the
+  // host-carried delegation ledger (seq=null) never lives. Main must get a
+  // fresh one back, but only if it carried one before the fork.
+  it.each([
+    true,
+    false,
+  ])("re-attaches main's delegation ledger after a helper absorb only when main carried one (carried=%s)", async (carried) => {
+    const { DELEGATION_LEDGER_HEADER, isDelegationLedgerMessage } = await import("../delegation-ledger.js");
+    mockClassify.mockResolvedValue({ action: "SPAWN_SUB_SESSION", confidence: 0.98, reason: "ledger absorb fixture" });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
+    const a = agent as any;
+    if (carried) {
+      a.messages.push({ role: "system", content: `${DELEGATION_LEDGER_HEADER}\nstale pre-fork snapshot` });
+      a.messageSeqs.push(null);
+    }
+    for await (const _ of agent.processMessage("Collect runtime evidence for main")) {
+      /* drain */
+    }
+    // The reload from storage dropped it either way.
+    expect(agent.getMessages().some((m) => isDelegationLedgerMessage(m))).toBe(false);
+    expect(a._delegationLedgerRestorePending).toBe(carried);
+
+    a.executionRole = "orchestrator";
+    a.delegations.ledgerSnapshot = vi.fn(async () => [
+      {
+        id: "steady-ivory-panda",
+        agent: "general",
+        description: "Wave 2: Docs engine",
+        status: "running",
+        startedAt: "2026-11-04T02:07:34.000Z",
+        acknowledged: false,
+      },
+    ]);
+    await agent.consumeBackgroundNotifications();
+    const ledgers = agent.getMessages().filter((m) => isDelegationLedgerMessage(m));
+    expect(ledgers).toHaveLength(carried ? 1 : 0);
+    if (carried) {
+      expect(String(ledgers[0]!.content)).toContain("jobId=steady-ivory-panda");
+      expect(String(ledgers[0]!.content)).not.toContain("stale pre-fork snapshot");
+      expect(isDelegationLedgerMessage(agent.getMessages()[0])).toBe(true);
+    } else {
+      expect(a.delegations.ledgerSnapshot).not.toHaveBeenCalled();
+    }
+  });
 });
 
 // Round 12 (F1/G15) — router SPAWN_SUB_SESSION hands the user's raw request

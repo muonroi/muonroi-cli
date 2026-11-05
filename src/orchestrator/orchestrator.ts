@@ -648,6 +648,13 @@ export class Agent {
   }
   /** Flow run init promise — awaited before first message turn. */
   private _flowReady: Promise<void> | null = null;
+  /**
+   * History was just reloaded from storage, where the host-carried delegation
+   * ledger never lives (seq=null, not persisted), so main must regenerate it
+   * from the registry before its next model call. See
+   * `restoreDelegationLedgerIfPending`.
+   */
+  private _delegationLedgerRestorePending = false;
   /** Active .muonroi-flow/ run ID for this session. */
   private _activeRunId: string | null = null;
   /** Resume digest loaded from active flow run state.md. */
@@ -817,6 +824,9 @@ export class Agent {
       const transcript = loadSessionChainTranscriptState(this.session.id);
       this.messages = transcript.messages;
       this.messageSeqs = transcript.seqs;
+      // --session / session-picker relaunch: background workers outlive this
+      // process (durable job records), but the ledger did not survive it.
+      this._delegationLedgerRestorePending = options.session !== undefined;
       this.sessionStore.setModel(this.session.id, this.modelId);
 
       // Flow run setup — fire-and-forget, awaited before first message turn.
@@ -1629,6 +1639,9 @@ export class Agent {
     // The manager's owner remains main while this Agent temporarily executes
     // a child. Leave notifications unclaimed until main's context is restored.
     if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
+    // Runs on every pre-stream turn and idle TUI tick, in main context only —
+    // and before notices are appended, so both reflect the same registry read.
+    await this.restoreDelegationLedgerIfPending();
     try {
       const persistNotification = (notification: { message: string; messageId?: string }) => {
         if (notification.messageId && !this.session)
@@ -2596,6 +2609,24 @@ export class Agent {
     }
     this.messages = messages;
     this.messageSeqs = seqs;
+  }
+
+  /**
+   * Re-attach a FRESH ledger after main's history was reloaded from storage
+   * (`--session` resume / picker relaunch, or the parent reload after a helper
+   * sub-session). The 0ce416b0 ledger is message-region only and never
+   * persisted, so without this a resumed orchestrator saw no live workers until
+   * its next compaction — the exact blind spot that caused the duplicate
+   * dispatch in session 4edc02516a92. Same placement and stale-replacement as
+   * the compaction carry; regenerated from the registry, never a stored copy.
+   * One-shot: the flag is cleared before the await so a concurrent idle-tick
+   * and turn start cannot both insert (and the carry is idempotent anyway).
+   */
+  private async restoreDelegationLedgerIfPending(): Promise<void> {
+    if (!this._delegationLedgerRestorePending) return;
+    this._delegationLedgerRestorePending = false;
+    if (this.executionRole !== "orchestrator" || process.env.MUONROI_BACKGROUND_CHILD === "1") return;
+    await this.carryDelegationLedgerAfterCompaction();
   }
 
   private async compactForContext(
@@ -4627,6 +4658,9 @@ export class Agent {
     let isSubSessionForked = false;
     let parentSessionId: string | null = null;
     let subSessionId: string | null = null;
+    // Main's ledger lives only in memory; the absorb below reloads main from
+    // storage and would silently drop it (see restoreDelegationLedgerIfPending).
+    let parentCarriedDelegationLedger = false;
     // Round 9 (G13): `this.bash` is ONE shared BashTool instance for the
     // whole Agent lifetime — forking a sub-session swaps `this.session` /
     // `this.messages` but NEVER creates a new BashTool, so a `cd` the child
@@ -4678,6 +4712,8 @@ export class Agent {
       // child's output, which must NOT run when the fork never completed)
       // never fires, silently leaking the child's model/session/messages
       // onto every subsequent turn of this Agent instance.
+      parentCarriedDelegationLedger =
+        this._delegationLedgerRestorePending || this.messages.some((m) => isDelegationLedgerMessage(m));
       const sessionBeforeFork = this.session;
       const modelIdBeforeFork = this.modelId;
       const messagesBeforeFork = this.messages;
@@ -5090,6 +5126,9 @@ export class Agent {
             const parentState = loadTranscriptState(parentSessionId);
             this.messages = parentState.messages;
             this.messageSeqs = parentState.seqs;
+            // Re-arm only when main carried one: a ledger appearing where none
+            // was would shift main's whole cached message prefix.
+            if (parentCarriedDelegationLedger) this._delegationLedgerRestorePending = true;
 
             this._helperParentSessionId = previousHelperOwner;
             this._helperParentCwd = previousHelperCwd;
