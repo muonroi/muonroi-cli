@@ -9,11 +9,17 @@ import { join } from "node:path";
 
 import { APICallError, type LanguageModelV3StreamPart } from "@ai-sdk/provider";
 import { generateObject, stepCountIs, streamText, tool } from "ai";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { humanizeApiError } from "../../orchestrator/error-utils.js";
-import { createMockModel, loadMockModelFromDir, textOnlyStream, toolCallStream } from "../mock-model.js";
+import {
+  createMockModel,
+  loadMockModelFromDir,
+  resolvePriorPlaceholders,
+  textOnlyStream,
+  toolCallStream,
+} from "../mock-model.js";
 
 // biome-ignore lint/suspicious/noExplicitAny: streamText result generic is provider-specific
 async function drainStream(result: { fullStream: AsyncIterable<any> }): Promise<void> {
@@ -295,5 +301,49 @@ describe("loadMockModelFromDir", () => {
 
     expect(handle?.calls.length).toBe(2);
     expect(handle?.calls[1]?.prompt.length).toBeGreaterThan(handle?.calls[0]?.prompt.length ?? 0);
+  });
+});
+
+describe("resolvePriorPlaceholders — runtime values for scripted tool calls", () => {
+  const toolCall = (input: Record<string, unknown>): LanguageModelV3StreamPart[] => [
+    { type: "tool-call", toolCallId: "c1", toolName: "flow_plan_review", input: JSON.stringify(input) },
+  ];
+  const options = (prompt: unknown) => ({ prompt }) as never;
+  const notice = (id: string, version: string) => ({
+    role: "user",
+    content: [{ type: "text", text: `Background agent complete: \`${id}\` jobId=${id} resultVersion=${version}` }],
+  });
+
+  it("fills jobId/resultVersion from the newest notice and from JSON tool output", () => {
+    const prompt = [
+      notice("old-job", "aaa"),
+      {
+        role: "tool",
+        content: [{ type: "tool-result", output: { type: "json", value: { output: '{\n  "jobId": "json-job"\n}' } } }],
+      },
+      notice("new-job", "bbb"),
+    ];
+    const [chunk] = resolvePriorPlaceholders(
+      toolCall({ jobId: "{{prior:jobId}}", resultVersion: "{{prior:resultVersion}}" }),
+      options(prompt),
+    );
+    expect(JSON.parse((chunk as { input: string }).input)).toEqual({ jobId: "new-job", resultVersion: "bbb" });
+    const [fromJson] = resolvePriorPlaceholders(toolCall({ jobId: "{{prior:jobId}}" }), options(prompt.slice(0, 2)));
+    expect(JSON.parse((fromJson as { input: string }).input).jobId).toBe("json-job");
+  });
+
+  it("leaves an unresolvable placeholder intact and reports it on stderr", () => {
+    const writes: string[] = [];
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((s: string | Uint8Array) => {
+      writes.push(String(s));
+      return true;
+    });
+    try {
+      const [chunk] = resolvePriorPlaceholders(toolCall({ jobId: "{{prior:jobId}}" }), options([]));
+      expect((chunk as { input: string }).input).toContain("{{prior:jobId}}");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(writes.join("")).toContain("unresolved placeholder {{prior:jobId}}");
   });
 });

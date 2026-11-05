@@ -28,6 +28,8 @@ describe("actual root SDK plan review loop", () => {
       MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
       MUONROI_FLOW_NATIVE: "1",
       MUONROI_FLOW_PLAN_REVIEW_MAX_ATTEMPTS: "3",
+      // Pins the `stop` exhaustion policy; `proceed` is covered by plan-review-convergence.test.ts.
+      MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION: "stop",
     };
     const prior = Object.fromEntries(Object.keys(env).map((key) => [key, process.env[key]]));
     Object.assign(process.env, env);

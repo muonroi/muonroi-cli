@@ -29,7 +29,10 @@ export function loadConfig(cwd: string): PlanningConfig {
   try {
     const raw = readFileSync(configPath, "utf8");
     return JSON.parse(raw) as PlanningConfig;
-  } catch {
+  } catch (err) {
+    // A malformed config falls back to defaults, but never silently: the
+    // operator set a value (e.g. a plan-review round allowance) that is ignored.
+    console.error(`[flow-config] cannot read ${configPath}: ${(err as Error).message} — using defaults`);
     return {};
   }
 }

@@ -159,6 +159,71 @@ function systemPromptText(options: LanguageModelV3CallOptions): string {
   return parts.join("\n");
 }
 
+/**
+ * Placeholder a scripted tool-call `input` may carry to reuse a value the run
+ * produced at runtime (a background job id, a result digest) that a static
+ * fixture cannot know: `{{prior:<key>}}` resolves to the value of the most
+ * recent `<key>=<value>` or `"<key>": "<value>"` in the conversation the model
+ * is being called with (user, assistant and tool-result text, newest first).
+ */
+const PRIOR_PLACEHOLDER = /\{\{prior:([A-Za-z][\w-]*)\}\}/g;
+
+/** All prompt text, newest message first (tool results stringified). */
+function promptTextsNewestFirst(options: LanguageModelV3CallOptions): string[] {
+  const prompt = (options as { prompt?: unknown }).prompt;
+  if (!Array.isArray(prompt)) return [];
+  const texts: string[] = [];
+  for (const msg of prompt) {
+    const content = (msg as { content?: unknown }).content;
+    if (typeof content === "string") {
+      texts.push(content);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const p = part as { text?: unknown; output?: { value?: unknown }; input?: unknown };
+      if (typeof p.text === "string") texts.push(p.text);
+      else if (p.output !== undefined)
+        texts.push(typeof p.output.value === "string" ? p.output.value : JSON.stringify(p.output.value));
+    }
+  }
+  return texts.reverse();
+}
+
+function lookupPrior(texts: string[], key: string): string | undefined {
+  // `key` is constrained by PRIOR_PLACEHOLDER to [A-Za-z][\w-]*, so it needs no escaping.
+  const patterns = [
+    new RegExp(String.raw`\b${key}=([\w.-]+)`),
+    new RegExp(String.raw`\\?"${key}\\?"\s*:\s*\\?"([\w.-]+)`),
+  ];
+  for (const text of texts) {
+    for (const re of patterns) {
+      const m = re.exec(text);
+      if (m?.[1]) return m[1];
+    }
+  }
+  return undefined;
+}
+
+/** Resolve `{{prior:<key>}}` placeholders in scripted tool-call inputs. */
+export function resolvePriorPlaceholders(chunks: StreamChunks, options: LanguageModelV3CallOptions): StreamChunks {
+  if (!chunks.some((c) => c.type === "tool-call" && typeof c.input === "string" && c.input.includes("{{prior:")))
+    return chunks;
+  const texts = promptTextsNewestFirst(options);
+  return chunks.map((c) => {
+    if (c.type !== "tool-call" || typeof c.input !== "string" || !c.input.includes("{{prior:")) return c;
+    const input = c.input.replace(PRIOR_PLACEHOLDER, (whole, key: string) => {
+      const value = lookupPrior(texts, key);
+      if (value === undefined) {
+        process.stderr.write(`[mock-model] unresolved placeholder ${whole} in tool-call ${c.toolName}\n`);
+        return whole;
+      }
+      return value;
+    });
+    return { ...c, input };
+  });
+}
+
 export interface MockModelHandle {
   /** The mock model instance — assign to `globalThis.__muonroiMockModel`. */
   model: MockLanguageModelV3;
@@ -240,7 +305,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
           };
         }
       }
-      const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
+      const chunks = resolvePriorPlaceholders(streams[Math.min(callIdx, streams.length - 1)]!, options);
       callIdx += 1;
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
         // Useful when diagnosing harness specs that stall before streamText —

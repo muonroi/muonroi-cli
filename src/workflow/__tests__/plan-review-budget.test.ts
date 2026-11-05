@@ -14,6 +14,7 @@ describe("native request-owned plan review budget (dfd06b45d9db)", () => {
   let cwd: string;
   let bash: BashTool;
   const prior = process.env.MUONROI_FLOW_NATIVE;
+  const priorPolicy = process.env.MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION;
   beforeAll(async () => {
     await loadCatalog();
   });
@@ -21,6 +22,9 @@ describe("native request-owned plan review budget (dfd06b45d9db)", () => {
     cwd = mkdtempSync(join(tmpdir(), "plan-review-budget-"));
     bash = new BashTool(cwd);
     process.env.MUONROI_FLOW_NATIVE = "1";
+    // This suite pins the `stop` exhaustion policy; the default `proceed`
+    // settlement is covered by plan-review-convergence.test.ts.
+    process.env.MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION = "stop";
     vi.spyOn(leader, "resolvePlanCouncilLeader").mockResolvedValue({ modelId: "test-leader" });
   });
   afterEach(async () => {
@@ -28,6 +32,8 @@ describe("native request-owned plan review budget (dfd06b45d9db)", () => {
     vi.restoreAllMocks();
     if (prior === undefined) delete process.env.MUONROI_FLOW_NATIVE;
     else process.env.MUONROI_FLOW_NATIVE = prior;
+    if (priorPolicy === undefined) delete process.env.MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION;
+    else process.env.MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION = priorPolicy;
     rmSync(cwd, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   });
   const debate = () =>
