@@ -317,7 +317,15 @@ describe("attributeWorkerCost", () => {
   it("drops main-process rows, collapses double-logged compactions and attributes the rest", () => {
     const rows = [
       row({ ts: TS(10), model: "m-main", inputTokens: 1000 }), // billed in usage_events
-      row({ ts: TS(10.1), callsite: "orchestrator.compaction", model: "m-small", inputTokens: 500, outputTokens: 5 }),
+      // Legacy pair: the compaction path's own row (iteration) + recordUsage's copy (none).
+      row({
+        ts: TS(10.1),
+        callsite: "orchestrator.compaction",
+        model: "m-small",
+        inputTokens: 500,
+        outputTokens: 5,
+        iteration: 1,
+      }),
       row({ ts: TS(10.15), callsite: "orchestrator.compaction", model: "m-small", inputTokens: 500, outputTokens: 5 }),
       row({ ts: TS(10.2), usd: 2 }), // worker, in own window only
       row({ ts: TS(10.5), usd: 4 }), // in own AND foreign window
@@ -336,6 +344,32 @@ describe("attributeWorkerCost", () => {
     expect(out.ambiguousRows).toBe(1);
     expect(out.ambiguousUsd).toBe(4);
     expect(out.duplicateCompactionRows).toBe(1);
+  });
+
+  it("keeps single-logged compactions (post-fix rows) and collapses a legacy rejected pair", () => {
+    const compaction = { callsite: "orchestrator.compaction", model: "m-small", inputTokens: 500, outputTokens: 5 };
+    const rows = [
+      // Post-fix: two separate compactions, identical tokens, one row each.
+      row({ ...compaction, ts: TS(10.1), iteration: 1, parentSessionId: "child", usd: 1 }),
+      row({ ...compaction, ts: TS(10.2), iteration: 2, parentSessionId: "child", usd: 2 }),
+      // Legacy rejected-summary pair: .rejected row + recordUsage copy.
+      row({
+        ...compaction,
+        callsite: "orchestrator.compaction.rejected",
+        ts: TS(10.3),
+        iteration: 3,
+        parentSessionId: "child",
+        usd: 4,
+      }),
+      row({ ...compaction, ts: TS(10.35), parentSessionId: "child", usd: 4 }),
+    ];
+    const out = attributeWorkerCost(rows, [], ids, own, []);
+    expect(out.duplicateCompactionRows).toBe(1);
+    expect(out.rows.map((r) => [r.callsite, r.usd])).toEqual([
+      ["orchestrator.compaction", 1],
+      ["orchestrator.compaction", 2],
+      ["orchestrator.compaction.rejected", 4],
+    ]);
   });
 
   it("does not let one usage event absorb two distinct calls", () => {

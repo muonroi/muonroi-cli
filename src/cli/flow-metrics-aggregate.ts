@@ -8,6 +8,7 @@
  * from fixtures in the unit tests.
  */
 
+import { collapseDoubleLoggedCompactions } from "../usage/cost-log.js";
 import { logger } from "../utils/logger.js";
 import {
   BOOKKEEPING_TOOLS,
@@ -107,6 +108,8 @@ export interface FmCostRow {
   inputTokens: number;
   cachedInputTokens: number;
   outputTokens: number;
+  /** Compaction counter; set only on the compaction path's own row (see collapseDoubleLoggedCompactions). */
+  iteration?: number;
   /** Present on rows written by a worker process after attribution tagging landed. */
   parentSessionId?: string;
   delegationId?: string;
@@ -329,19 +332,16 @@ export interface WorkerCostAttribution {
   duplicateCompactionRows: number;
 }
 
-/** The orchestrator writes each compaction to the cost log twice (see attributeWorkerCost). */
-const COMPACTION_CALLSITE = "orchestrator.compaction";
-
 /**
  * Pick out the cost-log rows a session's background workers produced.
  *
  * Workers run with `persistSession: false`, so their calls reach ONLY the
  * cost log, never usage_events. The cost log carries no session id on rows
  * written before attribution tagging, so:
- *  0. Compaction rows are collapsed in pairs: the orchestrator appends every
- *     compaction to the cost log twice - once from recordUsage("compaction")
- *     and once from the compaction path itself (orchestrator.ts) - so two rows
- *     with the same model, input and output tokens within 15 min are one call.
+ *  0. Legacy double-logged compactions are collapsed (collapseDoubleLoggedCompactions
+ *     in usage/cost-log.ts): before the compaction path became the single writer,
+ *     recordUsage("compaction") appended a second copy without `iteration`.
+ *     Rows written after that fix are single and pass through.
  *  1. Rows matching a usage_events row (same model + input tokens, within
  *     15 min) are main-process calls already billed to some session → dropped.
  *  2. A row tagged with `parentSessionId` is attributed exactly.
@@ -374,23 +374,10 @@ export function attributeWorkerCost(
     ambiguousUsd: 0,
     duplicateCompactionRows: 0,
   };
-  const unpairedCompactions: FmCostRow[] = [];
-  for (const row of [...costRows].sort((a, b) => a.ts - b.ts)) {
-    if (row.callsite === COMPACTION_CALLSITE) {
-      const twin = unpairedCompactions.findIndex(
-        (c) =>
-          c.model === row.model &&
-          c.inputTokens === row.inputTokens &&
-          c.outputTokens === row.outputTokens &&
-          row.ts - c.ts <= MATCH_TOLERANCE_MS,
-      );
-      if (twin >= 0) {
-        unpairedCompactions.splice(twin, 1);
-        out.duplicateCompactionRows += 1;
-        continue;
-      }
-      unpairedCompactions.push(row);
-    }
+  const sorted = [...costRows].sort((a, b) => a.ts - b.ts);
+  const deduped = collapseDoubleLoggedCompactions(sorted, (r) => r);
+  out.duplicateCompactionRows = sorted.length - deduped.length;
+  for (const row of deduped) {
     const candidates = (byKey.get(`${row.model}\u0000${row.inputTokens}`) ?? []).filter(
       (i) => !used.has(i) && Math.abs(ms(usageEventsInRange[i]!.createdAt) - row.ts) <= MATCH_TOLERANCE_MS,
     );

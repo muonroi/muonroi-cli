@@ -1615,6 +1615,15 @@ export class Agent {
       ctx_pct: ctxPct,
     });
 
+    // Compaction owns its cost-log row: compactForContext appends exactly one
+    // per billed summary call (callsite orchestrator.compaction, or
+    // orchestrator.compaction.rejected for a rejected-but-billed summary) with
+    // the summarizing model's own provider, iteration and duration. Writing a
+    // second row here double-counted every compaction in `usage report --by
+    // callsite` (186 rows for 93 compactions, 2026-11-02..04) and stamped it
+    // with the session's provider rather than the summarizer's.
+    if (source === "compaction") return;
+
     // Append to cost-log JSONL so `usage report --by callsite` can surface
     // where orchestrator/task/title traffic is actually spending.
     // Best-effort: failures inside appendCostLog are swallowed (see cost-log.ts).
@@ -2931,7 +2940,12 @@ export class Agent {
       actualInputTokens: compactUsage.promptTokens,
       actualOutputTokens: compactUsage.completionTokens,
       durationMs: Date.now() - compactStartedAt,
-    }).catch(() => undefined);
+    }).catch((logErr: unknown) => {
+      logger.warn("orchestrator", "[compactForContext] cost-log append for compaction failed", {
+        modelId: summaryModelId,
+        error: (logErr as Error)?.message,
+      });
+    });
 
     appendCompaction(
       this.session.id,

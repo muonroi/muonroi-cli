@@ -157,19 +157,102 @@ export async function meteredGenerate<T>(
   }
 }
 
+/** Callsite of the summarizing compaction (`Orchestrator.compactForContext`). */
+export const COMPACTION_CALLSITE = "orchestrator.compaction";
+/** Pairing tolerance between the two legacy copies of one compaction. */
+const COMPACTION_TWIN_TOLERANCE_MS = 15 * 60 * 1000;
+
+/** The minimal row shape the compaction-twin rule reads. */
+export interface CompactionTwinRow {
+  ts: number;
+  model: string;
+  callsite?: string;
+  iteration?: number;
+  inputTokens: number;
+  outputTokens: number;
+}
+
+/**
+ * Legacy duplicate: until the compaction path became the single writer, every
+ * compaction was appended twice — once by `recordUsage(…, "compaction")`
+ * (callsite `orchestrator.compaction`, NO `iteration`, ts = write time) and
+ * once by `compactForContext` itself (callsite `orchestrator.compaction` or
+ * `orchestrator.compaction.rejected`, WITH `iteration`/`durationMs`, ts = call
+ * start). Measured: 186 compaction rows for 93 compactions over 2026-11-02..04.
+ *
+ * `dup` is the recordUsage copy, `authoritative` the compaction path's own row.
+ * Requiring the `iteration` asymmetry means two genuinely separate single-row
+ * compactions with identical token counts are never collapsed.
+ */
+export function isCompactionTwin(dup: CompactionTwinRow, authoritative: CompactionTwinRow): boolean {
+  return (
+    dup.callsite === COMPACTION_CALLSITE &&
+    dup.iteration === undefined &&
+    typeof authoritative.callsite === "string" &&
+    authoritative.callsite.startsWith(COMPACTION_CALLSITE) &&
+    authoritative.iteration !== undefined &&
+    dup.model === authoritative.model &&
+    dup.inputTokens === authoritative.inputTokens &&
+    dup.outputTokens === authoritative.outputTokens &&
+    Math.abs(dup.ts - authoritative.ts) <= COMPACTION_TWIN_TOLERANCE_MS
+  );
+}
+
+/**
+ * Drop the legacy recordUsage copy of each double-logged compaction, keeping
+ * the compaction path's own row (provider, iteration, duration). Rows written
+ * after the fix are single and pass through untouched. Order is preserved.
+ */
+export function collapseDoubleLoggedCompactions<T>(rows: readonly T[], view: (row: T) => CompactionTwinRow): T[] {
+  const views = rows.map(view);
+  const authoritative = views
+    .map((row, index) => ({ row, index }))
+    .filter(({ row }) => row.iteration !== undefined && row.callsite?.startsWith(COMPACTION_CALLSITE));
+  const claimed = new Set<number>();
+  const drop = new Set<number>();
+  views.forEach((row, index) => {
+    if (row.callsite !== COMPACTION_CALLSITE || row.iteration !== undefined) return;
+    let best = -1;
+    for (const a of authoritative) {
+      if (claimed.has(a.index) || !isCompactionTwin(row, a.row)) continue;
+      if (best < 0 || Math.abs(a.row.ts - row.ts) < Math.abs(views[best]!.ts - row.ts)) best = a.index;
+    }
+    if (best >= 0) {
+      claimed.add(best);
+      drop.add(index);
+    }
+  });
+  return rows.filter((_, index) => !drop.has(index));
+}
+
+/** Twin view of a raw cost-log entry. */
+export function costLogTwinView(e: CostLogEntry): CompactionTwinRow {
+  return {
+    ts: e.ts,
+    model: e.model,
+    callsite: e.callsite,
+    iteration: e.iteration,
+    inputTokens: e.actualInputTokens ?? 0,
+    outputTokens: e.actualOutputTokens ?? 0,
+  };
+}
+
 /**
  * Read all cost-log entries for the given UTC date (default = today).
- * Returns empty array if the file does not exist.
+ * Returns empty array if the file does not exist. Legacy double-logged
+ * compactions are collapsed to one row (see collapseDoubleLoggedCompactions),
+ * so `usage report --by callsite` counts each compaction once.
  */
 export async function readCostLog(date?: string, homeOverride?: string): Promise<CostLogEntry[]> {
   const day = date ?? todayUtc();
   const fp = path.join(muonroiHome(homeOverride), "usage", `cost-log-${day}.jsonl`);
   try {
     const content = await fs.readFile(fp, "utf-8");
-    return content
+    const entries = content
       .split("\n")
       .filter((l) => l.trim() !== "")
       .map((l) => JSON.parse(l) as CostLogEntry);
+    return collapseDoubleLoggedCompactions(entries, costLogTwinView);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return [];
     throw err;
