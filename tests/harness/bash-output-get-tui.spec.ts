@@ -196,6 +196,9 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
         // round 2). This spec is about the output cache, not approval, so it
         // selects yolo — the mode that auto-approves every tool.
         permission: "yolo",
+        // The orchestrator dispatches a worker; keep the FLOW gate independent of
+        // the developer checkout's machine-local .planning/STATE.md.
+        isolatedCwd: true,
         // Force EE classification unreachable so PIL Layer-1 deterministically
         // falls back to the LLM (mock) classifier, which consumes the round-0
         // JSON absorber. Without this, the classifier's EE /api/classify call

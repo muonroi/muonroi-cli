@@ -106,6 +106,16 @@ export interface SpawnCostLeakOptions {
    * otherwise the turn parks on an approval card the spec never answers.
    */
   permission?: "safe" | "auto-edit" | "yolo";
+  /**
+   * Spawn the TUI in a fresh empty project dir under the helper's workDir
+   * instead of the repo root. Required for specs whose orchestrator dispatches
+   * a mutation-capable worker (`task`): the native FLOW gate reads
+   * `<cwd>/.planning/STATE.md`, which is gitignored and machine-local — a
+   * developer checkout at `Depth: heavy` refuses the dispatch ("FLOW refused
+   * dispatch ... No worker was started"), so the spec passed in a clean agent
+   * worktree and failed in the main checkout. Defaults to false (repo root).
+   */
+  isolatedCwd?: boolean;
 }
 
 /**
@@ -128,11 +138,17 @@ export async function spawnCostLeakHarness(
     "utf8",
   );
   const dumpPath = join(workDir, "calls.json");
+  let projectDir: string | undefined;
+  if (opts.isolatedCwd) {
+    projectDir = join(workDir, "project");
+    mkdirSync(projectDir);
+  }
 
   const modelId = opts.modelId ?? "deepseek-v4-flash";
   const apiKey = opts.apiKey ?? "FAKE_KEY_FOR_TESTS";
 
   const ctx = await spawnHarness({
+    ...(projectDir ? { cwd: projectDir } : {}),
     extraArgs: [
       "-k",
       apiKey,

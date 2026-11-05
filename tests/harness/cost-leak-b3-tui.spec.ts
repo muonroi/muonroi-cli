@@ -146,7 +146,12 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
       // Safe mode routes every worker tool through owner approval
       // (src/orchestrator/worker-approval.ts gateWorkerTools); auto-edit
       // auto-approves read_file so the worker's reads run unattended.
-      { permission: "auto-edit" },
+      {
+        permission: "auto-edit",
+        // The orchestrator dispatches a worker; keep the FLOW gate independent of
+        // the developer checkout's machine-local .planning/STATE.md.
+        isolatedCwd: true,
+      },
     );
   }, 120_000);
 
