@@ -195,6 +195,11 @@ import { markProposerStalled } from "./compaction-stall-notice.js";
 import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
+import {
+  createDelegationLedgerMessage,
+  formatDelegationLedger,
+  isDelegationLedgerMessage,
+} from "./delegation-ledger.js";
 import { DelegationManager } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
@@ -2552,6 +2557,46 @@ export class Agent {
     };
   }
 
+  /**
+   * The live delegation ledger to carry across a compaction, or null when this
+   * is not a main session, nothing is live, or the registry cannot be read.
+   * Never throws: a ledger fault must not block the compaction it follows.
+   */
+  private async buildDelegationLedgerMessage(): Promise<ModelMessage | null> {
+    if (this.executionRole !== "orchestrator" || process.env.MUONROI_BACKGROUND_CHILD === "1") return null;
+    try {
+      const text = formatDelegationLedger(await this.delegations.ledgerSnapshot());
+      return text ? createDelegationLedgerMessage(text) : null;
+    } catch (err) {
+      logger.warn("orchestrator", "[compaction] delegation ledger snapshot failed; compacting without it", {
+        sessionId: this.session?.id,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Manual `/compact` replaces history with `[summary]` outside
+   * `compactForContext`; this re-attaches the host ledger to that result.
+   * Drops any stale ledger and inserts the fresh one right after a leading
+   * compaction summary.
+   */
+  async carryDelegationLedgerAfterCompaction(): Promise<void> {
+    const ledger = await this.buildDelegationLedgerMessage();
+    const keep = this.messages.map((m) => !isDelegationLedgerMessage(m));
+    const messages = this.messages.filter((_, i) => keep[i]);
+    const seqs = this.messageSeqs.filter((_, i) => keep[i]);
+    if (ledger) {
+      const at = isCompactionSummaryMessage(messages[0]) ? 1 : 0;
+      messages.splice(at, 0, ledger);
+      seqs.splice(at, 0, null);
+    }
+    this.messages = messages;
+    this.messageSeqs = seqs;
+  }
+
   private async compactForContext(
     provider: LegacyProvider,
     system: string,
@@ -2620,6 +2665,12 @@ export class Agent {
       preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !protectedEvidence.has(m));
       preparation.keptMessages = sourceMessages.filter((m) => kept.has(m));
     }
+    // A ledger from an earlier compaction is a stale registry snapshot: never
+    // feed it to the summarizer (it would launder old job state into the new
+    // summary) and never keep it — a fresh one is re-emitted below.
+    preparation.messagesToSummarize = preparation.messagesToSummarize.filter((m) => !isDelegationLedgerMessage(m));
+    preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !isDelegationLedgerMessage(m));
+    preparation.keptMessages = preparation.keptMessages.filter((m) => !isDelegationLedgerMessage(m));
 
     const trigger = force ? "manual" : "auto";
 
@@ -2857,8 +2908,14 @@ export class Agent {
       preparation.keptMessages,
     );
 
+    // Host-carried live delegation state (session 4edc02516a92, compaction
+    // id=343): placed right after the summary, independent of what the
+    // summarizer chose to keep. See delegation-ledger.ts.
+    const delegationLedger = await this.buildDelegationLedgerMessage();
+
     this.messages = [
       createCompactionSummaryMessage(summary),
+      ...(delegationLedger ? [delegationLedger] : []),
       ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [workingReceipt] : []),
       ...(taggedSessionStartReinjection ? [taggedSessionStartReinjection] : []),
       ...pinnedReinjections,
@@ -2866,6 +2923,7 @@ export class Agent {
     ];
     this.messageSeqs = [
       null,
+      ...(delegationLedger ? [null] : []),
       ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [null] : []),
       ...(taggedSessionStartReinjection ? [null] : []),
       ...pinnedReinjectionSeqs,

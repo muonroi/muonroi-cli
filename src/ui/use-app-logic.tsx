@@ -4644,6 +4644,7 @@ export function useAppLogic(props: AppLogicProps) {
                     appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
                   }
                   agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
@@ -5108,6 +5109,7 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 const summaryMsg = createCompactionSummaryMessage(cr.summary);
                 agent.setMessages([summaryMsg]);
+                await agent.carryDelegationLedgerAfterCompaction();
                 setMessages(groupToolEntries(agent.getChatEntries()));
                 setMessages((prev) => [
                   ...prev,
@@ -5996,6 +5998,7 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const summaryMsg = createCompactionSummaryMessage(cr.summary);
                   agent.setMessages([summaryMsg]);
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
