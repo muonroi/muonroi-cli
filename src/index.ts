@@ -60,6 +60,7 @@ import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
 import type { StreamChunk } from "./types/index.js";
+import { setCostLogAttribution } from "./usage/cost-log.js";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
 import { logger } from "./utils/logger.js";
@@ -862,6 +863,9 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
 
   try {
     const delegation = await loadDelegation(jobPath);
+    // Worker spend reaches only the cost log (persistSession=false); tag it so
+    // `usage flow-metrics` attributes it exactly instead of by time window.
+    setCostLogAttribution({ parentSessionId: delegation.parentSessionId, delegationId: delegation.id });
     if (delegation.kind === "task") {
       nativeTask = delegation;
       await executeEventHooks(
@@ -1799,6 +1803,28 @@ usage
   .action(async (sessionPrefix: string, opts: { json?: boolean }) => {
     const { runCostForensics } = await import("./cli/cost-forensics.js");
     await runCostForensics({ prefix: sessionPrefix, json: opts.json });
+  });
+
+usage
+  .command("flow-metrics <sessionPrefixes...>")
+  .description(
+    "Orchestrator efficiency for a session + its sub-sessions and worker jobs: time to first implementation write, delegations by purpose, plan-review rounds/verdicts, bookkeeping calls, worker failures, compactions, orchestrator vs worker cost. Read-only.",
+  )
+  .option("--json", "Emit the report as JSON")
+  .option("--home <dir>", "muonroi home holding delegations/ and usage/ (default ~/.muonroi-cli)")
+  .option("--db <path>", "Session database to read (default <home>/muonroi.db); opened read-only")
+  .option("--impl-ext <exts>", "Comma-separated extensions that count as implementation (e.g. .cs,.csproj)")
+  .action(async (sessionPrefixes: string[], opts: { json?: boolean; home?: string; db?: string; implExt?: string }) => {
+    const { runFlowMetrics } = await import("./cli/flow-metrics.js");
+    await runFlowMetrics(sessionPrefixes, {
+      json: opts.json,
+      home: opts.home,
+      db: opts.db,
+      implExtensions: opts.implExt
+        ?.split(",")
+        .map((e) => e.trim())
+        .filter(Boolean),
+    });
   });
 
 usage

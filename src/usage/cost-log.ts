@@ -31,6 +31,25 @@ export interface CostLogEntry extends CostMeta {
    *       attribute measured request size to its components.
    */
   breakdown?: Record<string, number>;
+  /**
+   * Set on every row a background worker process writes (see
+   * {@link setCostLogAttribution}). Workers run with persistSession=false, so
+   * the cost log is the ONLY record of their spend; without these tags
+   * `usage flow-metrics` can attribute it to a session only by job time window.
+   */
+  parentSessionId?: string;
+  delegationId?: string;
+}
+
+let attribution: { parentSessionId?: string; delegationId?: string } | null = null;
+
+/**
+ * Tag every subsequent cost-log row written by THIS process with the
+ * delegation it is running. Called once by the background worker entry; the
+ * main process never sets it (its spend is already in usage_events).
+ */
+export function setCostLogAttribution(tag: { parentSessionId?: string; delegationId?: string } | null): void {
+  attribution = tag;
 }
 
 function muonroiHome(homeOverride?: string): string {
@@ -54,7 +73,7 @@ export async function appendCostLog(entry: CostLogEntry, homeOverride?: string):
   try {
     const fp = logPath(homeOverride);
     await fs.mkdir(path.dirname(fp), { recursive: true });
-    await fs.appendFile(fp, `${JSON.stringify(entry)}\n`);
+    await fs.appendFile(fp, `${JSON.stringify(attribution ? { ...attribution, ...entry } : entry)}\n`);
   } catch {
     // intentionally swallow — diagnostics must not break the hot path
   }
