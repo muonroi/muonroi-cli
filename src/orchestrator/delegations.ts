@@ -65,6 +65,13 @@ import {
   type WorkerApprovalRequest,
   type WorkerApprovalView,
 } from "./worker-approval.js";
+import {
+  findWriteOverlap,
+  formatWriteOverlapRefusal,
+  isWriteCapable,
+  type WriterLike,
+  workerCommandCapabilityError,
+} from "./worker-dispatch-guard.js";
 import { failureRecoveryGuidance, workerFailureRecovery } from "./worker-failure-recovery.js";
 
 const ID_ADJECTIVES = ["brisk", "calm", "clever", "eager", "gentle", "keen", "lively", "nimble", "quiet", "steady"];
@@ -541,6 +548,10 @@ export class DelegationManager {
   ): Promise<ToolResult> {
     const grantError = workerMcpGrantError(request);
     if (grantError) return { success: false, output: grantError };
+    // Host-composed council/plan-review prompts are not model task briefs.
+    const modelDispatch = kind !== "council" && !planReview && !planRevalidation;
+    const capabilityError = modelDispatch ? workerCommandCapabilityError(request) : undefined;
+    if (capabilityError) return { success: false, output: capabilityError };
     if (process.env.MUONROI_BACKGROUND_CHILD === "1") {
       return { success: false, output: "Nested background delegations are disabled." };
     }
@@ -584,53 +595,87 @@ export class DelegationManager {
         output: `worker_write_scope_refused: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
-    const id = await generateUniqueId(dir);
-    const outputPath = path.join(dir, `${id}.md`);
-    const jobPath = path.join(dir, `${id}.json`);
+    const persist = async () => {
+      const id = await generateUniqueId(dir);
+      const outputPath = path.join(dir, `${id}.md`);
+      const jobPath = path.join(dir, `${id}.json`);
 
-    const record: StoredDelegation = {
-      approvalController:
-        this.approvalControllerDigest && kind !== "council"
-          ? {
-              digest: this.approvalControllerDigest,
-              pid: process.pid,
-              expiresAt: new Date(Date.now() + WORKER_APPROVAL_LIMITS.leaseMs).toISOString(),
-            }
-          : undefined,
-      messagingProtocol: kind === "council" ? undefined : 1,
-      id,
+      const record: StoredDelegation = {
+        approvalController:
+          this.approvalControllerDigest && kind !== "council"
+            ? {
+                digest: this.approvalControllerDigest,
+                pid: process.pid,
+                expiresAt: new Date(Date.now() + WORKER_APPROVAL_LIMITS.leaseMs).toISOString(),
+              }
+            : undefined,
+        messagingProtocol: kind === "council" ? undefined : 1,
+        id,
+        agent: request.agent,
+        kind,
+        council,
+        planReview,
+        planRevalidation,
+        reviewOf: request.reviewOf,
+        hostReview,
+        modelId: request.modelId,
+        providerId: request.modelId ? getModelInfo(request.modelId)?.provider : undefined,
+        reasoningEffort: request.reasoningEffort,
+        allowedMcpTools: request.allowedMcpTools,
+        ...(scoped
+          ? { writeScope: [...request.writeScope!], writeScopeVersion: 1, writeScopeBinding: scoped.binding }
+          : {}),
+        executionRole: kind === "council" ? "infrastructure" : "worker",
+        permissionMode: options.permissionMode ?? "safe",
+        description: request.description,
+        prompt: request.prompt,
+        cwd,
+        model: request.modelId ?? options.model,
+        sandboxMode: options.sandboxMode,
+        sandboxSettings: options.sandboxSettings,
+        maxToolRounds: options.maxToolRounds,
+        maxTokens: options.maxTokens,
+        batchApi: options.batchApi,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        outputPath,
+        parentSessionId: this.getOwnerId(),
+      };
+      await writeRecord(jobPath, record);
+      return { id, outputPath, jobPath, record };
+    };
+    const writer: WriterLike = {
       agent: request.agent,
+      cwd,
       kind,
-      council,
+      reviewOf: request.reviewOf,
       planReview,
       planRevalidation,
-      reviewOf: request.reviewOf,
-      hostReview,
-      modelId: request.modelId,
-      providerId: request.modelId ? getModelInfo(request.modelId)?.provider : undefined,
-      reasoningEffort: request.reasoningEffort,
-      allowedMcpTools: request.allowedMcpTools,
-      ...(scoped
-        ? { writeScope: [...request.writeScope!], writeScopeVersion: 1, writeScopeBinding: scoped.binding }
-        : {}),
-      executionRole: kind === "council" ? "infrastructure" : "worker",
-      permissionMode: options.permissionMode ?? "safe",
-      description: request.description,
-      prompt: request.prompt,
-      cwd,
-      model: request.modelId ?? options.model,
-      sandboxMode: options.sandboxMode,
-      sandboxSettings: options.sandboxSettings,
-      maxToolRounds: options.maxToolRounds,
-      maxTokens: options.maxTokens,
-      batchApi: options.batchApi,
-      status: "running",
-      startedAt: new Date().toISOString(),
-      outputPath,
-      parentSessionId: this.getOwnerId(),
+      ...(scoped ? { writeScope: request.writeScope, writeScopeTargets: scoped.binding.targets } : {}),
     };
-
-    await writeRecord(jobPath, record);
+    let persisted: Awaited<ReturnType<typeof persist>>;
+    if (isWriteCapable(writer)) {
+      // Check-and-persist atomically so parallel dispatches cannot both pass.
+      const outcome = await withFileLock(
+        path.join(dir, "write-dispatch"),
+        async () => {
+          const overlap = findWriteOverlap(writer, await this.runningWriters());
+          return overlap ? { refusal: formatWriteOverlapRefusal(writer, overlap) } : { saved: await persist() };
+        },
+        { staleMs: 30_000 },
+      );
+      if ("refusal" in outcome) {
+        logger.file("warn", "orchestrator", "Worker dispatch refused: overlapping running writer", {
+          agent: request.agent,
+          cwd,
+          writeScope: request.writeScope,
+          refusal: outcome.refusal,
+        });
+        return { success: false, output: outcome.refusal };
+      }
+      persisted = outcome.saved;
+    } else persisted = await persist();
+    const { id, jobPath, record } = persisted;
 
     const child = spawn(
       process.execPath,
@@ -1229,6 +1274,25 @@ export class DelegationManager {
     );
     if (matches.length > 1) throw new Error(`Delegation ID "${id}" is ambiguous across this session's saved scopes.`);
     return matches[0] ?? local;
+  }
+
+  /** Owned RUNNING jobs (dead PIDs reconciled to error) as overlap-guard writers. */
+  private async runningWriters(): Promise<WriterLike[]> {
+    const jobs = await Promise.all((await this.jobPaths()).map((jobPath) => this.reconcile(jobPath)));
+    return jobs
+      .filter((job): job is StoredDelegation => !!job && job.status === "running" && this.canAccess(job))
+      .map((job) => ({
+        id: job.id,
+        agent: job.agent,
+        cwd: job.cwd,
+        kind: job.kind,
+        reviewOf: job.reviewOf,
+        planReview: job.planReview,
+        planRevalidation: job.planRevalidation,
+        ...(job.writeScope !== undefined
+          ? { writeScope: job.writeScope, writeScopeTargets: job.writeScopeBinding?.targets }
+          : {}),
+      }));
   }
 
   private canAccess(record: StoredDelegation): boolean {

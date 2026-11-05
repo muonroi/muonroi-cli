@@ -140,6 +140,7 @@ import { noteToolActivityProgress } from "./tool-activity.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 import { gateWorkerTools, requestWorkerApproval, WORKER_APPROVAL_LIMITS } from "./worker-approval.js";
+import { ASK_MODE_WORKER_AGENTS, workerCommandCapabilityError } from "./worker-dispatch-guard.js";
 import { runScopedDelegationWrite } from "./worker-write-authorization.js";
 
 /**
@@ -365,6 +366,9 @@ export class StreamRunner {
   ): Promise<SetupOutcome> {
     const grantError = workerMcpGrantError(request);
     if (grantError) return { kind: "short-circuit", result: { success: false, output: grantError } };
+    // Durable jobs (artifactJobPath) were already checked at dispatch by DelegationManager.
+    const capabilityError = request.artifactJobPath ? undefined : workerCommandCapabilityError(request);
+    if (capabilityError) return { kind: "short-circuit", result: { success: false, output: capabilityError } };
     const permissionMode = this.deps.getPermissionMode?.();
     const approve = request.artifactJobPath
       ? (name: string, input: unknown, toolCallId: string, abortSignal?: AbortSignal, policyRequired?: boolean) =>
@@ -417,7 +421,7 @@ export class StreamRunner {
       };
     }
 
-    const childMode: AgentMode = isExplore || isVerifyDetect ? "ask" : "agent";
+    const childMode: AgentMode = ASK_MODE_WORKER_AGENTS.has(agentKey) ? "ask" : "agent";
     const verifySandboxOverrides: SandboxSettings = isVerify
       ? { allowNet: true, allowedHosts: undefined, allowEphemeralInstall: true, hostBrowserCommandsOnHost: true }
       : {};

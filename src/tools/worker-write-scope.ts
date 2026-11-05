@@ -7,7 +7,7 @@ export interface WorkerWriteScopeBinding {
   root: string;
   targets: string[];
 }
-const SCOPED_TOOLS = new Set([
+export const SCOPED_WORKER_TOOL_NAMES = [
   "read_file",
   "grep",
   "write_file",
@@ -19,7 +19,8 @@ const SCOPED_TOOLS = new Set([
   "context_load",
   "list_tools",
   "describe_tool",
-]);
+] as const;
+const SCOPED_TOOLS: ReadonlySet<string> = new Set(SCOPED_WORKER_TOOL_NAMES);
 export const WORKER_ISOLATION_CAPABILITIES = {
   fileScope: true,
   osSandbox: false,
