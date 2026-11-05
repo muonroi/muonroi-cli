@@ -899,7 +899,11 @@ export class DelegationManager {
     }
   }
 
-  async readResult(id: string, deliverToOwner = true): Promise<ToolResult> {
+  async readResult(
+    id: string,
+    deliverToOwner = true,
+    page?: { offset?: number; maxChars?: number },
+  ): Promise<ToolResult> {
     const record = await this.getById(id);
     if (!record) {
       return {
@@ -961,7 +965,8 @@ export class DelegationManager {
                 `Main: after processing this result, call delegation_ack(${JSON.stringify({ jobId: current.id, resultVersion: current.resultVersion })}). Reading does not acknowledge the result; ACK records handling, not verification or acceptance. Helpers must forward this reference to main and must not ACK on main's behalf.`,
               ]),
         ].join("\n");
-        return { success: true, output: `${resultReference(current)}\n${handling}\n\n${output}` };
+        const body = page ? pageResultText(current.id, output, page.offset, page.maxChars) : output;
+        return { success: true, output: `${resultReference(current)}\n${handling}\n\n${body}` };
       });
     } catch (err) {
       logger.warn("orchestrator", "Failed to read delegation output", { id, error: String(err) });
@@ -1262,7 +1267,7 @@ export class DelegationManager {
           }
           if (record.deliveredVersion === record.resultVersion || record.acknowledgedVersion === record.resultVersion)
             return;
-          const notification = { id: record.id, message: formatNotification(record) };
+          const notification = { id: record.id, message: formatNotification(record, output) };
           // A failed owner transcript write must leave this version pending.
           await persistDelivery?.(notification);
           record.notifiedAt = new Date().toISOString();
@@ -1985,7 +1990,64 @@ function renderOutput(record: StoredDelegation, content: string): string {
     .join("\n");
 }
 
-function formatNotification(record: StoredDelegation): string {
+/**
+ * Default chars of a completed result carried inside its completion notice.
+ * Sized from session 4edc02516a92: first full delegation_read results averaged
+ * 14.6k chars (max 34.7k) and the model itself asked for maxChars 8k-24k.
+ */
+export const DEFAULT_INLINE_RESULT_CHARS = 16_000;
+const MAX_INLINE_RESULT_CHARS = 48_000;
+
+/** `MUONROI_DELEGATION_INLINE_RESULT_CHARS`: 0 disables inline delivery; clamped to 0..48000. */
+export function inlineResultChars(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.MUONROI_DELEGATION_INLINE_RESULT_CHARS;
+  if (raw === undefined || raw.trim() === "") return DEFAULT_INLINE_RESULT_CHARS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return DEFAULT_INLINE_RESULT_CHARS;
+  return Math.min(MAX_INLINE_RESULT_CHARS, Math.max(0, Math.floor(parsed)));
+}
+
+export const INLINE_RESULT_BEGIN = "<<<delegation-result";
+export const INLINE_RESULT_END = "delegation-result>>>";
+
+/**
+ * Plan-review councils and their revalidations keep the explicit read: reading
+ * them records `planReviewReadVersion` and the main must go through the dossier
+ * selectors, not a prose result.
+ */
+function inlinesResult(record: StoredDelegation): boolean {
+  return record.status === "complete" && !record.planReview && !record.planRevalidation;
+}
+
+/**
+ * One page of a saved result plus how to continue. `delegation_read` without a
+ * toolCallId used to ignore offset/maxChars and always return everything.
+ */
+export function pageResultText(id: string, output: string, offset = 0, maxChars?: number): string {
+  const start = Math.min(Math.max(0, Math.floor(offset)), output.length);
+  const limit = maxChars === undefined ? output.length : Math.max(1, Math.floor(maxChars));
+  const end = Math.min(output.length, start + limit);
+  const next =
+    end < output.length
+      ? `; next page: delegation_read(${JSON.stringify({ id, offset: end, ...(maxChars === undefined ? {} : { maxChars: Math.min(24_000, Math.max(256, Math.floor(maxChars))) }) })})`
+      : "; end of result";
+  return `[result chars ${start}-${end} of ${output.length}${next}]\n${output.slice(start, end)}`;
+}
+
+/**
+ * Collapse inline result bodies to a one-line pointer. The TUI wake prompt
+ * repeats every notice text, while the full notice already sits in the
+ * transcript as a system message; without this the body would be sent twice.
+ */
+export function withoutInlineResults(notice: string): string {
+  const begin = notice.indexOf(INLINE_RESULT_BEGIN);
+  if (begin < 0) return notice;
+  const end = notice.indexOf(INLINE_RESULT_END, begin);
+  if (end < 0) return notice;
+  return `${notice.slice(0, begin)}[result delivered inline in the completion notice above]${notice.slice(end + INLINE_RESULT_END.length)}`;
+}
+
+function formatNotification(record: StoredDelegation, output?: string, inlineChars = inlineResultChars()): string {
   const title = record.title || record.description || record.id;
   const summary = record.summary || (record.error ? createSummary(record.error) : "No summary available.");
   const statusText = record.status === "complete" ? "complete" : record.status === "cancelled" ? "cancelled" : "failed";
@@ -2003,7 +2065,29 @@ function formatNotification(record: StoredDelegation): string {
     );
   }
 
-  lines.push(`Use \`delegation_read("${record.id}")\` to retrieve the full result.`);
+  if (output !== undefined && inlineChars > 0 && inlinesResult(record)) {
+    // Push the result to main instead of making it spend a full model step on
+    // delegation_read: in 4edc02516a92, 88 of 720 tool steps were a lone full
+    // delegation_read, 69 of them directly after a completion notice.
+    if (record.hostReview)
+      lines.push(
+        `Host review evidence sha256=${createHash("sha256")
+          .update(JSON.stringify(record.hostReview, null, 2))
+          .digest("hex")}`,
+      );
+    if (record.toolArtifacts?.length)
+      lines.push(
+        `Raw worker evidence: delegation_read(${JSON.stringify({ id: record.id, toolCallId: record.toolArtifacts[0]!.toolCallId, resultVersion: record.resultVersion, offset: 0, maxChars: 4000 })}). Use each toolCallId from the host manifest; resultVersion/digest are different identifiers.`,
+      );
+    lines.push(
+      output.length <= inlineChars
+        ? "Result (complete, inline below; no delegation_read needed):"
+        : "Result (first part inline below; read only the remainder via the next-page delegation_read it names):",
+    );
+    lines.push(INLINE_RESULT_BEGIN, pageResultText(record.id, output, 0, inlineChars), INLINE_RESULT_END);
+  } else {
+    lines.push(`Use \`delegation_read("${record.id}")\` to retrieve the full result.`);
+  }
   if (record.planReview && record.status === "complete")
     lines.push(
       "This is native Flow plan advice; Flow state has not been updated. Main must read report:findings.json and inspect the dossier evidence before requesting fixes. Then call flow_plan_review(action=complete, jobId, resultVersion, assessment, decisions) with accept/reject/resolved/defer for each current/prior open finding and supporting evidence. Stale plan/context is refused. Do not repeat action=start to collect a result.",

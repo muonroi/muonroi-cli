@@ -202,7 +202,7 @@ import {
   formatDelegationLedger,
   isDelegationLedgerMessage,
 } from "./delegation-ledger.js";
-import { DelegationManager } from "./delegations";
+import { DelegationManager, withoutInlineResults } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
@@ -1687,7 +1687,9 @@ export class Agent {
           logger.warn("orchestrator", "Background notification hook failed", { error: String(err) });
         });
       }
-      return notifications.map((notification) => notification.message);
+      // Callers (the TUI wake prompt) repeat these strings; the full notice,
+      // including any inline result, is already in the transcript above.
+      return notifications.map((notification) => withoutInlineResults(notification.message));
     } catch (err) {
       logger.error("orchestrator", "Background notification delivery failed", {
         sessionId: this.session?.id,
@@ -2294,7 +2296,7 @@ export class Agent {
     artifact?: import("../types/index.js").DelegationArtifactReadInput,
   ): Promise<ToolResult> {
     try {
-      if (artifact)
+      if (artifact?.toolCallId)
         return this.delegations.readToolArtifact(
           id,
           artifact.toolCallId,
@@ -2305,6 +2307,9 @@ export class Agent {
       return await this.delegations.readResult(
         id,
         !this._helperParentSessionId || this.session?.id === this._helperParentSessionId,
+        artifact && (artifact.offset !== undefined || artifact.maxChars !== undefined)
+          ? { offset: artifact.offset, maxChars: artifact.maxChars }
+          : undefined,
       );
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);

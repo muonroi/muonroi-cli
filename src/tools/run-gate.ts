@@ -13,8 +13,8 @@
  * What it is NOT. It is not a sandbox and not a prevention boundary. The
  * reproduced escape still works: a package.json script or a csproj
  * WriteLinesToFile target the recipe runs can write `../../../OUTSIDE.txt`.
- * writeScope is an accident-prevention boundary (ORCHESTRATOR_CONTRACT: "Do not
- * describe it as sandboxed"), and this tool adds a DETECTIVE control on top:
+ * writeScope is an accident-prevention boundary (ORCHESTRATOR_CONTRACT: "never
+ * describe either as sandboxed"), and this tool adds a DETECTIVE control on top:
  *
  *  - `git status --porcelain -z --untracked-files=all` of the enclosing repository
  *    is snapshotted before and after the run, with a content fingerprint per

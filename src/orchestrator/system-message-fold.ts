@@ -38,15 +38,34 @@ function appendText(content: ModelMessage["content"], text: string): ModelMessag
   return content;
 }
 
+function prependText(content: ModelMessage["content"], text: string): ModelMessage["content"] {
+  if (typeof content === "string") return `${text}\n\n${content}`;
+  if (Array.isArray(content)) {
+    return [{ type: "text", text }, ...content] as ModelMessage["content"];
+  }
+  return content;
+}
+
 /**
  * Returns `messages` with every system message that appears after a
- * non-system message folded into the nearest PRECEDING user message.
+ * non-system message folded into a user message:
+ *
+ * - into the FOLLOWING user message when only system messages separate them
+ *   (prepended, so chronology holds). This is the background-notice shape:
+ *   `[..., assistant, system(notice), user(next turn)]`. Folding it backwards
+ *   rewrote the previous turn's user message, so the first request after a
+ *   notice stopped sharing the previous request's prefix from that user
+ *   message on and the provider prompt cache missed the whole prior turn.
+ *   Folding forward keeps every earlier message byte-identical: the new
+ *   request is a pure append of the previous one.
+ * - otherwise into the nearest PRECEDING user message (a notice that lands
+ *   mid-turn, between tool rounds, has no later user message).
  *
  * Leading system messages are left exactly where they are — the AI SDK hoists
  * those into the provider's native system field, which is the supported shape.
- * A trailing system message with no preceding user message to fold into is
- * also left alone: there is nothing to merge it with, and dropping it would
- * lose guidance silently.
+ * A system message with no user message to fold into is also left alone:
+ * there is nothing to merge it with, and dropping it would lose guidance
+ * silently.
  *
  * Pure; never mutates the input.
  */
@@ -68,12 +87,20 @@ export function foldMidConversationSystemMessages(messages: readonly ModelMessag
 
   const out: ModelMessage[] = [];
   let lastUserIndex = -1;
+  let forward: string[] = [];
   seenNonSystem = false;
 
-  for (const msg of messages) {
+  for (const [index, msg] of messages.entries()) {
     if (msg.role !== "system") {
       seenNonSystem = true;
-      if (msg.role === "user") lastUserIndex = out.length;
+      if (msg.role === "user") {
+        lastUserIndex = out.length;
+        if (forward.length > 0) {
+          out.push({ ...msg, content: prependText(msg.content, forward.join("\n\n")) } as ModelMessage);
+          forward = [];
+          continue;
+        }
+      }
       out.push(msg);
       continue;
     }
@@ -82,10 +109,21 @@ export function foldMidConversationSystemMessages(messages: readonly ModelMessag
       continue;
     }
     const text = typeof msg.content === "string" ? msg.content : "";
+    if (text.trim().length === 0) {
+      // Nothing to fold — keep it rather than silently discarding it.
+      out.push(msg);
+      continue;
+    }
+    let next = index + 1;
+    while (messages[next]?.role === "system") next++;
+    if (messages[next]?.role === "user") {
+      forward.push(`${FOLDED_SYSTEM_PREFIX}\n${text}`);
+      continue;
+    }
     const target = lastUserIndex >= 0 ? out[lastUserIndex] : undefined;
-    if (!target || text.trim().length === 0) {
-      // No user message to fold into (or nothing to fold) — keep it rather
-      // than silently discarding guidance.
+    if (!target) {
+      // No user message to fold into — keep it rather than silently
+      // discarding guidance.
       out.push(msg);
       continue;
     }

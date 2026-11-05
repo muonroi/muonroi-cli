@@ -300,7 +300,8 @@ export interface DelegationAcceptanceInput {
   reviewResultVersion: string;
 }
 export interface DelegationArtifactReadInput {
-  toolCallId: string;
+  /** Omitted = page through the saved result itself (offset/maxChars), not a tool artifact. */
+  toolCallId?: string;
   resultVersion?: string;
   offset?: number;
   maxChars?: number;

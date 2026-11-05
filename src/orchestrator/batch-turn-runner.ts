@@ -56,7 +56,7 @@ import {
 } from "./batch-utils";
 import { relaxCompactionSettings } from "./compaction";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
-import { filterExecutionTools, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
+import { filterExecutionTools, withOrchestratorContract } from "./orchestration-policy.js";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import { combineAbortSignals, notifyObserver } from "./tool-utils";
@@ -161,7 +161,7 @@ export class BatchTurnRunner {
   }): AsyncGenerator<StreamChunk, void, unknown> {
     const deps = this.deps;
     const { userModelMessage, observer, provider, subagents, runtime, modelInfo, signal } = args;
-    const system = deps.executionRole === "orchestrator" ? `${args.system}\n\n${ORCHESTRATOR_CONTRACT}` : args.system;
+    const system = withOrchestratorContract(args.system, deps.executionRole);
     let attemptedOverflowRecovery = false;
     let streamRetryCount = 0;
     const MAX_STREAM_RETRIES = 2;
