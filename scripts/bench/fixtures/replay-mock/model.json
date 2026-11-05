@@ -1,0 +1,57 @@
+{
+  "___comment": "Mock model for validating scripts/bench/replay-tcis.ts end-to-end without spending tokens. Round 1 asks for write_file, which the coordinator orchestrator does not have: the host refuses it, and flow-metrics must NOT count it as an implementation write. Round 2 calls context_load (a bookkeeping tool flow-metrics must count). Round 3 answers. The last stream repeats for any further call.",
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-replay",
+    "stream": [
+      [
+        { "type": "stream-start", "warnings": [] },
+        {
+          "type": "tool-call",
+          "toolCallId": "replay-write-1",
+          "toolName": "write_file",
+          "input": "{\"file_path\":\"src/src/TCIS.MCP.Docs/MockReplay.cs\",\"content\":\"namespace TCIS.MCP.Docs;\\n\"}"
+        },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 1200, "noCache": 1200, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 40, "text": 40, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        {
+          "type": "tool-call",
+          "toolCallId": "replay-ctx-1",
+          "toolName": "context_load",
+          "input": "{\"topic\":\"working_set\",\"action\":\"inspect\"}"
+        },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 1250, "noCache": 250, "cacheRead": 1000, "cacheWrite": null },
+            "outputTokens": { "total": 20, "text": 20, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "text-start", "id": "t1" },
+        { "type": "text-delta", "id": "t1", "delta": "Mock replay finished: no files were written." },
+        { "type": "text-end", "id": "t1" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "stop", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 1300, "noCache": 300, "cacheRead": 1000, "cacheWrite": null },
+            "outputTokens": { "total": 20, "text": 20, "reasoning": null }
+          }
+        }
+      ]
+    ]
+  }
+}
