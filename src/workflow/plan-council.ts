@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolvePlanCouncilLeader } from "../council/leader.js";
 import type { ToolResult } from "../types/index.js";
@@ -13,6 +13,7 @@ import {
   type PlanPerspectiveId,
   perspectivesForDepth,
 } from "./plan-council-prompts.js";
+import { currentPlanDigest, recordReviewRound } from "./plan-review-convergence.js";
 import {
   FINDING_LEDGER,
   type MainReviewAssessment,
@@ -213,6 +214,29 @@ function applyVerdict(cwd: string, verdict: PerspectiveVerdict | "pass"): void {
   }
 }
 
+function claimId(claim: string): string {
+  return createHash("sha256").update(claim.trim()).digest("hex").slice(0, 12);
+}
+
+/** Bookkeeping only — a failure to record history must never fail the review itself. */
+function recordConvergenceRound(
+  cwd: string,
+  reviewId: string,
+  verdict: PerspectiveVerdict | "pass",
+  openBlocking: Array<{ id: string; claim: string }>,
+): void {
+  try {
+    recordReviewRound(cwd, {
+      reviewId,
+      planDigest: currentPlanDigest(cwd),
+      verdict: verdict === "approve" ? "pass" : verdict,
+      openBlocking,
+    });
+  } catch (err) {
+    console.error(`[flow] plan-review round ${reviewId} not recorded for convergence: ${(err as Error).message}`);
+  }
+}
+
 export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncilResult> {
   opts.abortSignal?.throwIfAborted();
   const { cwd, sessionModelId, depth, runPerspectiveFn, revisionCycle = 0 } = opts;
@@ -297,8 +321,9 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
         "Council leader did not emit a structured verdict block — forcing revision.",
       ];
       const rationale = parsed?.rationale ?? "";
+      const raised = parsed ? verdictFindings(parsed) : [];
       const ledger = parsed
-        ? reconcileFindings(readFindingLedger(cwd), verdictFindings(parsed), reviewId, opts.mainAssessment)
+        ? reconcileFindings(readFindingLedger(cwd), raised, reviewId, opts.mainAssessment)
         : undefined;
       if (ledger) {
         const openBlockers = ledger.entries.filter((e) => e.state === "open" && e.finding.severity === "blocking");
@@ -391,6 +416,22 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
       }
       writeFileSync(planReviewPath, reviewContent, "utf8");
       writeFileSync(planVerifyPath, verifyContent, "utf8");
+      // Convergence history: only a structured, recorded review is a round. A
+      // parse failure is a reviewer defect, not an objection, and must not look
+      // like a repeated blocker. A round lists the blockers THIS reviewer raised
+      // (or kept) open — the ledger also carries older unadjudicated findings
+      // forward, and those must not read as "re-raised every round".
+      if (ledger) {
+        const raisedOpen = new Set(raised.filter((f) => f.status === "open").map((f) => f.id));
+        recordConvergenceRound(
+          cwd,
+          reviewId,
+          verdict,
+          ledger.entries
+            .filter((e) => e.state === "open" && e.finding.severity === "blocking" && raisedOpen.has(e.finding.id))
+            .map((e) => ({ id: e.finding.id, claim: e.finding.claim })),
+        );
+      }
 
       applyVerdict(cwd, verdict);
 
@@ -431,6 +472,14 @@ export async function runPlanCouncil(opts: PlanCouncilOpts): Promise<PlanCouncil
   await opts.beforePersist?.();
   writeFileSync(planReviewPath, formatPlanReview(results, leader.modelId, revisionCycle, reviewId), "utf8");
   writeFileSync(planVerifyPath, formatPlanVerify(verdict, results, { source, parseFailed: false, reviewId }), "utf8");
+  recordConvergenceRound(
+    cwd,
+    reviewId,
+    verdict,
+    results
+      .filter((r) => r.verdict !== "approve")
+      .flatMap((r) => r.concerns.map((claim) => ({ id: `${r.id}-${claimId(claim)}`, claim }))),
+  );
 
   applyVerdict(cwd, verdict);
 

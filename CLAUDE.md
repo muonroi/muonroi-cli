@@ -203,6 +203,19 @@ reads depth via `readState(cwd).depth`, never off a propagated pilCtx field.
 | `MUONROI_FLOW_ASSESSOR=0` | Skip the leader-tier assessor; depth comes only from layer1 classify. |
 | `MUONROI_FLOW_HARD_GATE=0` | Disable the mutation gate; directives become advisory-only. |
 
+**Plan-review convergence** (`src/workflow/plan-review-convergence.ts`, knobs in
+`src/workflow/review-budget.ts`). Every recorded review appends a round to
+`.planning/PLAN-REVIEW-ROUNDS.json`. The loop is settled by the HOST when the round
+allowance is spent without a pass, when the same blocking objection stays open across
+`allowance` consecutive reviews, or when the same objections are re-raised on an
+unchanged plan. Default settlement = admit the plan with the unresolved findings kept
+OPEN in `PLAN-FINDINGS.json` (the verify council reads them); `PLAN-VERIFY.md` records
+`admissionMethod: convergence-settlement` and a `toast` LiveEvent announces it. Never
+asks the user (no blocking card). Allowance: env `MUONROI_FLOW_PLAN_REVIEW_MAX_ATTEMPTS`
+→ `.planning/config.json` `workflow.plan_review_max_rounds` → 3. Policy: env
+`MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION` → `workflow.plan_review_on_exhaustion` →
+`proceed` (`stop` = old refuse-and-report). E2E: `tests/harness/plan-review-convergence.spec.ts`.
+
 E2E coverage of the deterministic gate: `tests/harness/flow-hard-gate.spec.ts`
 (seeds `.planning/STATE.md` in a throwaway temp cwd; assessor OFF for
 determinism). Gate/assessor/verify logic is unit-covered under `src/workflow/__tests__/`.

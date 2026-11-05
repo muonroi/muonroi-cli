@@ -5,11 +5,25 @@ import type { ExecutionRole } from "../orchestrator/orchestration-policy.js";
 import type { TaskRequest, ToolResult } from "../types/index.js";
 import type { AsyncPlanReviewHost, CompletedPlanReview } from "./async-plan-review.js";
 import { ensurePlanningWorkspace } from "./config-bridge.js";
+import { logFlowNativeEvent } from "./ee-closure.js";
 import { isFlowNativeEnabled } from "./flags.js";
 import { getFlowLoopHost, loopHostContext, taskToRunPerspectiveFn } from "./loop-host.js";
 import { planningArtifact } from "./paths.js";
 import type { PlanPerspective } from "./plan-council-prompts.js";
-import { createPlanReviewBudget, type PlanReviewBudget, planReviewBudgetStatus } from "./review-budget.js";
+import {
+  assessConvergence,
+  currentWindow,
+  readReviewRounds,
+  type SettlementReason,
+  type SettlementRecord,
+  settlePlanReview,
+} from "./plan-review-convergence.js";
+import {
+  createPlanReviewBudget,
+  type PlanReviewBudget,
+  planReviewBudgetStatus,
+  resolvePlanReviewExhaustionPolicy,
+} from "./review-budget.js";
 import { MainReviewAssessmentSchema } from "./review-findings.js";
 import { runVerifyCouncil } from "./verify-council.js";
 import type { VerifyPerspective } from "./verify-council-prompts.js";
@@ -67,8 +81,97 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
 
   const depth = opts.depth ?? "standard";
   const { cwd, sessionModelId, sessionId, runTask } = opts;
-  const reviewBudget = opts.planReviewBudget ?? createPlanReviewBudget();
+  const reviewBudget = opts.planReviewBudget ?? createPlanReviewBudget(cwd);
+
+  /**
+   * Terminal outcome for a plan review that is not converging. Returns null when
+   * the loop may continue (plan already admitted, no recorded non-pass review in
+   * the current loop, or objections still changing within the allowance).
+   */
+  const convergenceOutcome = (
+    budgetSpent: boolean,
+  ):
+    | { kind: "settled"; record: SettlementRecord }
+    | { kind: "stop"; reason: SettlementReason; detail: string }
+    | null => {
+    if (readState(cwd).planVerified) return null;
+    const rounds = readReviewRounds(cwd).rounds;
+    const last = currentWindow(rounds).at(-1);
+    if (!last) return null;
+    const convergence = assessConvergence(rounds, { stallRounds: reviewBudget.max });
+    const reason: SettlementReason | null = convergence.stalled
+      ? convergence.reason
+      : budgetSpent
+        ? "budget_exhausted"
+        : null;
+    if (!reason) return null;
+    const detail = convergence.stalled
+      ? convergence.detail
+      : `${convergence.trailingNonPass} consecutive non-pass review(s); ${convergence.detail}`;
+    if (resolvePlanReviewExhaustionPolicy(cwd) === "stop") return { kind: "stop", reason, detail };
+    const record = settlePlanReview({ cwd, reason, detail, openItems: last.openBlocking, budget: reviewBudget });
+    // A settled plan is admitted: the tool loop must continue into execution.
+    reviewBudget.stopRequested = false;
+    announceSettlement(record, last.reviewId);
+    return { kind: "settled", record };
+  };
+  const announceSettlement = (record: SettlementRecord, reviewId: string) => {
+    logFlowNativeEvent(sessionId ?? "flow-native", {
+      phase: readState(cwd).phase,
+      depth,
+      loopPoint: "plan:settle",
+      planVerified: true,
+      councilVerdict: `settled:${record.reason}`,
+      councilConcernCount: record.openItems.length,
+      reviewId,
+    });
+    const runtime = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+      | { emitEvent?: (e: unknown) => void }
+      | undefined;
+    try {
+      runtime?.emitEvent?.({
+        t: "event",
+        kind: "toast",
+        level: "warn",
+        text: `Plan review settled (${record.reason}): proceeding with ${record.openItems.length} open item(s) — ${record.openItems
+          .map((f) => f.id)
+          .join(", ")}`,
+      });
+    } catch (err) {
+      console.error(`[flow] plan settlement toast emit failed: ${(err as Error).message}`);
+    }
+  };
+  const settledResponse = (record: SettlementRecord) => {
+    const status = buildFlowStatusPayload(cwd, depth);
+    return json({
+      ok: true,
+      planVerified: true,
+      settlement: record,
+      review: status.review,
+      gates: status.gates,
+      phase: readState(cwd).phase,
+      reviewBudget: planReviewBudgetStatus(reviewBudget),
+      nextAction: "execute_with_open_items",
+      message: record.message,
+    });
+  };
   const exhaustedReview = () => {
+    if (readState(cwd).planVerified) {
+      // Already admitted (council pass or host settlement): another council or a
+      // plan rewrite is refused, but the request must not be stopped.
+      return json({
+        ok: false,
+        code: "plan_review_budget_exhausted",
+        planVerified: true,
+        reviewBudget: planReviewBudgetStatus(reviewBudget),
+        review: buildFlowStatusPayload(cwd, depth).review,
+        nextAction: "execute",
+        message:
+          "The plan is already admitted; no further council or plan rewrite is bought. Proceed with the current plan and settle any open items in verification.",
+      });
+    }
+    const outcome = convergenceOutcome(true);
+    if (outcome?.kind === "settled") return settledResponse(outcome.record);
     reviewBudget.stopRequested = true;
     return json({
       ok: false,
@@ -77,6 +180,7 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
       reviewBudget: planReviewBudgetStatus(reviewBudget),
       review: buildFlowStatusPayload(cwd, depth).review,
       nextAction: "stop_and_report",
+      ...(outcome ? { nonConvergence: { reason: outcome.reason, detail: outcome.detail, policy: "stop" } } : {}),
       message:
         "Stop buying councils or ordinary plan rewrites. Read-only verification and main completion of an unchanged bound review remain available. For changed inputs, flow_plan_review(action=revalidate, jobId, resultVersion, reason, optional planBody) permits one independent verification per exact planning/source snapshot, without another council or allowance reset. Read the fresh dossier and supply per-finding main decisions. Failed/stale revalidation remains gated; report remaining evidence gaps. Never force execution or create a request to evade the allowance.",
     });
@@ -317,6 +421,26 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
               "No plan council is required for this quick request. Existing bound reviews may still be completed with their exact result version.",
           });
         if (!completed && reviewBudget.used >= reviewBudget.max) return exhaustedReview();
+        // A loop already shown to be non-converging (e.g. carried over from an
+        // earlier request whose allowance was reset) must not buy another council.
+        if (!completed) {
+          const outcome = convergenceOutcome(false);
+          if (outcome?.kind === "settled") return settledResponse(outcome.record);
+          if (outcome?.kind === "stop") {
+            reviewBudget.stopRequested = true;
+            return json({
+              ok: false,
+              blocked: true,
+              code: "plan_review_not_converging",
+              nonConvergence: { reason: outcome.reason, detail: outcome.detail, policy: "stop" },
+              reviewBudget: planReviewBudgetStatus(reviewBudget),
+              review: buildFlowStatusPayload(cwd, depth).review,
+              nextAction: "stop_and_report",
+              message:
+                "Plan review is not converging and the configured policy is `stop`: no further council is bought. Report the unresolved objections to the user.",
+            });
+          }
+        }
         // Reserve synchronously before any await. A failed/cancelled review can
         // already have spent provider calls and does not refund this allowance.
         const revisionCycle = completed?.binding.revisionCycle ?? reviewBudget.used++;
@@ -362,6 +486,7 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
         if (councilResult.overlayError)
           return json({ ok: false, code: "plan_review_failed", message: councilResult.overlayError });
         const reviewResult = await host.firePoint("plan-review:post", ctx);
+        const settled = readState(cwd).planVerified ? null : convergenceOutcome(reviewBudget.used >= reviewBudget.max);
         const state = readState(cwd);
         if (state.planVerified) reviewBudget.stopRequested = false;
         const status = buildFlowStatusPayload(cwd, reviewDepth);
@@ -379,6 +504,11 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
           planVerified: state.planVerified,
           phase: state.phase,
           reviewBudget: planReviewBudgetStatus(reviewBudget),
+          ...(settled?.kind === "settled"
+            ? { settlement: settled.record, nextAction: "execute_with_open_items", message: settled.record.message }
+            : settled?.kind === "stop"
+              ? { nonConvergence: { reason: settled.reason, detail: settled.detail, policy: "stop" } }
+              : {}),
           ...(!state.planVerified && reviewBudget.used >= reviewBudget.max ? { nextAction: "stop_and_report" } : {}),
         });
       },

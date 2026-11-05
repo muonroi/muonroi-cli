@@ -105,6 +105,9 @@ beforeEach(() => {
   vi.stubEnv("MUONROI_FLOW_NATIVE", "1");
   vi.stubEnv("MUONROI_BACKGROUND_CHILD", "0");
   vi.stubEnv("MUONROI_CLI_HOME", home);
+  // This suite pins the `stop` exhaustion policy (refuse, never admit). The
+  // default `proceed` settlement is covered by plan-review-convergence.test.ts.
+  vi.stubEnv("MUONROI_FLOW_PLAN_REVIEW_ON_EXHAUSTION", "stop");
   expect(resolve(planningRoot(cwd))).toBe(resolve(cwd, ".planning"));
   ensurePlanningWorkspace(cwd, "fixture-model");
   writeFileSync(
