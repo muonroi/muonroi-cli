@@ -4511,7 +4511,14 @@ export class Agent {
     if (ownsRoutingController) this.abortController = routingController;
     try {
       if (this.executionRole === "orchestrator" || (isMockMode && !forceClassify)) {
-        logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
+        // Name the actual reason: the orchestrator role (every TUI/headless main
+        // session) never router-forks or silently rotates, regardless of
+        // MUONROI_FORCE_ROUTING_CLASSIFY — a "mock/test mode" message here sent
+        // a harness diagnosis down the wrong path.
+        logger.debug("orchestrator", "Skipping sub-session routing classification", {
+          reason: this.executionRole === "orchestrator" ? "orchestrator-role" : "mock-mode",
+          executionRole: this.executionRole,
+        });
       } else {
         try {
           const { classifySubSessionAction } = await import("../pil/llm-classify.js");

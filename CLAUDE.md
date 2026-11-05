@@ -327,6 +327,9 @@ await driver.focus_verified("id=x")     // dispatches AND verifies; {ok:false, r
 await driver.wait_for({ idle: true, timeoutMs: 5000 })
 await driver.wait_for({ selector: "role=toast", timeoutMs: 3000 })
 await driver.wait_for({ all: [{ selector: "id=log" }, { idle: true }], timeoutMs: 5000 })
+                                        // TUI exit / transport close: pending AND later wait_for calls reject at once
+                                        // with Error("Driver transport closed") (not a timeout); a `disconnect` event
+                                        // is buffered first. Pinned by tests/harness/disconnect.spec.ts.
 driver.last_event("toast")              // most recent event of kind
 driver.render_text()                    // ASCII debug render
 ```
