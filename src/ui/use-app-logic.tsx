@@ -217,8 +217,9 @@ import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import {
+  filterSlashMenuItems,
+  resolveLiveSlashSelection,
   SLASH_MENU_ITEMS,
-  SLASH_MENU_ITEMS_ARROW_ORDER,
   type SlashMenuItem,
   VISIBLE_SLASH_MENU_ITEMS,
 } from "./slash/menu-items.js";
@@ -2154,35 +2155,9 @@ export function useAppLogic(props: AppLogicProps) {
     : [...modelList];
 
   const filteredModelIds = filteredModels.map((m) => m.id);
-  // Autocomplete shows the curated primary surface. When the user types a
-  // query we widen the search to ALL items (including hidden ones) so power
-  // users can still discover commands that were intentionally dehoisted.
-  const filteredSlashItems = slashSearchQuery
-    ? (() => {
-        const q = slashSearchQuery.toLowerCase();
-        // Rank by exactness so the command the user TYPED wins: exact label/id
-        // (0) > label/id prefix (1) > label substring (2) > description
-        // substring (3). Without ranking, a command whose DESCRIPTION contains
-        // the query (e.g. /ee "…status…") sorts above the exact match the user
-        // typed (/status) and Enter runs the wrong command. See VERIFY F5/F6.
-        const rank = (item: SlashMenuItem): number => {
-          const label = item.label.toLowerCase();
-          const id = item.id.toLowerCase();
-          if (label === q || id === q) return 0;
-          if (label.startsWith(q) || id.startsWith(q)) return 1;
-          if (label.includes(q)) return 2;
-          if (item.description.toLowerCase().includes(q)) return 3;
-          return 99;
-        };
-        return SLASH_MENU_ITEMS.map((item, i) => ({ item, r: rank(item), i }))
-          .filter((x) => x.r < 99)
-          .sort((a, b) => a.r - b.r || a.i - b.i)
-          .map((x) => x.item);
-      })()
-    : // Empty query (just "/"): primary surface first, then the rest so the
-      // full command set is reachable by arrow-scroll — the dropdown viewport
-      // scrolls, keeping the splash lean while nothing stays unreachable.
-      SLASH_MENU_ITEMS_ARROW_ORDER;
+  // Autocomplete shows the curated primary surface; a typed query widens the
+  // ranked search to ALL items (see filterSlashMenuItems).
+  const filteredSlashItems = filterSlashMenuItems(slashSearchQuery);
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
     // Match the LEADING command token, not the whole query, so the composer
@@ -7873,7 +7848,15 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
 
-          const item = filteredSlashItems[slashMenuIndex];
+          // Resolve against the LIVE composer text, not this render's menu
+          // state: "/exit"+Enter in one input batch otherwise ran item 0 of
+          // the unfiltered list (/permissions). See resolveLiveSlashSelection.
+          const live = resolveLiveSlashSelection(composerText, {
+            query: slashSearchQuery,
+            items: filteredSlashItems,
+            index: slashMenuIndex,
+          });
+          const item = live.items[live.index];
           if (item) {
             handleSlashMenuSelect(item);
             setSlashSearchQuery("");
@@ -7891,7 +7874,13 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.name === "tab") {
           // Autocomplete: fill the input with "/<id> " and close the menu so
           // the user can keep typing message text (e.g. /ideate Tab <prompt>).
-          const item = filteredSlashItems[slashMenuIndex];
+          // Same stale-closure hazard as Enter — resolve from the live text.
+          const live = resolveLiveSlashSelection(inputRef.current?.plainText ?? "", {
+            query: slashSearchQuery,
+            items: filteredSlashItems,
+            index: slashMenuIndex,
+          });
+          const item = live.items[live.index];
           if (item) {
             const completion = `/${item.id} `;
             setShowSlashMenuSync(false);

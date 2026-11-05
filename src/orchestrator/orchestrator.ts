@@ -172,6 +172,7 @@ import {
   parseToolArgumentsOrRaw,
   toLocalToolCall,
 } from "./batch-utils";
+import { runCleanupSteps } from "./cleanup-steps.js";
 import { getCompactionFocus } from "./compact-request.js";
 import {
   buildMechanicalCompactionStub,
@@ -1186,18 +1187,23 @@ export class Agent {
     // racing the async HTTP extract. Survives X-close + EE-offline.
     try {
       emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-exit", this.bash.getCwd());
-    } catch {
-      /* fail-open */
+    } catch (err) {
+      // fail-open: the HTTP extract below still runs.
+      logger.warn("orchestrator", `cleanup: transcript sidecar write failed: ${(err as Error)?.message}`);
     }
-    await Promise.allSettled([
-      this.bash.cleanup(),
-      shutdownWorkspaceLspManager(this.bash.getCwd()),
-      extractSession(this.messages, this.bash.getCwd(), "cli-exit", this.getSessionId()),
+    // Each step is bounded and logged by name (cleanup-steps.ts): /exit awaits
+    // this before process.exit, so one never-settling step would otherwise
+    // keep the CLI alive with nothing in the log.
+    const cwd = this.bash.getCwd();
+    await runCleanupSteps([
+      ["bash", () => this.bash.cleanup()],
+      ["lsp", () => shutdownWorkspaceLspManager(cwd)],
+      ["ee-extract", () => extractSession(this.messages, cwd, "cli-exit", this.getSessionId())],
       // Tear down pooled MCP clients (client-pool.ts). They persist across turns
       // by design (no per-turn cold-spawn), so the only real teardown is here at
       // session end. Stdio children would die with the process anyway, but close
       // them gracefully on a clean exit.
-      import("../mcp/client-pool.js").then((m) => m.closeAllMcpClients()),
+      ["mcp", () => import("../mcp/client-pool.js").then((m) => m.closeAllMcpClients())],
     ]);
   }
 
