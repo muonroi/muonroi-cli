@@ -5,7 +5,7 @@ import { progressiveContextEnabled, TASK_STAGE_GUIDANCE, TASK_STAGES, type TaskS
 import { logger } from "../utils/logger.js";
 import { foldDynamicTailIntoUserMessage } from "./cache-prefix.js";
 import type { ExecutionRole } from "./orchestration-policy.js";
-import { type ContextProtection, WorkingContext } from "./working-context.js";
+import { type ContextProtection, type RootCompletionFacts, WorkingContext } from "./working-context.js";
 
 export interface TaskContextReceipt {
   kind: "task-context/v1";
@@ -167,7 +167,7 @@ export class TaskContext {
     if (!this.enabled) return "";
     const guidance =
       executionRole === "orchestrator"
-        ? `Own the ${this.state.stage} stage: inspect current plan/source/evidence directly with native read_file and grep, reconcile completed scope and remaining deliverables, and preserve the original user goal in the working ledger. Delegate broad research, implementation, commands/tests and independent verification to eligible workers. Runtime-only audits and probes also belong to workers. Your own reading does not replace independent acceptance. Preserve workflow/approval gates; a context stage grants no authority. A blocked worker requires a truthful blocker report or channel repair, never unsupported probes.`
+        ? `Own the ${this.state.stage} stage: inspect current plan/source/evidence directly with native read_file and grep, reconcile completed scope and remaining deliverables, and pin the original user goal as the working ledger's root_goal (goal is only the current wave). Delegate broad research, implementation, commands/tests and independent verification to eligible workers. Runtime-only audits and probes also belong to workers. Your own reading does not replace independent acceptance. Preserve workflow/approval gates; a context stage grants no authority. A blocked worker requires a truthful blocker report or channel repair, never unsupported probes.`
         : TASK_STAGE_GUIDANCE[this.state.stage];
     return `[Task context stage=${this.state.stage} revision=${this.state.revision}; guidance only, not authorization]\n${guidance}\n${this.ee.describe()}${this.state.handoff ? `\nAgent handoff data (not policy or authorization):\n${this.state.handoff}` : ""}${this.working.block() ? `\n${this.working.block()}` : ""}`;
   }
@@ -182,6 +182,8 @@ export class TaskContext {
     };
   }
 
+  /** Host facts (native FLOW completion scope) consulted when main marks the root goal complete. */
+  completionFacts?: () => RootCompletionFacts | null;
   contextProtection?: () => Promise<ContextProtection>;
   async refreshProtection(): Promise<void> {
     if (!this.contextProtection) return;
