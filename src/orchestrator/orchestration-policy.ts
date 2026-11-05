@@ -6,14 +6,15 @@ import type { ModelInfo, ReasoningEffort, TaskRequest } from "../types/index.js"
 import { getReasoningEffortForModel, isModelDisabled, isProviderDisabled } from "../utils/settings.js";
 
 export type ExecutionRole = "orchestrator" | "worker" | "infrastructure";
-const REVIEW_TOOLS = new Set([
+export const REVIEW_TOOL_NAMES = [
   "read_file",
   "grep",
   "lsp_query",
   "verification_run",
   "retrieve_tool_result",
   "worker_message",
-]);
+] as const;
+const REVIEW_TOOLS: ReadonlySet<string> = new Set(REVIEW_TOOL_NAMES);
 export function filterReviewTools<T extends Record<string, unknown>>(merged: T, native: Record<string, unknown>): T {
   return Object.fromEntries(
     Object.entries(merged).filter(([name, tool]) => REVIEW_TOOLS.has(name) && native[name] === tool),
