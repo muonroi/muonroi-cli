@@ -44,7 +44,7 @@ import {
 } from "../../src/orchestrator/scope-reminder.js";
 import { scoreComplexitySize } from "../../src/pil/layer1_5-complexity-size.js";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
-import { loadDumpedRecordings } from "./recording.js";
+import { isMainAgentCall, loadDumpedRecordings } from "./recording.js";
 
 // Locked test prompt — classified as (debug, small) by Layer 1.5 (78 chars
 // under the <80 small threshold, no sweep words, no path tokens) → matrix
@@ -59,14 +59,25 @@ const LIVE_TASK_TYPE = "general";
 const LIVE_SIZE = "medium";
 const TEST_PROMPT = "debug why the json parser drops single-char tokens in src/parsers/lex.ts";
 
-function bashCallRound(callId: string, cmd: string): unknown[] {
+/**
+ * One main-agent tool round. The top-level agent is the orchestrator since
+ * b014c9b9 and has no `bash` (filterExecutionTools / ORCHESTRATION_TOOLS in
+ * src/orchestrator/orchestration-policy.ts) — a scripted bash call is answered
+ * "Model tried to call unavailable tool". `todo_write` is an orchestrator tool
+ * that, like bash, is NOT in tool-engine's READ_ONLY_TOOLS (so the read-only
+ * batching interceptor, which returns before the scope reminder, stays out of
+ * the way), needs no approval in safe mode, and returns instantly.
+ */
+function todoWriteRound(callId: string, step: number): unknown[] {
   return [
     { type: "stream-start", warnings: [] },
     {
       type: "tool-call",
       toolCallId: callId,
-      toolName: "bash",
-      input: JSON.stringify({ command: cmd }),
+      toolName: "todo_write",
+      input: JSON.stringify({
+        todos: [{ id: "1", subject: `investigate lexer step ${step}`, status: "in_progress" }],
+      }),
     },
     {
       type: "finish",
@@ -187,13 +198,12 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
         modelId: "deepseek-v4-flash",
         // PIL runs in the background and (MUONROI_LLM_FIRST_CLASSIFY=0 in the
         // helper) does not consume a scripted round, so the queue is the main
-        // agent's. Rounds 0..K-1 → bash tool-calls so the step counter reaches
+        // agent's. Rounds 0..K-1 → non-read-only orchestrator tool-calls
+        // (todo_write, see todoWriteRound) so the step counter reaches
         // K = cadenceForSize("medium") = 5 → the first reminder is attached to
         // the call for step K. Round K → final stop.
         stream: [
-          ...Array.from({ length: cadenceForSize(LIVE_SIZE) }, (_, i) =>
-            bashCallRound(`bash-${i + 1}`, `echo step${i + 1}`),
-          ),
+          ...Array.from({ length: cadenceForSize(LIVE_SIZE) }, (_, i) => todoWriteRound(`todo-${i + 1}`, i + 1)),
           finalTextRound("done"),
         ],
       });
@@ -238,23 +248,21 @@ describe("scope-adherence: REQ-007 E2E (all 5 assertion categories)", () => {
       handle.driver.press("Enter");
 
       // `llm-done` fires once from the top-level streamText onFinish — i.e.
-      // after every bash round AND the final text round have completed.
+      // after every tool round AND the final text round have completed.
       await handle.driver.wait_for({ event: "llm-done", timeoutMs: 60_000 });
 
       await exitTuiAndWaitForDump(handle, 20_000);
 
       const calls = loadDumpedRecordings(handle.dumpPath);
 
-      // Filter to main-agent calls (system prompt opens with the cheap-model
-      // playbook CRITICAL marker OR contains "muonroi-cli in Agent mode" —
-      // matches both possible system-prompt assemblies in message-processor.ts).
-      const agentCalls = calls.filter((c) => {
-        const p = c?.options?.prompt;
-        if (!Array.isArray(p) || p.length === 0) return false;
-        const sys = p[0] as { content?: unknown } | undefined;
-        const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-        return sysText.includes("muonroi-cli in Agent mode") || sysText.includes("[CRITICAL TOOL-USE RULES");
-      });
+      // Filter to main-agent (orchestrator) calls — see MAIN_AGENT_MARKER.
+      const agentCalls = calls.filter(isMainAgentCall);
+      // Every scripted tool round really executed: K tool rounds + the final.
+      expect(agentCalls.length).toBeGreaterThanOrEqual(liveK + 1);
+      // (The AI SDK's tool-error text for a tool the model does not have.)
+      expect(JSON.stringify(agentCalls[liveK]?.options.prompt ?? {})).not.toContain(
+        "Model tried to call unavailable tool",
+      );
 
       // Sanity: at least one main-agent round ran. Bounds the ceiling+1 check
       // below as well — if zero agent calls, the test was a no-op.

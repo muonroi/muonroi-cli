@@ -9,6 +9,7 @@
  */
 
 import type { LanguageModelV3CallOptions, LanguageModelV3Prompt } from "@ai-sdk/provider";
+import { WORKER_DUMP_INFIX } from "../../src/agent-harness/mock-model.js";
 
 export type CallRole = "top-level" | "sub-agent" | "unknown";
 
@@ -171,6 +172,46 @@ export function loadDumpedRecordings(path: string): InspectedCall[] {
     throw new Error(`loadDumpedRecordings: expected array at ${path}`);
   }
   return parsed.map((opts, i) => inspectCall(opts as LanguageModelV3CallOptions, i));
+}
+
+/**
+ * Opening sentence of ORCHESTRATOR_CONTRACT (src/orchestrator/orchestration-policy.ts),
+ * which leads the system prompt of every TUI top-level (main) agent call since
+ * the orchestrator role became the default execution role (b014c9b9). It
+ * replaced "You are muonroi-cli in Agent mode", which main calls no longer carry.
+ * Ancillary calls (title, classify, compaction proposer) and worker calls
+ * ("You are the General sub-agent") never contain it.
+ */
+export const MAIN_AGENT_MARKER = "You are the main orchestrator.";
+
+/** True for a recorded MAIN-agent (orchestrator) call. */
+export function isMainAgentCall(call: InspectedCall): boolean {
+  return call.systemText.includes(MAIN_AGENT_MARKER);
+}
+
+/**
+ * Load the recordings of every background worker the TUI dispatched. Workers
+ * run as detached child processes (src/orchestrator/delegations.ts) and dump to
+ * `<base>.worker-<pid>.json` next to the parent's dump (resolveMockDumpPath in
+ * src/agent-harness/mock-model.ts) instead of overwriting it.
+ */
+export function loadWorkerDumpedRecordings(parentDumpPath: string): InspectedCall[] {
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const fs = require("node:fs") as typeof import("node:fs");
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  const path = require("node:path") as typeof import("node:path");
+  const dir = path.dirname(parentDumpPath);
+  const stem = path.basename(parentDumpPath).replace(/\.json$/, "");
+  const prefix = `${stem}${WORKER_DUMP_INFIX}`;
+  if (!fs.existsSync(dir)) return [];
+  const files = fs
+    .readdirSync(dir)
+    .filter((name) => name.startsWith(prefix) && name.endsWith(".json"))
+    .map((name) => path.join(dir, name))
+    .sort((a, b) => fs.statSync(a).mtimeMs - fs.statSync(b).mtimeMs);
+  const calls: InspectedCall[] = [];
+  for (const file of files) calls.push(...loadDumpedRecordings(file));
+  return calls.map((c, i) => ({ ...c, index: i }));
 }
 
 /** Extract a nested providerOptions field for assertion. */

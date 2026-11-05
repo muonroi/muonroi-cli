@@ -15,7 +15,7 @@ import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { afterEach, describe, expect, it } from "vitest";
 import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { spawnHarness } from "./helpers.js";
-import { loadDumpedRecordings } from "./recording.js";
+import { isMainAgentCall, loadDumpedRecordings } from "./recording.js";
 
 interface GateHarness {
   proc: ChildProcess;
@@ -163,15 +163,10 @@ async function exitAndWaitForDump(handle: GateHarness, timeoutMs = 20_000): Prom
   }
 }
 
-/** Same marker used by flow-hard-gate.spec.ts to isolate main-agent turns from
- * PIL's own classify/absorber calls in the shared doStream dump. */
-function isAgentCall(c: { options?: { prompt?: unknown } } | null | undefined): boolean {
-  const p = c?.options?.prompt;
-  if (!Array.isArray(p) || p.length === 0) return false;
-  const sys = p[0] as { content?: unknown };
-  const sysText = typeof sys?.content === "string" ? sys.content : JSON.stringify(sys?.content ?? "");
-  return sysText.includes("muonroi-cli in Agent mode");
-}
+// Main-agent turns are isolated from PIL's own classify/title/compaction calls
+// in the shared doStream dump with isMainAgentCall (recording.ts). Main is the
+// orchestrator since b014c9b9; its system prompt no longer carries
+// "muonroi-cli in Agent mode", which this spec used to match on.
 
 function userTextOf(c: { options?: { prompt?: unknown } } | null | undefined): string {
   const p = c?.options?.prompt;
@@ -197,9 +192,10 @@ async function waitForFirstAgentCall(handle: GateHarness): Promise<void> {
   for (let i = 0; i < 200; i++) {
     if (existsSync(handle.dumpPath)) {
       try {
-        if (loadDumpedRecordings(handle.dumpPath).filter(isAgentCall).length >= 1) return;
-      } catch {
-        // dump mid-rotation — atomic rename means the next read is clean
+        if (loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall).length >= 1) return;
+      } catch (err) {
+        // Dump mid-rotation — the atomic rename means the next read is clean.
+        console.debug(`[flow-pil-gate spec] dump not readable yet: ${(err as Error).message}`);
       }
     }
     await new Promise((r) => setTimeout(r, 250));
@@ -246,7 +242,7 @@ describe("Background PIL — E2E via real TUI turn pipeline", { retry: 0 }, () =
     await waitForFirstAgentCall(handle);
     await exitAndWaitForDump(handle);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
+    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
     expect(agentCalls.length).toBeGreaterThanOrEqual(1);
     const userText = userTextOf(agentCalls[0]);
 
@@ -277,7 +273,7 @@ describe("Background PIL — E2E via real TUI turn pipeline", { retry: 0 }, () =
     await waitForFirstAgentCall(handle);
     await exitAndWaitForDump(handle);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
+    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
     expect(agentCalls.length).toBeGreaterThanOrEqual(1);
     const userText = userTextOf(agentCalls[0]);
 
@@ -312,7 +308,7 @@ describe("Background PIL — E2E via real TUI turn pipeline", { retry: 0 }, () =
     await waitForFirstAgentCall(handle);
     await exitAndWaitForDump(handle);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
+    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
     expect(agentCalls.length).toBeGreaterThanOrEqual(1);
     const userText = userTextOf(agentCalls[0]);
 
@@ -353,7 +349,7 @@ describe("Background PIL — E2E via real TUI turn pipeline", { retry: 0 }, () =
     await waitForFirstAgentCall(handle);
     await exitAndWaitForDump(handle);
 
-    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isAgentCall);
+    const agentCalls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
     expect(agentCalls.length).toBeGreaterThanOrEqual(1);
     const userText = userTextOf(agentCalls[0]);
 
