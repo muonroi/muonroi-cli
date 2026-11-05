@@ -26,6 +26,10 @@
  *   - `ask-and-compact`— there is not enough headroom to spend a step waiting,
  *                        so the compaction runs NOW and the note tells the agent
  *                        it already happened (no false promise).
+ *   - `compact-at-turn-start` — step 0 of a turn whose request does not start from
+ *                        the previous (replayed) request: the compaction runs NOW and the
+ *                        note only informs. Deferring at step 0 cost two cache
+ *                        misses per turn (see evaluateCompactionConsult).
  *   - `null`           — no consult: nothing would be compacted, the agent has
  *                        already stated a focus, or we already asked this turn.
  *
@@ -47,7 +51,12 @@
 
 import { G2_FIRST_ESCALATION_FILL } from "./subagent-compactor.js";
 
-export type CompactionConsultAction = "defer" | "ask-and-compact";
+/**
+ * - `defer`             — skip the compaction for this one step and ask.
+ * - `ask-and-compact`   — compact now (no headroom to wait) and ask.
+ * - `compact-at-turn-start` — compact now, before step 0, and only inform.
+ */
+export type CompactionConsultAction = "defer" | "ask-and-compact" | "compact-at-turn-start";
 
 export interface CompactionConsultDecision {
   action: CompactionConsultAction;
@@ -72,6 +81,13 @@ export interface CompactionConsultInput {
   estPromptTokens: number;
   /** Current step number, for the note text. */
   stepNumber: number;
+  /**
+   * True when this turn's request starts from the previous turn's compacted
+   * request (request-history replay applied, not restored). Its step 0 is then a
+   * cached append of the previous request, so a step-0 deferral is no worse
+   * than compacting now — and a single-step turn would not pay a rewrite at all.
+   */
+  carriedPrefixReplayed?: boolean;
   /** Override the headroom line (tests). Defaults to G2_FIRST_ESCALATION_FILL. */
   maxFillRatio?: number;
 }
@@ -96,6 +112,27 @@ export function evaluateCompactionConsult(input: CompactionConsultInput): Compac
   const sizeText = knownWindow
     ? `~${Math.round(ctxFill * 100)}% of this model's context window (~${tokens} of ${contextWindowTokens} tokens)`
     : `~${tokens} estimated prompt tokens (this model's context window is unknown here)`;
+
+  // Turn start without a replayed prefix: never defer, and do not invite a
+  // `compact` call. The history over the threshold was carried in from earlier
+  // turns and does not match the previous request (no request-history replay —
+  // e.g. right after a summarizing compaction), so deferring sends ALL of it at
+  // full size, uncached, and then rewrites it one step later — two prompt-cache
+  // misses for one compaction. Measured in session 4edc02516a92
+  // (prompt_breakdown + usage_events): 77 of 144 turns sent step 0 at avg 50
+  // messages / 293k chars (61 with zero cache read; 63 of the 77 had no replay)
+  // and step 1 of the same turn at avg 23 messages / 83k chars. Mid-turn — and
+  // at step 0 over a replayed prefix — the deferred step is a cached append and
+  // the turn still pays one boundary, so those keep the consult. Inviting a
+  // `compact` call here would force a second rewrite on step 1
+  // (consumeProactiveCompact).
+  if (stepNumber === 0 && !input.carriedPrefixReplayed) {
+    return {
+      action: "compact-at-turn-start",
+      ctxFill,
+      note: `[auto-compaction notice — turn start] History carried in from earlier turns was at ${sizeText}, over the compaction threshold, so older tool results were compressed before this step. Rehydrate any result you still need with ee_query "tool-artifact id=…" (ids are in the stubs).`,
+    };
+  }
 
   // Deferral is only safe with real, KNOWN headroom.
   const canDefer = knownWindow && ctxFill < maxFillRatio;

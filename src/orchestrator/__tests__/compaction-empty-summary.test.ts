@@ -10,6 +10,9 @@
  * Only the provider transport (`generateTextStreamed`) is mocked, so the real
  * `summarizeConversation` -> `compactForContext` chain is exercised.
  */
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { registerTestProviderFactories } from "../../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../../models/registry.js";
@@ -197,6 +200,54 @@ describe("compactForContext rejects unusable summaries through the existing fall
     const { ok, summary } = await compactAndReadSummary();
     expect(ok).toBe(true);
     expect(summary).toContain("Mechanical compaction");
+  }, 15_000);
+});
+
+describe("compactForContext writes exactly one cost-log row per billed summary call", () => {
+  // Before: recordUsage("compaction") appended a second copy of every row
+  // (186 cost-log rows for 93 compactions, 2026-11-02..04), double-counting
+  // compaction in `usage report --by callsite`.
+  async function compactionRows(): Promise<Array<Record<string, unknown>>> {
+    const home = mkdtempSync(join(tmpdir(), "muonroi-compaction-costlog-"));
+    vi.stubEnv("MUONROI_CLI_HOME", home);
+    try {
+      await compactAndReadSummaryWithAgent();
+      const dir = join(home, "usage");
+      // appendCostLog is fire-and-forget; wait until the writes settle.
+      let rows: Array<Record<string, unknown>> = [];
+      for (let i = 0; i < 50; i++) {
+        rows = existsSync(dir)
+          ? readdirSync(dir)
+              .filter((f) => f.startsWith("cost-log-"))
+              .flatMap((f) => readFileSync(join(dir, f), "utf8").split("\n").filter(Boolean))
+              .map((l) => JSON.parse(l) as Record<string, unknown>)
+              .filter((r) => r.phase === "compaction")
+          : [];
+        if (rows.length > 0 && i >= 5) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return rows;
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(home, { recursive: true, force: true });
+    }
+  }
+
+  it("an accepted summary: one row, with iteration and the summarizer's model", async () => {
+    const rows = await compactionRows();
+    expect(rows.map((r) => [r.callsite, r.model, r.actualInputTokens, r.actualOutputTokens])).toEqual([
+      ["orchestrator.compaction", COMPACT_MODEL, 100, 20],
+    ]);
+    expect(rows[0]?.iteration).toBe(1);
+  }, 15_000);
+
+  it("a rejected-but-billed summary and its fallback: one row EACH (both were real calls)", async () => {
+    replies.set(COMPACT_MODEL, { text: "", finishReason: "length", outputTokens: 4096, reasoningText: "r".repeat(50) });
+    const rows = await compactionRows();
+    expect(rows.map((r) => [r.callsite, r.model, r.actualInputTokens, r.actualOutputTokens])).toEqual([
+      ["orchestrator.compaction.rejected", COMPACT_MODEL, 100, 4096],
+      ["orchestrator.compaction", MAIN_MODEL, 100, 20],
+    ]);
   }, 15_000);
 });
 

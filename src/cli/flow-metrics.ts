@@ -425,6 +425,7 @@ export async function collectFlowMetricsInput(
         inputTokens: e.actualInputTokens ?? 0,
         cachedInputTokens: e.cachedInputTokens ?? 0,
         outputTokens: e.actualOutputTokens ?? 0,
+        iteration: e.iteration,
         parentSessionId: tagged.parentSessionId,
         delegationId: tagged.delegationId,
       });

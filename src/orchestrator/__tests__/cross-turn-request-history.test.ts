@@ -9,6 +9,7 @@ import { closeDatabase } from "../../storage/db.js";
 import { appendMessages, loadRawTranscript } from "../../storage/transcript.js";
 import * as settings from "../../utils/settings.js";
 import { Agent } from "../orchestrator.js";
+import { RequestHistory } from "../request-history.js";
 
 vi.mock("../../pil/pipeline.js", () => ({ runPipeline: () => new Promise(() => {}) }));
 vi.mock("../../ee/intercept.js", async (original) => ({
@@ -62,6 +63,7 @@ it.each([
   );
   vi.spyOn(settings, "isModelDisabled").mockImplementation((id) => id !== chosen.id);
   vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+  const project = vi.spyOn(RequestHistory.prototype, "project");
   const streams = [
     toolCallStream({ toolCallId: "inspect-models", toolName: "worker_models", input: {} }),
     textOnlyStream("FIRST_TURN_DONE"),
@@ -104,9 +106,15 @@ it.each([
       expect(chunk.type).not.toBe("error");
     const firstCalls = handle.model.doStreamCalls.filter((call) => call.tools?.some((t) => t.name === "worker_models"));
     expect(firstCalls).toHaveLength(2);
-    const rawChars = JSON.stringify(firstCalls[0]!.prompt).length;
+    // The history is over the threshold when the turn starts, so it is
+    // compacted BEFORE step 0 (compact-at-turn-start) rather than sent raw and
+    // rewritten on step 1 — and step 1 extends step 0's prefix.
+    const rawChars = JSON.stringify(source).length;
     const compactChars = JSON.stringify(firstCalls[1]!.prompt).length;
+    expect(JSON.stringify(firstCalls[0]!.prompt).length).toBeLessThan(rawChars / 2);
     expect(compactChars).toBeLessThan(rawChars / 2);
+    const step0 = firstCalls[0]!.prompt;
+    expect(firstCalls[1]!.prompt.slice(0, step0.length - 1)).toEqual(step0.slice(0, step0.length - 1));
     if (scenario === "preserve" || scenario === "keep") {
       const directive = scenario === "preserve" ? "PRESERVE_FULL_CONTEXT" : "KEEP_TOOL_IDS: old-0";
       const step = toolCallStream({ toolCallId: "inspect-after-preserve", toolName: "worker_models", input: {} });
@@ -120,7 +128,12 @@ it.each([
     const nextChars = JSON.stringify(calls.at(-1)!.prompt).length;
     console.info("cross-turn request history chars", JSON.stringify({ rawChars, compactChars, nextChars }));
     if (scenario === "reuse") expect(nextChars).toBeLessThan(rawChars / 2);
-    if (scenario === "preserve" || scenario === "invalidate") expect(nextChars).toBeGreaterThan(rawChars / 2);
+    if (scenario === "preserve") expect(nextChars).toBeGreaterThan(rawChars / 2);
+    // An invalidated replay is not used: turn 2 starts from the changed canonical
+    // history (and, being over the threshold, is compacted fresh before step 0).
+    const lastProjection = project.mock.results.at(-1)?.value as { savedChars: number } | undefined;
+    if (scenario === "invalidate") expect(lastProjection?.savedChars).toBe(0);
+    if (scenario === "reuse") expect(lastProjection?.savedChars).toBeGreaterThan(0);
     if (scenario === "keep")
       expect(JSON.stringify(calls.at(-1)!.prompt)).toContain(`HISTORICAL_PAYLOAD_0 ${"old evidence ".repeat(100)}`);
     const compactPrompt = firstCalls[1]!.prompt;

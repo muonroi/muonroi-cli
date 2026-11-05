@@ -65,9 +65,16 @@ describe("orchestrator status identity and usage attribution", () => {
       0,
       undefined,
     );
-    expect(appendCostLog).toHaveBeenCalledWith(
-      expect.objectContaining({ model: helper.id, callsite: `orchestrator.${source}` }),
-    );
+    if (source === "compaction") {
+      // compactForContext writes the one authoritative cost-log row per
+      // compaction; a second row from recordUsage double-counted every
+      // compaction (186 rows for 93 compactions, 2026-11-02..04).
+      expect(appendCostLog).not.toHaveBeenCalled();
+    } else {
+      expect(appendCostLog).toHaveBeenCalledWith(
+        expect.objectContaining({ model: helper.id, callsite: `orchestrator.${source}` }),
+      );
+    }
   });
 
   it("reflects an explicitly changed leader on the next usage update", () => {
