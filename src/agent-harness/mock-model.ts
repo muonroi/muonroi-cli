@@ -257,6 +257,27 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
 }
 
 /**
+ * A round whose chunk is `{type:"error", rejectRequest:true, error}` makes
+ * doStream itself REJECT — the shape of a real provider answering with an HTTP
+ * error status before any chunk (e.g. 503 "engine overloaded"), as opposed to
+ * an in-stream `error` part. Retry layers that wrap the request initiation can
+ * only be exercised this way.
+ */
+function rejectIfRequested(chunks: readonly LanguageModelV3StreamPart[], label: string): void {
+  const rejection = chunks.find(
+    (c) =>
+      (c as { type?: string; rejectRequest?: boolean }).type === "error" &&
+      (c as { rejectRequest?: boolean }).rejectRequest === true,
+  ) as { error?: unknown } | undefined;
+  if (!rejection) return;
+  if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+    process.stderr.write(`[mock-model] doStream ${label} → rejecting request
+`);
+  }
+  throw rejection.error instanceof Error ? rejection.error : new Error(String(rejection.error));
+}
+
+/**
  * Build a MockLanguageModelV3 with sequenced or fixed responses.
  *
  * The mock's `doStream` returns a `simulateReadableStream` that emits the
@@ -335,6 +356,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
             options,
           );
           route.cursor += 1;
+          rejectIfRequested(routed, `route "${route.systemIncludes}" #${route.cursor}`);
           if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
             process.stderr.write(
               `[mock-model] doStream route "${route.systemIncludes}" #${route.cursor} → ${routed.length} parts, types=${routed.map((c) => c.type).join(",")}\n`,
@@ -351,6 +373,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       }
       const chunks = resolvePriorPlaceholders(streams[Math.min(callIdx, streams.length - 1)]!, options);
       callIdx += 1;
+      rejectIfRequested(chunks, `#${callIdx}`);
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
         // Useful when diagnosing harness specs that stall before streamText —
         // a missing log line means doStream was never invoked.

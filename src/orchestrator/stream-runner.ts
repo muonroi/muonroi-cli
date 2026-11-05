@@ -49,7 +49,11 @@ import {
   shouldInjectCheapModelWorkbook,
   subagentTaskType,
 } from "../pil/cheap-model-workbooks.js";
-import { getProviderCapabilities } from "../providers/capabilities.js";
+import {
+  getProviderCapabilities,
+  mergeProviderOptions,
+  minimalReasoningProviderOptions,
+} from "../providers/capabilities.js";
 import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getProviderErrorDetails } from "../providers/rate-limit-backoff.js";
@@ -137,11 +141,18 @@ import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { projectTaskContext, TaskContext } from "./task-context.js";
-import { noteToolActivityProgress } from "./tool-activity.js";
+import { isToolActivityLive, noteToolActivityProgress } from "./tool-activity.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-utils";
 import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 import { gateWorkerTools, requestWorkerApproval, WORKER_APPROVAL_LIMITS } from "./worker-approval.js";
 import { ASK_MODE_WORKER_AGENTS, workerCommandCapabilityError } from "./worker-dispatch-guard.js";
+import {
+  LENGTH_CONTINUATION_PROMPT,
+  MAX_LENGTH_CONTINUATIONS,
+  REASONING_OVERFLOW_PROMPT,
+  withTransientProviderRetry,
+  wrapToolsWithActivity,
+} from "./worker-stream-recovery.js";
 import { readScopedDelegationScope, runScopedDelegationWrite } from "./worker-write-authorization.js";
 
 /**
@@ -1099,7 +1110,24 @@ export class StreamRunner {
     // `reasoning` parts (HTTP 400 code 20015). A provider capability
     // override strips them; every other provider's capability is identity.
     const subMessagesForCall = taskCaps.sanitizeHistory(childMessages) as typeof childMessages;
-    const toolsForCall = !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools;
+    // Tool time is not provider silence: bracket each worker tool so the stall
+    // watchdog below holds open while a tool runs inside its own deadline (a
+    // `dotnet test` with timeout=600000 was killed at the 120s stall mark in
+    // brisk-white-heron / gentle-indigo-falcon — see worker-stream-recovery.ts).
+    const ownedToolActivities = new Set<number>();
+    const toolsForCall = wrapToolsWithActivity(
+      !taskCaps.supportsClientTools(childRuntime.modelInfo) ? {} : childTools,
+      ownedToolActivities,
+    );
+    // A transient provider rejection (HTTP 5xx before any chunk) is retried in
+    // place instead of ending the worker (lively-amber-owl: HTTP 503 after one tool).
+    const childModel = withTransientProviderRetry(childRuntime.model, { label: childRuntime.modelId });
+    // The last prompt the model actually saw (compacted/projected by prepareStep)
+    // and how many SDK response messages it already covered. Follow-up turns
+    // (forced synthesis, length continuation) build on THIS view rather than the
+    // raw uncompacted transcript, which in steady-blue-sparrow/lively-amber-falcon
+    // was 424-440k chars and tripped the 100k-token subagent input ceiling.
+    let lastStepView: { messages: ModelMessage[]; responseCount: number } | undefined;
     const measureChildPrompt = await createPromptMeasurer(childSystem, toolsForCall);
     const checkChildContext = (messages: readonly ModelMessage[], stepNumber?: number) => {
       const measured = { ...measureChildPrompt(messages), ...taskContext.measurements(messages) };
@@ -1189,7 +1217,11 @@ export class StreamRunner {
           );
         },
       },
-      isInteractivePaused,
+      // Hold open while an interactive card blocks, or while one of THIS worker's
+      // tools is still running inside its own declared deadline (same rule as the
+      // top-level loop in tool-engine.ts). A tool past its deadline + grace no
+      // longer suppresses, so a wedged tool is still caught.
+      () => isInteractivePaused() || isToolActivityLive(Date.now(), ownedToolActivities),
     );
     // Round 6 (G8 HIGH B): the top-level turn watchdog cannot see ANY of this
     // sub-agent's own chunks — its whole run happens inside ONE `task` tool
@@ -1252,7 +1284,7 @@ export class StreamRunner {
     const stepMeterEnabled = isSubAgentStepMeterEnabled();
 
     const result = streamText({
-      model: childRuntime.model,
+      model: childModel,
       system: childSystem,
       messages: subMessagesForCall,
       tools: toolsForCall,
@@ -1272,6 +1304,9 @@ export class StreamRunner {
       // tool-error until the repetition detector aborts the whole run.
       experimental_repairToolCall: repairToolCallHook,
       prepareStep: async ({ messages, stepNumber }) => {
+        // SDK input = [...subMessagesForCall, ...responseMessages so far]; count
+        // BEFORE owner-message injection adds host messages to the view.
+        const responseCountAtStep = Math.max(0, messages.length - subMessagesForCall.length);
         if (prepared.request.artifactJobPath)
           messages = await injectOwnerMessages(prepared.request.artifactJobPath, messages);
         taskContext.alignCwd(prepared.childBash.getCwd());
@@ -1283,6 +1318,7 @@ export class StreamRunner {
         if (stepNumber < 1) {
           const projected = projectTaskContext(messages, taskContext);
           checkChildContext(projected, stepNumber);
+          lastStepView = { messages: projected, responseCount: responseCountAtStep };
           return { messages: projected };
         }
         // Internal multi-step loop: AI-SDK accumulates streamed reasoning
@@ -1405,6 +1441,7 @@ export class StreamRunner {
         const preparedMessages = prepareSubAgentPromptMessages(finalMessagesWithMirror, childRuntime.modelId);
         const projected = projectTaskContext(preparedMessages, taskContext);
         checkChildContext(projected, stepNumber);
+        lastStepView = { messages: projected, responseCount: responseCountAtStep };
         return { messages: projected };
       },
       ...resolveTemperatureParam(childRuntime, isExplore ? 0.2 : 0.5),
@@ -1681,7 +1718,11 @@ export class StreamRunner {
         );
       }
 
-      await result.response;
+      // A stall abort normally ENDS the stream (an `abort` part) instead of
+      // throwing, so it used to fall through to "worker_incomplete: no final
+      // answer was produced" with synthesis skipped — the stall was never named
+      // (5 of 6 such TCIS jobs). Handle it explicitly below.
+      if (!stallTriggered) await result.response;
     } catch (err) {
       // Provider stalled (no chunk within the stall timeout): surface a clear
       // error toast + a failed ToolResult instead of an opaque hang/throw.
@@ -1703,22 +1744,92 @@ export class StreamRunner {
           failureLoop: failureLoopMessage,
         };
       }
-      if (stallTriggered) {
-        try {
-          const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-            | { emitEvent: (e: unknown) => void }
-            | undefined;
-          _ar?.emitEvent({ t: "event", kind: "toast", level: "error", text: STALL_ERROR_MESSAGE });
-        } catch {
-          /* best-effort toast */
-        }
-        onActivity?.(STALL_ERROR_MESSAGE);
-        return { output: STALL_ERROR_MESSAGE, lastActivity, cancelled: false, assistantText, stalled: true };
-      }
-      throw err;
+      if (!stallTriggered) throw err;
+      logger.file("warn", "orchestrator", "Worker stream rejected after a provider-stall abort", {
+        model: childRuntime.modelId,
+        artifactJobPath: prepared.request.artifactJobPath,
+        message: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       stall.dispose();
     }
+
+    const stalledResult = () => {
+      try {
+        const _ar = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+          | { emitEvent: (e: unknown) => void }
+          | undefined;
+        _ar?.emitEvent({ t: "event", kind: "toast", level: "error", text: STALL_ERROR_MESSAGE });
+      } catch (toastErr) {
+        logger.debug("orchestrator", "Worker stall toast emit failed", {
+          error: toastErr instanceof Error ? toastErr.message : String(toastErr),
+        });
+      }
+      onActivity?.(STALL_ERROR_MESSAGE);
+      return { output: STALL_ERROR_MESSAGE, lastActivity, cancelled: false, assistantText, stalled: true };
+    };
+    if (stallTriggered) {
+      logger.file("warn", "orchestrator", "Worker provider stall", {
+        model: childRuntime.modelId,
+        callId: subCallId,
+        artifactJobPath: prepared.request.artifactJobPath,
+        toolCallCount,
+        lastActivity,
+      });
+      // Nothing done yet: the plain stall failure is the whole truth.
+      if (toolCallCount === 0 || signal?.aborted) return stalledResult();
+    }
+
+    // Follow-up turns (synthesis, continuation) are tool-free and run on the
+    // compacted view the model last saw plus whatever the final step added.
+    const followUpBase = async (): Promise<ModelMessage[]> => {
+      const priorMessages = ((await result.response).messages ?? []) as ModelMessage[];
+      const base = lastStepView
+        ? [...lastStepView.messages, ...priorMessages.slice(lastStepView.responseCount)]
+        : [...childMessages, ...priorMessages];
+      return taskCaps.sanitizeHistory(base) as ModelMessage[];
+    };
+    const runFollowUp = async (
+      messages: ModelMessage[],
+      providerOptions: typeof childProviderOptions,
+      purpose: string,
+    ): Promise<{ text: string; finishReason: string | undefined }> => {
+      // Own stall guard: the main watchdog is disposed, and a follow-up on a
+      // provider that just stalled must not hang the worker forever.
+      const followStall = createStallWatchdog(getProviderStallTimeoutMs(), undefined, undefined, isInteractivePaused);
+      let text = "";
+      try {
+        const followResult = streamText({
+          model: childModel,
+          system: childSystem,
+          messages,
+          tools: {},
+          maxRetries: 0,
+          ...childOutputBudget,
+          abortSignal: combineAbortSignals(signal, followStall.signal),
+          onError: ({ error }) =>
+            logger.file("warn", "orchestrator", "Worker synthesis request failed", {
+              purpose,
+              artifactJobPath: prepared.request.artifactJobPath,
+              promptIssues: workerPromptSchemaIssues(error),
+              message: error instanceof Error ? error.message : String(error),
+            }),
+          ...(providerOptions ? { providerOptions } : {}),
+        });
+        for await (const part of followResult.fullStream) {
+          followStall.pet();
+          if (part.type === "error") throw part.error;
+          if (part.type === "text-delta") {
+            text += part.text;
+            if (progress) progress.text += part.text;
+          }
+        }
+        if (followStall.fired()) throw new Error(`Worker ${purpose} stalled: ${STALL_ERROR_MESSAGE}`);
+        return { text, finishReason: await followResult.finishReason };
+      } finally {
+        followStall.dispose();
+      }
+    };
 
     // Forced final synthesis. When the loop ends on a tool-call / step-ceiling
     // cut (finishReason="tool-calls"), the model never got a turn to write its
@@ -1732,10 +1843,24 @@ export class StreamRunner {
     let synthesizedText = "";
     // Only the final SDK step can supply a terminal report. Earlier narration
     // ("I will apply the edits") is progress, even if the provider then stops
-    // with an empty text step. A known output-limit failure stays incomplete.
+    // with an empty text step.
+    //
+    // finishReason=length splits in two (TCIS run, 2026-11-02..04):
+    // - text was flowing (keen-blue-lynx: 53141 chars cut mid-JSON) → give the
+    //   worker bounded CONTINUATION turns and append them;
+    // - NO text and NO tool call (calm-copper-otter, clever-blue-falcon,
+    //   lively-violet-panda, gentle-copper-fox) → the whole output budget went to
+    //   reasoning; re-ask for the report with reasoning minimized.
+    // A provider stall after real tool work asks for a report of the completed
+    // work; the result stays labelled incomplete (it is not the finished task).
+    const lengthCut = finalFinishReason === "length";
+    const reasoningOverflow = lengthCut && !terminalStepText.trim() && !terminalStepHadTools;
+    const continuationRequired = lengthCut && !reasoningOverflow && terminalStepText.trim().length > 0;
+    const stallReport = stallTriggered;
     const synthesisRequired =
-      finalFinishReason !== "length" &&
-      (!terminalStepText.trim() || terminalStepHadTools || finalFinishReason === "tool-calls");
+      stallReport ||
+      reasoningOverflow ||
+      (!lengthCut && (!terminalStepText.trim() || terminalStepHadTools || finalFinishReason === "tool-calls"));
     logger.file("info", "orchestrator", "Worker terminal reply boundary", {
       agent: prepared.agentKey,
       model: childRuntime.modelId,
@@ -1747,52 +1872,77 @@ export class StreamRunner {
       totalTextChars: assistantText.length,
       toolCallCount,
       synthesisRequired,
+      followUp: stallReport
+        ? "stall-report"
+        : reasoningOverflow
+          ? "reasoning-overflow"
+          : continuationRequired
+            ? "length-continuation"
+            : synthesisRequired
+              ? "synthesis"
+              : "none",
+      stalled: stallTriggered,
       configuredOutputTokens,
       effectiveMaxOutputTokens: childOutputBudget.maxOutputTokens ?? null,
       reservedOutputTokens,
       outputParameterOmitted: childOutputBudget.maxOutputTokens === undefined,
     });
-    if (synthesisRequired && !signal?.aborted && !stallTriggered) {
+
+    if (continuationRequired && !signal?.aborted) {
+      let messages: ModelMessage[] | undefined;
       try {
-        const resp = await result.response;
-        const priorMessages = (resp.messages ?? []) as ModelMessage[];
-        let synthesisMessages: ModelMessage[] = [
-          ...childMessages,
-          ...priorMessages,
-          {
-            role: "user",
-            content:
-              "Tool execution has ended but the final step did not provide a usable terminal report. Stop now — do NOT call any more tools.\n\n" +
+        messages = await followUpBase();
+        for (let turn = 1; turn <= MAX_LENGTH_CONTINUATIONS && finalFinishReason === "length"; turn++) {
+          messages = [...messages, { role: "user", content: LENGTH_CONTINUATION_PROMPT }];
+          const next = await runFollowUp(messages, childProviderOptions, "length-continuation");
+          logger.file("info", "orchestrator", "Worker length continuation", {
+            artifactJobPath: prepared.request.artifactJobPath,
+            turn,
+            textChars: next.text.length,
+            finishReason: next.finishReason ?? "unknown",
+          });
+          finalFinishReason = next.finishReason;
+          if (!next.text) break;
+          terminalStepText += next.text;
+          messages = [...messages, { role: "assistant", content: next.text }];
+        }
+      } catch (err) {
+        // Keep the truncated answer; it is still reported as output-limited.
+        finalFinishReason = "length";
+        logger.file("error", "orchestrator", "[stream-runner] length continuation failed", {
+          model: childRuntime.modelId,
+          artifactJobPath: prepared.request.artifactJobPath,
+          promptIssues: workerPromptSchemaIssues(err),
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    if (synthesisRequired && !signal?.aborted) {
+      try {
+        const synthesisPrompt = stallReport
+          ? `The model provider stopped responding mid-task (${STALL_ERROR_MESSAGE}). Tools are no longer available. ` +
+            "Write a report FOR THE PARENT AGENT of what you completed so far: the files you changed, the commands you " +
+            "ran with their concrete results, and exactly what remains undone. Do not claim the task is complete."
+          : reasoningOverflow
+            ? REASONING_OVERFLOW_PROMPT
+            : "Tool execution has ended but the final step did not provide a usable terminal report. Stop now — do NOT call any more tools.\n\n" +
               "Option A: If you have enough findings, write your final synthesis FOR THE PARENT AGENT: lead with the answer to the delegated task, cite the concrete file:line behind each claim, then note any gaps or the recommended next step. Be concise; the parent only ingests this message.\n\n" +
-              "Option B: If you need to continue working but are blocked by this limit, you can request the system to compact the context and start a fresh turn. To do this, reply with EXACTLY this format and nothing else:\n/compact <instructions on what to focus on after compaction>",
-          },
-        ];
+              "Option B: If you need to continue working but are blocked by this limit, you can request the system to compact the context and start a fresh turn. To do this, reply with EXACTLY this format and nothing else:\n/compact <instructions on what to focus on after compaction>";
+        // A reasoning overflow already proved reasoning eats the whole budget on
+        // this turn; ask the provider for its cheapest exposed effort.
+        const synthesisProviderOptions = reasoningOverflow
+          ? (mergeProviderOptions(
+              childProviderOptions as Record<string, unknown> | undefined,
+              minimalReasoningProviderOptions({ modelInfo: childRuntime.modelInfo, providerOptions: undefined }),
+            ) as typeof childProviderOptions)
+          : childProviderOptions;
+        let synthesisMessages: ModelMessage[] = [...(await followUpBase()), { role: "user", content: synthesisPrompt }];
         for (let schemaAttempt = 0; schemaAttempt < 2; schemaAttempt++) {
           try {
-            const synthResult = streamText({
-              model: childRuntime.model,
-              system: childSystem,
-              messages: synthesisMessages,
-              tools: {},
-              maxRetries: 0,
-              ...childOutputBudget,
-              abortSignal: signal,
-              onError: ({ error }) =>
-                logger.file("warn", "orchestrator", "Worker synthesis request failed", {
-                  artifactJobPath: prepared.request.artifactJobPath,
-                  promptIssues: workerPromptSchemaIssues(error),
-                  message: error instanceof Error ? error.message : String(error),
-                }),
-              ...(childProviderOptions ? { providerOptions: childProviderOptions } : {}),
-            });
-            for await (const part of synthResult.fullStream) {
-              if (part.type === "error") throw part.error;
-              if (part.type === "text-delta") {
-                synthesizedText += part.text;
-                if (progress) progress.text += part.text;
-              }
-            }
-            finalFinishReason = await synthResult.finishReason;
+            const synth = await runFollowUp(synthesisMessages, synthesisProviderOptions, "synthesis");
+            synthesizedText += synth.text;
+            finalFinishReason = synth.finishReason;
             break;
           } catch (err) {
             if (
@@ -1829,16 +1979,20 @@ export class StreamRunner {
         logger.file("error", "orchestrator", "[stream-runner] final synthesis failed", {
           model: childRuntime.modelId,
           artifactJobPath: prepared.request.artifactJobPath,
+          followUp: stallReport ? "stall-report" : reasoningOverflow ? "reasoning-overflow" : "synthesis",
           promptIssues: workerPromptSchemaIssues(err),
           message: err instanceof Error ? err.message : String(err),
         });
+        // A report after a stall is best effort; the stall itself is the failure.
+        if (stallReport) return stalledResult();
         throw err;
       }
     }
 
     const recovered = synthesisRequired ? synthesizedText.trim() : terminalStepText.trim();
-    const incomplete =
-      finalFinishReason === "length"
+    const incomplete = stallReport
+      ? `worker_incomplete: provider stalled after ${toolCallCount} tool calls; the worker's own report of completed work follows (unverified, task not finished)`
+      : finalFinishReason === "length"
         ? `worker_incomplete: final answer reached the output limit; configuredOutputTokens=${configuredOutputTokens}, effectiveMaxOutputTokens=${childOutputBudget.maxOutputTokens ?? "provider-default"}, terminalTextChars=${recovered.length}, observedToolCalls=${toolCallCount}`
         : !recovered
           ? "worker_incomplete: no final answer was produced"

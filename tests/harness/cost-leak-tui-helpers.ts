@@ -14,7 +14,7 @@
 import type { ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { spawnHarness } from "./helpers.js";
@@ -116,6 +116,8 @@ export interface SpawnCostLeakOptions {
    * worktree and failed in the main checkout. Defaults to false (repo root).
    */
   isolatedCwd?: boolean;
+  /** Files (relative path → content) seeded into the isolated project dir. Implies `isolatedCwd`. */
+  projectFiles?: Record<string, string>;
 }
 
 /**
@@ -139,9 +141,14 @@ export async function spawnCostLeakHarness(
   );
   const dumpPath = join(workDir, "calls.json");
   let projectDir: string | undefined;
-  if (opts.isolatedCwd) {
+  if (opts.isolatedCwd || opts.projectFiles) {
     projectDir = join(workDir, "project");
     mkdirSync(projectDir);
+    for (const [rel, content] of Object.entries(opts.projectFiles ?? {})) {
+      const target = join(projectDir, rel);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, content, "utf8");
+    }
   }
 
   const modelId = opts.modelId ?? "deepseek-v4-flash";

@@ -19,6 +19,7 @@ import {
   rateLimitedDelegationError,
   type StoredDelegation,
 } from "../delegations.js";
+import { STALL_ERROR_MESSAGE } from "../stall-watchdog.js";
 
 describe("delegationFailureKind", () => {
   it("recognises a rate limit from a thrown error or flattened failure text", () => {
@@ -41,6 +42,21 @@ describe("delegationFailureKind", () => {
     expect(
       delegationFailureKind("The API enforces a rate limit of 100 RPM.\n\nTask failed: HTTP 500: upstream error"),
     ).toBeUndefined();
+  });
+
+  it("judges an incomplete worker on its marker line, not on the partial answer it carries", () => {
+    // keen-blue-lynx (session 8a5bd89c2be0): an output-limit cut of a corpus
+    // inventory whose rows quoted "...CICD-Standards.md:429" was recorded as a
+    // 429 rate limit and the main agent was told to back off.
+    expect(
+      delegationFailureKind(
+        'worker_incomplete: final answer reached the output limit; configuredOutputTokens=16384\n{"loc":"HandBook/ch5-CICD-Standards.md:429","keyword":"rate limit"}',
+      ),
+    ).toBeUndefined();
+  });
+
+  it("does not call a provider stall a rate limit even though the stall text lists it as a possible cause", () => {
+    expect(delegationFailureKind(STALL_ERROR_MESSAGE)).toBeUndefined();
   });
 
   it("wraps bare provider text with guidance, but does not double-wrap the gate's own message", () => {

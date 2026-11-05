@@ -121,3 +121,19 @@ it("adds recovery guidance on legacy reads without changing the old result versi
   expect((await loadDelegation(jobPath)).resultVersion).toBe(record.resultVersion);
   expect(fs.readFileSync(record.outputPath, "utf8")).toBe(before);
 });
+
+it("names the files a failed worker's captured edits targeted, without claiming they landed", async () => {
+  const a = path.join(cwd, "a.cs");
+  const b = path.join(cwd, "b.cs");
+  await saveDelegationToolResult(jobPath, "w-1", "write_file", { file_path: a, content: "x" }, { success: true });
+  await saveDelegationToolResult(jobPath, "e-1", "edit_file", { file_path: b }, { success: true, output: "e" });
+  await saveDelegationToolResult(jobPath, "e-2", "edit_file", { file_path: a }, { success: false, error: "stale" });
+  await saveDelegationToolResult(jobPath, "r-1", "read_file", { file_path: path.join(cwd, "c.cs") }, "read");
+  await failDelegation(jobPath, "worker_incomplete: provider stalled after 4 tool calls; report follows\npartial");
+  const recovery = ((await loadDelegation(jobPath)) as any).failureRecovery;
+  expect(recovery.symptom).toBe("provider-stall");
+  // Newest attempt last, de-duplicated; reads are not writes.
+  expect(recovery.attemptedWritePaths).toEqual([b, a]);
+  expect(recovery.rootCause).toBe("not-established");
+  expect(await manager.read("failed-worker")).toContain("not proof any change landed");
+});
