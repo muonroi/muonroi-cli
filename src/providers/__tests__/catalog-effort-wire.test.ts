@@ -6,7 +6,7 @@ import { StreamRunner, type StreamRunnerDeps } from "../../orchestrator/stream-r
 import { BashTool } from "../../tools/bash.js";
 import type { ModelInfo, ReasoningEffort } from "../../types/index.js";
 import * as settings from "../../utils/settings.js";
-import { minimalReasoningProviderOptions } from "../capabilities.js";
+import { getProviderCapabilities, minimalReasoningProviderOptions } from "../capabilities.js";
 import { buildTurnProviderOptions, createProviderFactory, resolveModelRuntime } from "../runtime.js";
 import type { ProviderId } from "../types.js";
 
@@ -129,9 +129,23 @@ describe("catalog-supported effort reaches real SDK request bodies (local fetch 
     it(`${provider}: unsupported catalog model omits reasoning_effort`, async () => {
       const model = MODELS.find(
         (row) => row.provider === provider && !row.supportsReasoningEffort && canServeTextRequests(row),
+      );
+      if (model) {
+        expect(await send(model, "high")).not.toHaveProperty("reasoning_effort");
+        return;
+      }
+      // Every text row of this provider declares the knob (stepfun: step-3.7-flash
+      // and step-5-preview both document reasoning_effort on platform.stepfun.ai),
+      // so pin the catalog gate itself on a copy with the flag cleared.
+      const supported = MODELS.find(
+        (row) => row.provider === provider && row.supportsReasoningEffort && canServeTextRequests(row),
       )!;
-      expect(model).toBeDefined();
-      expect(await send(model, "high")).not.toHaveProperty("reasoning_effort");
+      expect(
+        getProviderCapabilities(provider).buildProviderOptions({
+          model: { ...supported, supportsReasoningEffort: false },
+          reasoningEffort: "high",
+        }),
+      ).toBeUndefined();
     });
     it(`${provider}: format-only minimization never retains high effort`, async () => {
       const model = MODELS.find(

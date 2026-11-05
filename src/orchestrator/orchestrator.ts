@@ -182,6 +182,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  getBilledCompactionUsage,
   isCompactionSummaryMessage,
   isCompactionThrash,
   POST_TURN_MIN_TOKENS,
@@ -2780,6 +2781,37 @@ export class Agent {
         return await generateCompactionSummary(modelId, preparation, customInstructions, signal);
       } catch (err) {
         markCompactionModelCooldown(sessionIdForCooldown, modelId);
+        // A summary REJECTED as empty/truncated was still billed (session
+        // 4edc02516a92: 15 empty summaries, each at its output cap). Attribute
+        // that waste to the model that spent it under the same `compaction`
+        // source, so usage_events shows it instead of hiding it behind the
+        // fallback that eventually succeeded. Provider throws carry zero.
+        const billed = getBilledCompactionUsage(err);
+        if (billed.promptTokens > 0 || billed.completionTokens > 0) {
+          this.recordUsage(
+            { inputTokens: billed.promptTokens, outputTokens: billed.completionTokens },
+            "compaction",
+            modelId,
+          );
+          const failedProvider = detectProviderForModel(modelId);
+          appendCostLog({
+            ts: compactStartedAt,
+            provider: failedProvider,
+            model: modelId,
+            estimatedUsd: projectCostUSD(failedProvider, modelId, billed.promptTokens, billed.completionTokens),
+            callsite: "orchestrator.compaction.rejected",
+            phase: "compaction",
+            iteration: this._compactionStats.count + 1,
+            actualInputTokens: billed.promptTokens,
+            actualOutputTokens: billed.completionTokens,
+            durationMs: Date.now() - compactStartedAt,
+          }).catch((logErr: unknown) => {
+            logger.warn("orchestrator", "[compactForContext] cost-log append for rejected summary failed", {
+              modelId,
+              error: (logErr as Error)?.message,
+            });
+          });
+        }
         throw err;
       }
     };
