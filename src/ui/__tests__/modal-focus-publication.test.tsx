@@ -25,7 +25,7 @@ import { CouncilQuestionCard, initialCardState } from "../components/council-que
 import { HaltRecoveryCard } from "../components/halt-recovery-card.js";
 import { initialInitNewFormState, InitNewFormCard } from "../components/init-new-form-card.js";
 import { initialPointToExistingFormState, PointToExistingFormCard } from "../components/point-to-existing-form-card.js";
-import { PromptBox } from "../components/prompt-box.js";
+import { PromptBoxView } from "../components/prompt-box.js";
 import type { Theme } from "../theme.js";
 
 // Colors are only read to build style props we never render, so an empty theme
@@ -194,7 +194,8 @@ describe("the composer yields the published focus flag to the modal that owns th
       model: "mock",
       modelInfo: {},
     };
-    return findById(PromptBox(props), "composer");
+    // The hook-free view: PromptBox itself owns the agent-mode mirror refresh hook.
+    return findById(PromptBoxView(props), "composer");
   }
 
   it("publishes composer focus when no modal owns the keyboard", () => {

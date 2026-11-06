@@ -53,6 +53,8 @@ export interface CostLeakHarness {
   /** Temp directory the helper owns — cleaned up by `cleanup()`. */
   workDir: string;
   cleanup(): void;
+  /** Send every key in ONE transport write (one stdin chunk in the child). */
+  pressBurst(keys: string[]): void;
 }
 
 /** Build a one-finish-stop text-only stream. */
@@ -207,6 +209,7 @@ export async function spawnCostLeakHarness(
     driver: ctx.driver,
     dumpPath,
     workDir,
+    pressBurst: ctx.pressBurst,
     cleanup: () => {
       try {
         ctx.proc.kill();

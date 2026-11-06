@@ -205,6 +205,14 @@ import {
 import { DelegationManager, withoutInlineResults } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
+import {
+  formatIdealAbort,
+  formatIdealStatus,
+  type IdealCoordinationRun,
+  type IdealJob,
+  type IdealKillOutcome,
+  jobsOfIdealRun,
+} from "./ideal-coordination.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import {
   MessageProcessor,
@@ -520,6 +528,10 @@ export class Agent {
    * dispatches runProductLoopV1, streaming its chunks and clearing the flag.
    */
   private _pendingEnterIdeal: { idea: string } | null = null;
+  /** The `/ideal start` this orchestrator is coordinating; read by local status/abort. */
+  private idealCoordinationRun: IdealCoordinationRun | null = null;
+  /** Workers stopped by /ideal abort: their cancellation notice is recorded, never a wake. */
+  private readonly abortedIdealJobIds = new Set<string>();
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -1708,7 +1720,18 @@ export class Agent {
       }
       // Callers (the TUI wake prompt) repeat these strings; the full notice,
       // including any inline result, is already in the transcript above.
-      return notifications.map((notification) => withoutInlineResults(notification.message));
+      // A worker the user stopped with /ideal abort is in the transcript too (the
+      // model learns it was cancelled) but must not WAKE the model: the wake
+      // prompt says "continue the task that was waiting on it", i.e. resume the
+      // run the user just aborted. Measured: without this, /ideal abort was
+      // followed by a 3-call wake turn (tests/harness/ideal-local-subcommands.spec.ts).
+      const surfaced = notifications.filter((notification) => {
+        const id = "id" in notification && typeof notification.id === "string" ? notification.id : null;
+        if (id === null || !this.abortedIdealJobIds.has(id)) return true;
+        this.abortedIdealJobIds.delete(id);
+        return false;
+      });
+      return surfaced.map((notification) => withoutInlineResults(notification.message));
     } catch (err) {
       logger.error("orchestrator", "Background notification delivery failed", {
         sessionId: this.session?.id,
@@ -1752,6 +1775,74 @@ export class Agent {
     approved: boolean,
   ): Promise<void> {
     return this.delegations.decideApproval(request, approved);
+  }
+
+  /** Delegations of the current `/ideal` run, oldest first; [] without a run. */
+  private async idealRunJobs(): Promise<IdealJob[]> {
+    const run = this.idealCoordinationRun;
+    if (!run) return [];
+    try {
+      return jobsOfIdealRun(run, await this.delegations.ledgerSnapshot());
+    } catch (err) {
+      logger.warn("orchestrator", "/ideal: delegation ledger unreadable", { error: String(err) });
+      throw err;
+    }
+  }
+
+  /** `/ideal status` for the orchestrator role: host state only, no model call. */
+  async renderIdealCoordinationStatus(): Promise<string> {
+    const { readState } = await import("../workflow/workflow-engine.js");
+    const cwd = this.bash.getCwd();
+    let flow = { phase: null as string | null, depth: null as string | null, planVerified: false, exists: false };
+    try {
+      const state = readState(cwd);
+      flow = { phase: state.phase, depth: state.depth, planVerified: state.planVerified, exists: state.raw !== "" };
+    } catch (err) {
+      logger.warn("orchestrator", "/ideal status: FLOW state unreadable", { cwd, error: String(err) });
+    }
+    let jobs: IdealJob[];
+    try {
+      jobs = await this.idealRunJobs();
+    } catch (err) {
+      return `/ideal status: cannot read the worker ledger: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
+    return formatIdealStatus({ run: this.idealCoordinationRun, jobs, flow, now: new Date() });
+  }
+
+  /**
+   * `/ideal abort` for the orchestrator role: kill every still-running worker
+   * the run launched (the same kill path as the /jobs view) and close the run,
+   * so a later status no longer reports it. No model call.
+   */
+  async abortIdealCoordination(): Promise<string> {
+    const run = this.idealCoordinationRun;
+    if (!run) return formatIdealAbort({ run: null, outcomes: [], finished: 0 });
+    let jobs: IdealJob[];
+    try {
+      jobs = await this.idealRunJobs();
+    } catch (err) {
+      return `/ideal abort: cannot read the worker ledger, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
+    const running = jobs.filter((job) => job.status === "running");
+    const outcomes: IdealKillOutcome[] = [];
+    for (const job of running) {
+      // Registered BEFORE the kill: a notification poll already in flight can
+      // claim the cancellation the moment the record is written.
+      this.abortedIdealJobIds.add(job.id);
+      const result = await this.killDelegation(job.id);
+      if (!result.success) {
+        this.abortedIdealJobIds.delete(job.id);
+        logger.warn("orchestrator", "/ideal abort: worker did not stop", { id: job.id, output: result.output });
+      }
+      outcomes.push({ id: job.id, success: result.success, output: result.output ?? result.error ?? "" });
+    }
+    this.idealCoordinationRun = null;
+    logger.info("orchestrator", "/ideal abort: run closed", {
+      goal: run.goal,
+      stopped: outcomes.filter((o) => o.success).length,
+      failed: outcomes.filter((o) => !o.success).length,
+    });
+    return formatIdealAbort({ run, outcomes, finished: jobs.length - running.length });
   }
 
   /** Stop a background job from the /jobs view: a delegation id or a shell process id. */
@@ -3604,7 +3695,25 @@ export class Agent {
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
     if (this.executionRole === "orchestrator") {
+      // status/abort read or stop state the host already holds — answered here,
+      // never forwarded to the model (see ideal-coordination.ts).
+      if (payload.subcommand === "status") {
+        yield { type: "content", content: await this.renderIdealCoordinationStatus() };
+        yield { type: "done" };
+        return;
+      }
+      if (payload.subcommand === "abort") {
+        yield { type: "content", content: await this.abortIdealCoordination() };
+        yield { type: "done" };
+        return;
+      }
       const goal = payload.idea?.trim();
+      if (payload.subcommand === "start") {
+        this.idealCoordinationRun = {
+          goal: goal || "(the current conversation's goal)",
+          startedAt: new Date().toISOString(),
+        };
+      }
       let councilReceipt = "";
       if (payload.flags.forceCouncil) {
         const receipt = await this.startCouncil({

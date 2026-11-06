@@ -20,6 +20,16 @@ export function SemanticProvider(props: { registry: SemanticRegistry; children: 
   return <RegistryContext.Provider value={props.registry}>{props.children}</RegistryContext.Provider>;
 }
 
+/**
+ * True when a semantic registry is mounted (agent mode), i.e. when a
+ * `<Semantic>` mirror is actually observed. Components whose mirrored field
+ * changes OUTSIDE React (a textarea's text) use this to re-render on that
+ * change only when someone reads the mirror — zero cost in normal user mode.
+ */
+export function useSemanticMirrorActive(): boolean {
+  return React.useContext(RegistryContext) !== null;
+}
+
 // ---------------------------------------------------------------------------
 // Semantic
 // ---------------------------------------------------------------------------

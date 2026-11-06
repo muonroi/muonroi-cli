@@ -198,4 +198,25 @@ describe("safe mode: orchestrator read_file approval continues the same turn", (
       expect(danglingCalls(c), `dangling tool-call in call #${c.index}`).toEqual([]);
     }
   }, 180_000);
+
+  it("Down+Enter in ONE batch denies — Enter acts on the live selection, not the rendered one", async () => {
+    handle = await driveToApprovalCard();
+    // Both keys in ONE stdin chunk, dispatched before React re-renders the card
+    // — what a real terminal delivers for keys typed while the event loop was
+    // busy (queued input replays as one read). The safety contract is that this
+    // can never APPROVE. (`press_sequence` sends one write per key, which the
+    // pipe delivers as separate chunks, so it cannot reproduce the race.)
+    handle.pressBurst(["Down", "Enter"]);
+
+    const resultCall = await waitForResultCall(handle.dumpPath, 45_000);
+    const finished = await waitForRendered(handle, FINAL_TEXT, 30_000);
+    await exitTuiAndWaitForDump(handle, 20_000);
+    const dump = summarize(handle.dumpPath);
+
+    expect(resultCall, `no main call carried a tool-result for ${CALL_ID}\n${dump}`).toBeDefined();
+    const output = JSON.stringify(resultFor(resultCall!, CALL_ID)?.output);
+    expect(output, "a Down+Enter burst APPROVED the tool call").not.toContain(MARKER);
+    expect(output).toMatch(/denied/i);
+    expect(finished, "the model's final answer never rendered").toBe(true);
+  }, 180_000);
 });
