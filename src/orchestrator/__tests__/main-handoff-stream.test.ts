@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { installMockModel, textOnlyStream, toolCallStream } from "../../agent-harness/mock-model.js";
 import { createHeadlessJsonlEmitter } from "../../headless/output.js";
 import { loadCatalog } from "../../models/registry.js";
@@ -19,7 +19,73 @@ vi.mock("../../pil/llm-classify.js", async (importOriginal) => ({
   }),
 }));
 
+/**
+ * Drive ONE complete helper → main handoff turn at the production idle budget
+ * (MUONROI_TURN_IDLE_MS unset → 120s) so the turn path's one-time
+ * first-execution cost (lazy `await import(...)`s, cold module caches) is paid
+ * before any scenario arms a 150 ms watchdog.
+ *
+ * Why: the scenarios below measure whether main's ACCEPTANCE step survives the
+ * generic turn watchdog. But the helper turn runs first under the same 150 ms
+ * idle budget, and part of its pre-stream setup is deliberately unpinged: from
+ * `pre-stream.providerRedetect.end` to `pre-stream.toolEngine.end`, after which
+ * tool-engine pings right before streamText ("a setup phase that issues no
+ * request at all still fires"). Breadcrumbs on the dev box, cold helper turn:
+ * that stretch took 127 ms / 106 ms (two runs) vs 15 ms / 12 ms for the same
+ * code in the warm acceptance turn of the SAME run. A windows-latest runner
+ * pushed it past 150 ms and the helper was killed — "assistant turn produced no
+ * output for 0s", CI run 42164466582 — and only in `slow`, the file's first
+ * scenario. With this warm-up the measured helper's stretch is 66 ms, and at a
+ * 100 ms (70 ms) idle budget the helper is killed 0/6 (0/6) times instead of
+ * 3/6 (4/6) without it. A genuinely hung await still never resolves, so the
+ * warm-up hides nothing the watchdog exists to catch.
+ */
+async function warmHandoffTurnPath(): Promise<void> {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-handoff-warm-"));
+  const previousCwd = process.cwd();
+  const envKeys = ["HOME", "USERPROFILE", "MUONROI_FORCE_ROUTING_CLASSIFY", "MUONROI_EE_BASE_URL"];
+  const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
+  fs.mkdirSync(path.join(home, ".muonroi-cli"));
+  fs.writeFileSync(path.join(home, ".muonroi-cli", "settings.json"), JSON.stringify({ routerSubSessions: true }));
+  process.chdir(home);
+  process.env.HOME = home;
+  process.env.USERPROFILE = home;
+  process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
+  process.env.MUONROI_EE_BASE_URL = "http://127.0.0.1:1";
+  closeDatabase();
+  await loadCatalog();
+  const handle = installMockModel({
+    fixture: { autoClassify: true, stream: [textOnlyStream("WARM_HELPER"), textOnlyStream("WARM_MAIN")] },
+  });
+  try {
+    const agent = new Agent("test-key", undefined, "deepseek-v4-flash", 2, {
+      persistSession: true,
+      executionRole: "infrastructure",
+    });
+    const emitter = createHeadlessJsonlEmitter(agent.getSessionId()!);
+    let output = "";
+    for await (const chunk of agent.processMessage("What is the sum of two and two?", emitter.observer)) {
+      emitter.consumeChunk(chunk);
+      if (chunk.type === "content") output += chunk.content ?? "";
+    }
+    emitter.flush();
+    // A warm-up that silently did nothing would leave the cold path in place.
+    if (!output.includes("WARM_MAIN")) throw new Error(`handoff warm-up did not complete: ${output.slice(0, 200)}`);
+  } finally {
+    handle.uninstall();
+    closeDatabase();
+    process.chdir(previousCwd);
+    for (const [key, value] of Object.entries(previousEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    fs.rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+}
+
 describe("main handoff with real MessageProcessor and mock SDK stream", () => {
+  beforeAll(warmHandoffTurnPath, 30_000);
+
   it.each([
     "slow",
     "wedged",
