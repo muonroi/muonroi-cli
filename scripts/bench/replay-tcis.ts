@@ -36,7 +36,11 @@
  *   --model <id>            pass -m <id> to the CLI (default: your settings)
  *   --budget-usd <n>        abort when spend exceeds n (default 15)
  *   --max-wall-min <n>      abort after n minutes (default 120)
- *   --quiet-sec <n>         settled = no UI change for n s and no running worker (default 90)
+ *   --quiet-sec <n>         settled = no UI change AND no running worker for n s (default 90)
+ *   --auto-continue <n>     when the run settles with the orchestrator waiting on a human, send
+ *                           AUTO_CONTINUE_TEXT up to n times (default 0). The baseline had a human
+ *                           who sent 37 steering messages ("bắt đầu làm theo recommend của bạn",
+ *                           "bạn có toàn quyền…"); the count used is reported in the output.
  *   --out <file>            also write {baseline, replay, comparison} JSON
  *   --keep                  keep the temp clone/home for inspection
  */
@@ -77,6 +81,7 @@ const { values: opt } = parseArgs({
     "budget-usd": { type: "string", default: "15" },
     "max-wall-min": { type: "string", default: "120" },
     "quiet-sec": { type: "string", default: "90" },
+    "auto-continue": { type: "string", default: "0" },
     out: { type: "string" },
     keep: { type: "boolean", default: false },
   },
@@ -94,6 +99,10 @@ if (opt["mock-llm"] && opt.live) fail("--mock-llm and --live are mutually exclus
 const budgetUsd = Number(opt["budget-usd"]);
 const maxWallMs = Number(opt["max-wall-min"]) * 60_000;
 const quietMs = Number(opt["quiet-sec"]) * 1000;
+const autoContinueMax = Number(opt["auto-continue"]);
+/** Neutral stand-in for the baseline human's most common steering messages. */
+const AUTO_CONTINUE_TEXT =
+  "Bạn có toàn quyền quyết định — cứ làm theo đề xuất của bạn và tiếp tục cho đến khi hoàn thành.";
 if (!(budgetUsd > 0) || !(maxWallMs > 0) || !(quietMs > 0))
   fail("--budget-usd, --max-wall-min, --quiet-sec must be > 0");
 
@@ -347,6 +356,11 @@ async function main(): Promise<void> {
 
   let reason = "settled";
   let ids: string[] = [];
+  let autoContinues = 0;
+  // A worker finishing is activity too: its completion wakes the orchestrator a
+  // moment later. Measuring quiet from the last UI frame alone killed run
+  // a2a6d27eb5ca right as its last worker finished, before the wake-up turn.
+  let lastWorkerSeenAt = Date.now();
   for (;;) {
     await new Promise((r) => setTimeout(r, 5_000));
     ids = findSessions(runDb, cwd);
@@ -367,7 +381,19 @@ async function main(): Promise<void> {
       reason = "cli-exited";
       break;
     }
-    if (Date.now() - lastChangeAt > quietMs && running.length === 0 && stored.assistantMessages > 0) break;
+    if (running.length > 0) lastWorkerSeenAt = Date.now();
+    const quietFor = Date.now() - Math.max(lastChangeAt, lastWorkerSeenAt);
+    if (quietFor > quietMs && running.length === 0 && stored.assistantMessages > 0) {
+      if (autoContinues < autoContinueMax) {
+        autoContinues++;
+        log(`settled waiting on a human — auto-continue ${autoContinues}/${autoContinueMax}`);
+        driver.type(AUTO_CONTINUE_TEXT);
+        driver.press("Enter");
+        lastChangeAt = Date.now();
+        continue;
+      }
+      break;
+    }
     if (elapsed % 60_000 < 5_000)
       log(
         `t+${Math.round(elapsed / 60_000)}m spend=$${spend.toFixed(2)} sessions=${ids.length} running-workers=${running.length}`,
@@ -376,20 +402,33 @@ async function main(): Promise<void> {
   log(`stopping: ${reason}`);
   for (const w of runningWorkers(runHome, new Set(ids))) if (w.pid) killTree(w.pid, `worker ${w.id}`);
   if (!exited && proc.pid) killTree(proc.pid, "CLI");
+  // Windows: opening the DB right after the kill fails SQLITE_IOERR until the
+  // process has really exited (measured on run a2a6d27eb5ca).
+  const exitDeadline = Date.now() + 30_000;
+  while (!exited && Date.now() < exitDeadline) await new Promise((r) => setTimeout(r, 250));
+  if (!exited) log("CLI did not report exit within 30s; reading the DB anyway");
 
   if (ids.length === 0) fail(`no session was recorded for ${cwd} in ${runDb}`);
   const replayId = ids[0]!;
-  const before = await computeFlowMetrics(baseline.sessionId, { home: baselineHome, db: baselineDb });
-  const after = await computeFlowMetrics(replayId, { home: runHome, db: runDb });
+  const before = await withIoRetry(() =>
+    computeFlowMetrics(baseline.sessionId, { home: baselineHome, db: baselineDb }),
+  );
+  const after = await withIoRetry(() => computeFlowMetrics(replayId, { home: runHome, db: runDb }));
   const rows = compareFlowMetrics(before, after);
   process.stdout.write(
-    `\nReplay ${replayId} (${reason}) vs baseline ${baseline.sessionId}\n${formatComparison(rows, {
-      baseline: baseline.sessionId,
-      replay: replayId,
-    })}\n`,
+    `\nReplay ${replayId} (${reason}; auto-continues ${autoContinues}) vs baseline ${baseline.sessionId}\n${formatComparison(
+      rows,
+      {
+        baseline: baseline.sessionId,
+        replay: replayId,
+      },
+    )}\n`,
   );
   if (opt.out) {
-    writeFileSync(opt.out, JSON.stringify({ reason, baseline: before, replay: after, comparison: rows }, null, 2));
+    writeFileSync(
+      opt.out,
+      JSON.stringify({ reason, autoContinues, baseline: before, replay: after, comparison: rows }, null, 2),
+    );
     log(`wrote ${opt.out}`);
   }
   if (opt.keep) log(`kept ${root}`);
@@ -406,3 +445,17 @@ main().then(
   () => process.exit(0),
   (err) => fail(err instanceof Error ? (err.stack ?? err.message) : String(err)),
 );
+
+/** Retry a DB read a few times on a transient SQLite I/O error (file still held by an exiting process). */
+async function withIoRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (attempt >= 5 || !/disk I\/O error|SQLITE_IOERR|SQLITE_BUSY|database is locked/i.test(msg)) throw err;
+      log(`DB read failed (${msg}); retry ${attempt}/4 in 2s`);
+      await new Promise((r) => setTimeout(r, 2_000));
+    }
+  }
+}
