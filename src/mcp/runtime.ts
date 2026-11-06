@@ -1,6 +1,5 @@
 import { createMCPClient, type MCPClient } from "@ai-sdk/mcp";
 import { jsonSchema } from "@ai-sdk/provider-utils";
-import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { recordIntegrationHealth } from "../utils/integration-health.js";
 import { mcpIdentityEnvironment } from "./stdio-identity.js";
@@ -19,7 +18,7 @@ import {
   partitionEnabledServers,
 } from "./key-requirements.js";
 import { getMcpKey } from "./mcp-keychain.js";
-import { createOAuthProviderWithCallback, ensureOAuthSignedIn } from "./oauth-provider.js";
+import { beginMcpOAuthSignIn, endpointRequiresOAuth, getMcpOAuthSession } from "./oauth-provider.js";
 import { validateMcpServerConfig } from "./validate.js";
 
 async function hydrateServerEnv(server: McpServerConfig): Promise<McpServerConfig> {
@@ -195,7 +194,7 @@ function normalizeStdioCommand(command: string, args: string[] | undefined): { c
   return { command, args: a };
 }
 
-function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider) {
+function toTransport(server: McpServerConfig, authFetch?: typeof fetch) {
   if (server.transport === "stdio") {
     const { command, args } = normalizeStdioCommand(server.command ?? "", server.args);
     return new StdioClientTransport({
@@ -211,7 +210,9 @@ function toTransport(server: McpServerConfig, authProvider?: OAuthClientProvider
     type: server.transport,
     url: server.url ?? "",
     headers: server.headers,
-    ...(authProvider ? { authProvider: authProvider as any } : {}),
+    // OAuth is applied by the session's fetch (bearer + refresh), NOT the
+    // transport's authProvider: see McpOAuthSession.fetch.
+    ...(authFetch ? { fetch: authFetch } : {}),
   } as const;
 }
 
@@ -291,27 +292,39 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
     }
   }
 
-  let authProvider: OAuthClientProvider | undefined;
-  let cleanup: (() => void) | undefined;
-  if (server.transport !== "stdio" && opts?.onOAuthRequired) {
-    const oauthResult = await createOAuthProviderWithCallback({
-      serverId: server.id,
-      serverUrl: server.url ?? "",
-      onAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url),
-    });
-    authProvider = oauthResult.provider;
-    cleanup = oauthResult.close;
-    // Keep the callback server alive when this throws: the browser redirect
-    // lands on it after the sign-in prompt, and onCode then persists tokens.
-    await ensureOAuthSignedIn(oauthResult.provider, {
-      label: server.label,
-      url: server.url ?? "",
-      headers: server.headers,
-    });
+  // OAuth (http/sse only — the spec says stdio takes credentials from the env).
+  // Stored tokens are attached on EVERY connection, interactive or not: the
+  // old gate on `opts.onOAuthRequired` sent warm-up, council and
+  // worker_capabilities connects with no Authorization header at all
+  // ("No authorization provided" 401 in debug.log for a signed-in server).
+  let authFetch: typeof fetch | undefined;
+  if (server.transport !== "stdio" && server.url) {
+    const session = getMcpOAuthSession(server);
+    if (session.hasTokens()) {
+      authFetch = session.fetch as typeof fetch;
+    } else if (opts?.onOAuthRequired && (await endpointRequiresOAuth(server.url, server.headers))) {
+      // Interactive turn and no tokens: start (or join) one browser sign-in.
+      // Joining matters — every reconnect attempt used to open another tab.
+      const started = await beginMcpOAuthSignIn(
+        { id: server.id, label: server.label, url: server.url },
+        { openAuthorizationUrl: (url: URL) => opts.onOAuthRequired!(server.id, url) },
+      );
+      if (started.status === "authorized") {
+        authFetch = session.fetch as typeof fetch;
+      } else {
+        throw new Error(
+          `${server.label} needs OAuth sign-in — ${
+            started.status === "pending"
+              ? "a sign-in is already waiting in your browser"
+              : "finish it in the browser window that just opened"
+          }, then retry (or use /mcp → ctrl+o).`,
+        );
+      }
+    }
   }
 
   const client = await createMCPClient({
-    transport: toTransport(server, authProvider),
+    transport: toTransport(server, authFetch),
     name: `muonroi-cli-${server.id}`,
     version: "1.0.0",
   });
@@ -381,7 +394,7 @@ export async function connectOneServer(rawServer: McpServerConfig, opts?: McpBui
     status: "ready",
     detail: `Connected; ${Object.keys(tools).length} tools advertised. Tool execution not certified.`,
   });
-  return { tools, client, cleanup };
+  return { tools, client };
 }
 
 export async function buildMcpToolSet(servers: McpServerConfig[], opts?: McpBuildOptions): Promise<McpToolBundle> {

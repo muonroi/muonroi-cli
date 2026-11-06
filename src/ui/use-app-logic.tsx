@@ -6376,7 +6376,11 @@ export function useAppLogic(props: AppLogicProps) {
       // summary/tail and the full back-and-forth. Global (unbound elsewhere); a
       // no-op visually when no debate turns exist, so an unconditional toggle is
       // safe and avoids threading councilMessages into this useCallback.
-      if (key.name === "o" && key.ctrl && !key.meta) {
+      // NOT while /mcp is open: its own ctrl+o is "OAuth sign-in", and this
+      // handler runs first — its unconditional return made that key dead
+      // (harness mcp-oauth.spec: ctrl+o on a selected server never reached
+      // signInMcpOAuth — zero DCR registrations at the fixture server).
+      if (key.name === "o" && key.ctrl && !key.meta && !showMcpModalRef.current) {
         setCouncilTranscriptExpanded((v) => !v);
         return;
       }
@@ -7557,9 +7561,32 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "o" && key.ctrl && row?.kind === "server") {
-          signInMcpOAuth(row.server).catch((err) => {
-            logger.error("mcp", `oauth sign-in failed: ${err?.message}`, { serverId: row.server.id });
-          });
+          const oauthServer = row.server;
+          signInMcpOAuth(oauthServer)
+            .then((started) => {
+              if (started.status === "authorized") {
+                pushToast("info", `${oauthServer.label}: signed in.`);
+                return;
+              }
+              pushToast(
+                "info",
+                started.browserOpened
+                  ? `${oauthServer.label}: finish sign-in in your browser.`
+                  : `${oauthServer.label}: open this URL to sign in: ${started.authUrl ?? "(none)"}`,
+              );
+              return started.completion.then((outcome) => {
+                pushToast(
+                  outcome.ok ? "info" : "error",
+                  outcome.ok
+                    ? `${oauthServer.label}: signed in — tools available next turn.`
+                    : `${oauthServer.label}: sign-in failed — ${outcome.error}`,
+                );
+              });
+            })
+            .catch((err) => {
+              logger.error("mcp", `oauth sign-in failed: ${err?.message}`, { serverId: oauthServer.id });
+              pushToast("error", `${oauthServer.label}: sign-in failed — ${err?.message ?? String(err)}`);
+            });
           return;
         }
         if (key.name === "x" && key.ctrl && row?.kind === "server") {
