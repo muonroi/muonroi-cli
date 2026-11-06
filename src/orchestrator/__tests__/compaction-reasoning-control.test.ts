@@ -20,12 +20,14 @@
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getModelInfo, loadCatalog } from "../../models/registry.js";
+import { DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS } from "../../providers/capabilities.js";
 import { createProviderFactory } from "../../providers/runtime.js";
 import {
   CompactionSummaryRejectedError,
   generateCompactionSummary,
   getBilledCompactionUsage,
   type PreparedCompaction,
+  widerSummaryBudget,
 } from "../compaction.js";
 
 const MODEL_ID = "step-3.7-flash";
@@ -126,7 +128,48 @@ describe("compaction reasoning control (StepFun step-3.7-flash)", () => {
     }
     expect(caught).toBeInstanceOf(CompactionSummaryRejectedError);
     expect((caught as CompactionSummaryRejectedError).reason).toBe("empty");
-    expect(getBilledCompactionUsage(caught)).toEqual({ promptTokens: 3_000, completionTokens: 4_096 });
+    // Both the first attempt and the one wider retry were billed.
+    expect(bodies).toHaveLength(2);
+    expect(getBilledCompactionUsage(caught)).toEqual({ promptTokens: 6_000, completionTokens: 8_192 });
+  });
+
+  // Session c2fda568be6b (2026-11-06 07:11:56Z): "compaction summary rejected
+  // (empty): model=step-3.7-flash finishReason=length outputTokens=1536
+  // budget=1536 textChars=0 reasoningChars=6542". The summary budget was an
+  // inlined visible-output number; reasoning ate all of it.
+  it("the summary budget leaves room for reasoning: catalog ceiling, never the inlined visible cap", async () => {
+    await generateCompactionSummary(MODEL_ID, preparation());
+    const info = getModelInfo(MODEL_ID);
+    // step-3.7-flash publishes no max_output_tokens -> the declared reasoning default.
+    expect(info?.maxOutputTokens).toBeUndefined();
+    expect(bodies[0]?.max_tokens).toBe(DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS);
+  });
+
+  it("finishReason=length with empty text: retries ONCE with a larger budget and uses that summary", async () => {
+    let call = 0;
+    replyFor = () =>
+      ++call === 1
+        ? { content: "", reasoning: "r".repeat(6_542), finish: "length", prompt: 3_000, completion: 8_192 }
+        : {
+            content: "## Goal\nretried summary",
+            reasoning: "r".repeat(9_000),
+            finish: "stop",
+            prompt: 3_000,
+            completion: 2_500,
+          };
+    const result = await generateCompactionSummary(MODEL_ID, preparation());
+    expect(result.summary).toContain("retried summary");
+    expect(bodies).toHaveLength(2);
+    expect(Number(bodies[1]?.max_tokens)).toBeGreaterThan(Number(bodies[0]?.max_tokens));
+    expect(result.usage).toEqual({ promptTokens: 6_000, completionTokens: 10_692 });
+  });
+
+  it("no retry when the model is already at its declared output ceiling", () => {
+    expect(widerSummaryBudget({ maxOutputTokens: 64_000 } as never, 64_000)).toBeNull();
+    expect(widerSummaryBudget({ maxOutputTokens: 64_000 } as never, 8_192)).toBe(32_768);
+    expect(widerSummaryBudget({ maxOutputTokens: 20_000 } as never, 8_192)).toBe(20_000);
+    expect(widerSummaryBudget(undefined, 8_192)).toBe(32_768);
+    expect(widerSummaryBudget(undefined, undefined)).toBeNull();
   });
 
   it("split turn: one half rejected -> the error carries BOTH halves' billed tokens", async () => {
@@ -143,9 +186,10 @@ describe("compaction reasoning control (StepFun step-3.7-flash)", () => {
     } catch (err) {
       caught = err;
     }
-    expect(bodies).toHaveLength(2);
+    // history half + prefix half + the prefix half's one wider retry.
+    expect(bodies).toHaveLength(3);
     expect(caught).toBeInstanceOf(CompactionSummaryRejectedError);
-    expect(getBilledCompactionUsage(caught)).toEqual({ promptTokens: 3_000, completionTokens: 2_348 });
+    expect(getBilledCompactionUsage(caught)).toEqual({ promptTokens: 4_000, completionTokens: 4_396 });
   });
 
   it("errors with no billed usage report zero (provider threw before any usage)", () => {

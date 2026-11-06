@@ -5274,6 +5274,30 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           message: friendly,
           timestamp: Date.now(),
         });
+        // A turn that ends here never reached (or never finished) a model call,
+        // so it leaves no usage/call_accounting row and no assistant message.
+        // Record WHY, durably: session c2fda568be6b ended 15 consecutive turns
+        // (11:25Z-11:46Z) on "Request context overflow" with nothing in
+        // interaction_logs but a `prompt_breakdown` preflight row.
+        try {
+          if (deps.session) {
+            const rawMessage = err instanceof Error ? err.message : String(err);
+            logInteraction(deps.session.id, "error", {
+              eventSubtype: isContextLimitError(err) ? "context_overflow" : authError ? "auth" : "turn_error",
+              model: runtime.modelId,
+              data: {
+                message: friendly.slice(0, 1000),
+                rawMessage: rawMessage.slice(0, 1000),
+                attemptedOverflowRecovery,
+                stallTriggered,
+              },
+            });
+          }
+        } catch (logErr) {
+          logger.error("orchestrator", "turn error log failed", {
+            error: logErr instanceof Error ? logErr.message : String(logErr),
+          });
+        }
         yield {
           type: "error",
           content: friendly,

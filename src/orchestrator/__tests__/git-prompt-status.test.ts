@@ -2,9 +2,14 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
-import { __resetGitPromptStatusCache, formatGitPromptStatus, gitPromptStatus } from "../git-prompt-status.js";
+import {
+  __resetGitPromptStatusCache,
+  formatGitPromptStatus,
+  gitPromptStatus,
+  refreshGitPromptStatus,
+} from "../git-prompt-status.js";
 import { buildSystemPromptParts, resetStaticPrefixCache } from "../prompts.js";
 
 describe("formatGitPromptStatus", () => {
@@ -36,6 +41,8 @@ describe("gitPromptStatus + dynamic suffix", () => {
   const git = (...args: string[]) => spawnSync("git", args, { cwd: repo, encoding: "utf8" });
 
   beforeEach(() => {
+    // The suite default is off (vitest-setup.ts); this file is the probe's own coverage.
+    vi.stubEnv("MUONROI_PROMPT_GIT_STATUS", "1");
     __resetGitPromptStatusCache();
     resetStaticPrefixCache();
     repo = mkdtempSync(join(tmpdir(), "git-prompt-"));
@@ -48,21 +55,37 @@ describe("gitPromptStatus + dynamic suffix", () => {
     git("commit", "-qm", "init");
     writeFileSync(join(repo, "b.txt"), "b\n");
   });
-  afterEach(() => {
+  afterEach(async () => {
+    // Let any background probe exit first: on Windows a running git pins its cwd.
+    await Promise.all([refreshGitPromptStatus(repo), refreshGitPromptStatus(plain)]);
+    vi.unstubAllEnvs();
     bestEffortRemoveSync(repo, "git-prompt-status.test.ts");
     bestEffortRemoveSync(plain, "git-prompt-status.test.ts");
   });
 
-  it("reports the real branch / HEAD / dirty count inside a repo", () => {
+  it("reports the real branch / HEAD / dirty count inside a repo", async () => {
     const head = git("rev-parse", "--short=7", "HEAD").stdout.trim();
+    expect(await refreshGitPromptStatus(repo)).toBe(`- Git: branch topic @ ${head}; 1 dirty file`);
     expect(gitPromptStatus(repo)).toBe(`- Git: branch topic @ ${head}; 1 dirty file`);
   });
 
-  it("is absent outside a git repository", () => {
+  it("is absent outside a git repository", async () => {
+    expect(await refreshGitPromptStatus(plain)).toBe("");
     expect(gitPromptStatus(plain)).toBe("");
   });
 
-  it("lands in the dynamic suffix only — the static prefix carries no git state", () => {
+  // Session c2fda568be6b: 867 synchronous probes timed out on the prompt path,
+  // each freezing the event loop for 1.5s. The prompt builder must only read.
+  it("never blocks the caller: a cold cache returns empty now and fills in the background", async () => {
+    const head = git("rev-parse", "--short=7", "HEAD").stdout.trim();
+    expect(gitPromptStatus(repo)).toBe("");
+    await refreshGitPromptStatus(repo); // joins the refresh the call above started
+    expect(gitPromptStatus(repo)).toBe(`- Git: branch topic @ ${head}; 1 dirty file`);
+  });
+
+  it("lands in the dynamic suffix only — the static prefix carries no git state", async () => {
+    await refreshGitPromptStatus(repo);
+    await refreshGitPromptStatus(plain);
     const parts = buildSystemPromptParts(repo, "agent", "off", null, [], undefined, undefined, null, {});
     expect(parts.dynamicSuffix).toContain("- Git: branch topic @");
     expect(parts.staticPrefix).not.toContain("- Git: branch");

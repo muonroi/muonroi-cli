@@ -17,6 +17,8 @@ import {
   loadTranscriptState,
 } from "../../storage/transcript.js";
 import { estimateConversationTokens } from "../compaction.js";
+import { HOST_COMPACTION_STUB_PREFIX } from "../compaction-budget.js";
+import { __resetCompactionModelCooldownForTests, markCompactionModelCooldown } from "../compaction-model-cooldown.js";
 import { WorkingContext } from "../working-context.js";
 
 const captured = vi.hoisted(() => ({
@@ -165,7 +167,7 @@ describe("pruning before narrative compaction", () => {
             return { input: m.estimatedInputTokens, window: m.contextWindowTokens, reserve: m.reservedOutputTokens };
           }),
         }),
-      ).toBe(protectedHistory ? 2 : 1);
+      ).toBe(1);
       expect(blocked[0].requestPhase).toBe("preflight");
       expect(blocked[0].estimatedInputTokens + blocked[0].reservedOutputTokens).toBeGreaterThan(
         blocked[0].contextWindowTokens,
@@ -174,8 +176,16 @@ describe("pruning before narrative compaction", () => {
       expect(captured.summary).toHaveBeenCalled();
       const mainCalls = handle.model.doStreamCalls.filter((call) => call.tools?.length);
       if (protectedHistory) {
-        expect(mainCalls).toHaveLength(0);
-        expect(chunks.some((chunk) => chunk.type === "error")).toBe(true);
+        // Every message pinned used to make overflow recovery impossible (the
+        // turn ended in an error with no model call). Protections now choose
+        // which turns stay, not that their bulk stays: the host budget pass
+        // keeps the pinned user text verbatim and shrinks the assistant bulk
+        // (session c2fda568be6b: 41 compactions, nearly all "saved 0").
+        expect(mainCalls).toHaveLength(1);
+        const prompt = JSON.stringify(mainCalls[0].prompt);
+        expect(prompt).toContain("Closed task 0");
+        expect(prompt).toContain(HOST_COMPACTION_STUB_PREFIX);
+        expect(chunks.some((chunk) => chunk.type === "error")).toBe(false);
       } else {
         expect(mainCalls).toHaveLength(1);
         expect(JSON.stringify(mainCalls[0].prompt)).toContain("CURRENT_TASK");
@@ -217,6 +227,85 @@ describe("pruning before narrative compaction", () => {
       await agent.cleanup();
     }
   });
+  // Session c2fda568be6b: every turn mentioned an unacknowledged jobId, so
+  // `outstanding-job` protected ~830k tokens; both summarizers were cooling
+  // down; 41 compactions logged "saved 0" while history reached ~942k tokens.
+  it("all summarizers cooling down + every turn protected: the deterministic pass still shrinks the prompt", async () => {
+    const { agent, a } = await fixture(false);
+    vi.spyOn(a, "getContextProtection").mockResolvedValue({ pinned: [], pendingJobIds: ["Closed task"] });
+    markCompactionModelCooldown(agent.getSessionId()!, a._resolveCompactModel());
+    markCompactionModelCooldown(agent.getSessionId()!, a.modelId);
+    try {
+      await a.compactForContext(
+        "fixture",
+        "system",
+        1_000_000,
+        new AbortController().signal,
+        // Tail covers the context_load pair + receipt so CURRENT_TASK stays a kept (not summarized) turn.
+        { reserveTokens: 1000, keepRecentTokens: 400 },
+        true,
+      );
+      expect(captured.summary).not.toHaveBeenCalled();
+      const row = getDatabase()
+        .prepare(
+          "SELECT metadata_json FROM interaction_logs WHERE session_id=? AND event_type='compaction' AND event_subtype IS NULL ORDER BY id DESC LIMIT 1",
+        )
+        .get(agent.getSessionId()) as { metadata_json: string };
+      const meta = JSON.parse(row.metadata_json);
+      const data = meta.data ?? meta;
+      expect(data.summaryModel).toBeNull(); // mechanical stub
+      expect(data.budgetLevel).toBeGreaterThanOrEqual(1);
+      expect(data.saved).toBeGreaterThan(data.tokensBefore / 2);
+      const after = JSON.stringify(a.messages);
+      expect(after).toContain("Mechanical compaction");
+      for (let i = 0; i < 12; i++) expect(after).toContain(`Closed task ${i}`); // protected turns still visible
+      expect(after).toContain("CURRENT_TASK");
+      expect(a.messages.length).toBe(a.messageSeqs.length);
+    } finally {
+      __resetCompactionModelCooldownForTests();
+      await agent.cleanup();
+    }
+  });
+  // Same session, 11:25Z-11:46Z: 15 turns ended on "Request context overflow"
+  // with no model call, no assistant message and no interaction_logs error row.
+  it("a turn that still cannot fit after compaction ends with a visible, logged error — never silently", async () => {
+    const { agent, a } = await fixture(false);
+    const previousCwd = process.cwd();
+    fs.mkdirSync(path.join(home, ".muonroi-cli"), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, ".muonroi-cli/settings.json"),
+      JSON.stringify({ routerSubSessions: false, routingMode: "fixed", model: getTestModels().premium }),
+    );
+    process.chdir(home);
+    const contextWindow = 6_000; // the current user turn alone exceeds it; compaction never touches the current turn
+    const resolveRuntime = modelRuntime.resolveModelRuntime;
+    vi.spyOn(modelRuntime, "resolveModelRuntime").mockImplementation((...args) => {
+      const runtime = resolveRuntime(...args);
+      return { ...runtime, modelInfo: { ...runtime.modelInfo!, contextWindow } };
+    });
+    vi.spyOn(a, "getCompactionSettings").mockReturnValue({ reserveTokens: 1000, keepRecentTokens: 200 });
+    const handle = installMockModel({ fixture: { autoClassify: true, stream: textOnlyStream("NEVER_SENT") } });
+    try {
+      const chunks = [];
+      for await (const chunk of agent.processMessage(`Continue CURRENT_TASK ${"huge pasted log ".repeat(4000)}`))
+        chunks.push(chunk);
+      expect(handle.model.doStreamCalls.filter((call) => call.tools?.length)).toHaveLength(0);
+      const errors = chunks.filter((c) => c.type === "error");
+      expect(errors).toHaveLength(1);
+      expect(String(errors[0]!.content)).toMatch(/context/i);
+      const rows = getDatabase()
+        .prepare("SELECT event_subtype, metadata_json FROM interaction_logs WHERE session_id=? AND event_type='error'")
+        .all(agent.getSessionId()) as { event_subtype: string; metadata_json: string }[];
+      expect(rows.map((r) => r.event_subtype)).toContain("context_overflow");
+      const data = JSON.parse(rows.find((r) => r.event_subtype === "context_overflow")!.metadata_json);
+      expect(JSON.stringify(data)).toContain("Request context overflow");
+    } finally {
+      handle.uninstall();
+      process.chdir(previousCwd);
+      vi.restoreAllMocks();
+      await agent.cleanup();
+    }
+  }, 20000);
   it("reduces the request without proposer/summary calls or canonical rewrites", async () => {
     const { agent, a, source } = await fixture();
     const original = JSON.stringify(source);

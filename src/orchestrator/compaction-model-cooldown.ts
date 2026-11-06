@@ -30,6 +30,8 @@
 interface CooldownEntry {
   /** Wall-clock instant (ms) after which this model may be tried again. */
   until: number;
+  /** Consecutive failures since the last success — drives the backoff. */
+  failures: number;
 }
 
 const cooldowns = new Map<string, CooldownEntry>();
@@ -39,13 +41,10 @@ function cooldownKey(sessionId: string, modelId: string): string {
 }
 
 /**
- * How long (ms) a model stays on cooldown after a compaction/summarizer
- * failure. Range 1_000–3_600_000 (the low end exists only so tests can use
- * fast real timers instead of fake ones); default 600_000 (10 min) — long
- * enough that a chatty session does not re-attempt a doomed model every
- * turn, short enough that a transient provider blip does not disable
- * compaction for the rest of a long session. Env override:
- * MUONROI_COMPACTION_MODEL_COOLDOWN_MS.
+ * The MAXIMUM time (ms) a model stays on cooldown after repeated
+ * compaction/summarizer failures. Range 1_000–3_600_000 (the low end exists
+ * only so tests can use fast real timers instead of fake ones); default
+ * 600_000 (10 min). Env override: MUONROI_COMPACTION_MODEL_COOLDOWN_MS.
  */
 export function getCompactionModelCooldownMs(): number {
   const raw = Number.parseInt(process.env.MUONROI_COMPACTION_MODEL_COOLDOWN_MS ?? "", 10);
@@ -53,24 +52,45 @@ export function getCompactionModelCooldownMs(): number {
   return 600_000;
 }
 
+/** First-failure cooldown; each further consecutive failure doubles it up to the maximum. */
+const BASE_COOLDOWN_MS = 60_000;
+
+/**
+ * Cooldown for the `failures`-th consecutive failure: 1 min, 2, 4, 8, then the
+ * maximum. Exponential backoff instead of a flat window, so one transient blip
+ * costs a minute, not ten — session c2fda568be6b had both summarizers parked
+ * for the same flat 10 min after every failure, and every compaction attempt in
+ * between went straight to the no-LLM stub.
+ */
+export function compactionCooldownForFailures(failures: number, maxMs = getCompactionModelCooldownMs()): number {
+  const base = Math.min(BASE_COOLDOWN_MS, maxMs);
+  return Math.min(maxMs, base * 2 ** Math.max(0, failures - 1));
+}
+
 /** True while `modelId` is on cooldown for `sessionId` (a recent failure there). */
 export function isCompactionModelCoolingDown(sessionId: string, modelId: string): boolean {
   const entry = cooldowns.get(cooldownKey(sessionId, modelId));
   if (!entry) return false;
-  if (Date.now() >= entry.until) {
-    cooldowns.delete(cooldownKey(sessionId, modelId));
-    return false;
-  }
-  return true;
+  // Expired: eligible again. The failure count is KEPT so a model that fails
+  // again backs off longer; only a success resets it.
+  return Date.now() < entry.until;
 }
 
-/** Record a compaction/summarizer failure for `modelId` in `sessionId` — starts (or refreshes) its cooldown. */
-export function markCompactionModelCooldown(
-  sessionId: string,
-  modelId: string,
-  cooldownMs: number = getCompactionModelCooldownMs(),
-): void {
-  cooldowns.set(cooldownKey(sessionId, modelId), { until: Date.now() + cooldownMs });
+/**
+ * Record a compaction/summarizer failure for `modelId` in `sessionId` — starts
+ * (or extends) its cooldown with exponential backoff. An explicit `cooldownMs`
+ * overrides the backoff schedule for this one failure.
+ */
+export function markCompactionModelCooldown(sessionId: string, modelId: string, cooldownMs?: number): void {
+  const key = cooldownKey(sessionId, modelId);
+  const failures = (cooldowns.get(key)?.failures ?? 0) + 1;
+  const ms = cooldownMs ?? compactionCooldownForFailures(failures);
+  cooldowns.set(key, { until: Date.now() + ms, failures });
+}
+
+/** A summary from `modelId` succeeded: forget its failures so the next failure starts at the base cooldown. */
+export function clearCompactionModelCooldown(sessionId: string, modelId: string): void {
+  cooldowns.delete(cooldownKey(sessionId, modelId));
 }
 
 /** Test-only: forget every recorded cooldown. */
