@@ -48,7 +48,7 @@
  */
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fsp } from "node:fs";
+import { promises as fsp, realpathSync } from "node:fs";
 import path from "node:path";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { type FloorCheck, getFloorTimeoutMs, isStyleGate, runFloorCommand } from "../product-loop/verify-floor.js";
@@ -168,8 +168,22 @@ function git(args: string[], cwd: string): Promise<string> {
   });
 }
 
+/**
+ * The repository root expressed in the SAME path namespace as
+ * {@link WorkerWriteScope}'s binding (`realpathSync(cwd)`), so a changed path
+ * `join(root, rel)` is classified against the scope by prefix, not by alias.
+ *
+ * `--show-toplevel` is NOT that namespace on Windows: git returns the long-name
+ * form (`C:/Users/runneradmin/...`) while `realpathSync` keeps an 8.3 short
+ * cwd as given (`C:\Users\RUNNER~1\...`, the GitHub windows runner's TEMP).
+ * Every in-scope change then fell outside the scope (ci-matrix run 42131417821:
+ * "1 path(s) changed OUTSIDE your writeScope ... src/generated.txt" with
+ * writeScope ["src/"]). `--show-cdup` is relative, so resolving it against the
+ * cwd's own realpath keeps the namespace by construction.
+ */
 export async function gitRepoRoot(cwd: string): Promise<string> {
-  return path.resolve((await git(["rev-parse", "--show-toplevel"], cwd)).trim());
+  const cdup = (await git(["rev-parse", "--show-cdup"], cwd)).trim();
+  return path.resolve(realpathSync(cwd), cdup);
 }
 
 async function fingerprint(absolute: string): Promise<string> {
