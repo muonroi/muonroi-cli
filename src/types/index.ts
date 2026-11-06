@@ -81,7 +81,26 @@ export type DelegationFailureKind = "rate-limited";
 
 /** Host observations, never a diagnosis of why a provider/harness failed. */
 export interface DelegationFailureRecovery {
-  symptom: "missing-final-answer" | "output-limit" | "model-message-schema" | "provider-stall" | "unclassified";
+  /**
+   * Typed observation of the terminal failure text (the host reads the marker so
+   * the orchestrator does not interpret raw provider errors). `auth-failure`,
+   * `rate-limit`, `context-overflow` and `provider-schema-refusal` are provider
+   * answers; the rest are host/worker terminal markers.
+   */
+  symptom:
+    | "missing-final-answer"
+    | "output-limit"
+    | "model-message-schema"
+    | "provider-stall"
+    | "auth-failure"
+    | "rate-limit"
+    | "context-overflow"
+    | "provider-schema-refusal"
+    | "unclassified";
+  /** Provider of the worker model, when the job record names one (used to refuse fan-out after auth failure). */
+  provider?: string;
+  /** One-line host instruction for this symptom; absent when the symptom has none. */
+  action?: string;
   rootCause: "not-established";
   capturedToolCalls: number;
   mutationToolCalls: number;

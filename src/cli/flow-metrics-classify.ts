@@ -253,6 +253,11 @@ export type FailureCategory =
   | "missing-final-answer"
   | "output-limit"
   | "model-message-schema"
+  | "provider-stall"
+  | "auth-failure"
+  | "rate-limit"
+  | "context-overflow"
+  | "provider-schema-refusal"
   | `provider-http-${number}`
   | "unclassified";
 

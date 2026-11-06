@@ -398,6 +398,20 @@ export interface EESearchOptions {
 export interface EERecallEntry {
   id: string;
   collection: string | null;
+  /**
+   * The hint's stored scope, when the server returns it (experience-core's
+   * surfaced meta carries `projectSlug` + `scope`; /api/recall must forward
+   * them). Lets ee_feedback derive wrong_repo / wrong_language host-side.
+   */
+  projectSlug?: string | null;
+  scope?: EEHintStoredScope | null;
+}
+
+/** Stored scope of an experience point (payload `scope`), as far as the client reads it. */
+export interface EEHintStoredScope {
+  project_slug?: string | null;
+  lang?: string | string[] | null;
+  [key: string]: unknown;
 }
 
 export interface EERecallResponse {

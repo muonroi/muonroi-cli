@@ -2,9 +2,9 @@
  * src/tools/native-tools.ts
  *
  * NATIVE in-process builtins for the capabilities that muonroi-tools previously
- * exposed only via a self-spawned MCP subprocess: ee_health, ee_feedback,
+ * exposed only via a self-spawned MCP subprocess: ee_feedback, ee_write,
  * usage_forensics, lsp_query, setup_guide, and selfverify_* (start/status/
- * result/list/cancel).
+ * result/list/cancel). EE health is ee_query(action="health") in registry.ts.
  *
  * Why native: muonroi-tools is THIS CLI. Self-spawning a 137MB CLI as an MCP
  * server per turn cold-started ~2-3.5s and overran the build deadline (and a
@@ -22,9 +22,13 @@
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import { FORENSICS_TOOL_DESCRIPTION } from "../cli/forensics-diagnostics.js";
 import { isConcreteEEProject, NativeEEContext } from "../ee/native-context.js";
+import { deriveNoiseReason, hintScopeOf } from "../ee/noise-reason.js";
+import { resolveEERepository } from "../ee/project-identity.js";
+import type { PendingRecall } from "../ee/recall-ledger.js";
 import { LSP_TOOL_OPERATIONS, LspError } from "../lsp/types.js";
 import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
+import { detectLanguage } from "../pil/layer15-context-scan.js";
 import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
 import { integrationHealth } from "../utils/integration-health.js";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -47,7 +51,6 @@ function lspErrLine(e: unknown): string {
 /** The native tool names this module registers — used by the MCP-twin dedup. */
 export const NATIVE_MUONROI_TOOL_NAMES = [
   "integration_status",
-  "ee_health",
   "ee_feedback",
   "ee_write",
   "usage_forensics",
@@ -122,34 +125,42 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       }
     },
   });
-  // ── Experience Engine: health + feedback (ee_query is already native) ──────
-  tools.ee_health = dynamicTool({
-    description:
-      "Probe the configured EE endpoint's reachability and show this task's effective scope plus last measured recall state/time. Health200 proves reachability only; recallReady=not_checked remains separate from lastRecall. No implicit recall or extra model request.",
-    inputSchema: jsonSchema({ type: "object", properties: {}, additionalProperties: false }),
-    execute: async () => {
-      try {
-        const { healthEE } = await import("../ee/search.js");
-        alignEE();
-        return json({ ...(await healthEE()), scope: eeContext.scope(), lastRecall: eeContext.lastRecall });
-      } catch (e) {
-        logger.file("warn", "ee", "Native EE health failed", { error: e instanceof Error ? e.message : String(e) });
-        return errLine("ee_unavailable", e instanceof Error ? e.message : String(e));
-      }
-    },
-  });
+  // ── Experience Engine: feedback + write (ee_query, incl. action=health, lives in registry.ts) ──
+  // ee_health is no longer a standalone tool: measured 25 calls lifetime, all
+  // 2026-10-16..19 and none after (muonroi.db tool_calls), while its schema rode
+  // every model step. tool-engine drops an mcp_muonroi-tools__ee_health twin
+  // when native ee_query is present.
+
+  // Noise reason from facts, not model judgment: the hint's stored scope (when
+  // the recall/injection response carried it) vs this task's project/language.
+  const deriveFeedbackReason = (requested: unknown, pending: PendingRecall | undefined) => {
+    const known = ["wrong_repo", "wrong_language", "wrong_task", "stale_rule"] as const;
+    const asked = known.find((r) => r === requested);
+    const scope = eeContext.scope();
+    const repo = resolveEERepository(scope.cwd);
+    const derivation = deriveNoiseReason(asked, pending ? hintScopeOf(pending) : undefined, {
+      project: scope.project ?? repo?.project,
+      lang: detectLanguage(repo?.root ?? scope.cwd),
+    });
+    if (derivation.derived)
+      logger.file("info", "ee", "ee_feedback noise reason derived by host", {
+        requested: asked ?? null,
+        reason: derivation.reason,
+        basis: derivation.basis,
+      });
+    return derivation;
+  };
 
   tools.ee_feedback = dynamicTool({
     description:
-      "Rate an Experience Engine recall entry so the brain keeps what helped and prunes the rest. Call after " +
-      "acting on an ee_query result — once per `[id col]` you used or judged. verdict: 'followed' (you changed " +
-      "your approach because of it), 'ignored' (topical but did not apply this time), 'noise' (wrong by category — " +
-      "REQUIRES reason: wrong_repo | wrong_language | wrong_task | stale_rule). id may be a short prefix.",
+      "Rate a recalled/injected `[id col]` hint after acting on it. verdict: followed (it changed your approach), " +
+      "ignored (topical, did not apply), noise (wrong here). For noise the host derives wrong_repo/wrong_language " +
+      "from the hint's stored scope; give reason only for stale_rule or wrong_task. id may be a short prefix.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        id: { type: "string", description: "Entry id (short prefix accepted)" },
-        collection: { type: "string", description: "EE collection the entry came from" },
+        id: { type: "string" },
+        collection: { type: "string" },
         verdict: { type: "string", enum: ["followed", "ignored", "noise"] },
         reason: { type: "string", enum: ["wrong_repo", "wrong_language", "wrong_task", "stale_rule"] },
       },
@@ -159,20 +170,22 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
       const id = typeof input?.id === "string" ? input.id.trim() : "";
       const collection = typeof input?.collection === "string" ? input.collection.trim() : "";
       const verdict = input?.verdict;
-      const reason = input?.reason;
       if (!id || !collection || !verdict) {
         return errLine("invalid_args", "ee_feedback requires id, collection, and verdict");
-      }
-      if (verdict === "noise" && !reason) {
-        return errLine(
-          "reason_required",
-          "verdict 'noise' requires reason: wrong_repo | wrong_language | wrong_task | stale_rule",
-        );
       }
       try {
         const { feedbackEE } = await import("../ee/search.js");
         const { sessionRecallLedger } = await import("../ee/recall-ledger.js");
         alignEE();
+        const derivation =
+          verdict === "noise" ? deriveFeedbackReason(input?.reason, sessionRecallLedger.find(id, collection)) : null;
+        const reason = derivation?.reason ?? (verdict === "noise" ? undefined : input?.reason);
+        if (verdict === "noise" && !reason) {
+          return errLine(
+            "reason_required",
+            "the host found no scope mismatch for this hint (its stored scope is unknown or matches this session's project/language); pass reason stale_rule (outdated API/version) or wrong_task",
+          );
+        }
         const result = await feedbackEE(id, collection, verdict, reason, eeContext.feedbackScope(id, collection));
         // A queued result (brain unreachable → durably enqueued) counts as success:
         // the agent has discharged its rating, so clear the ledger regardless. This
@@ -187,6 +200,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
           id: clearedId,
           verdict: result.verdict,
           ...(result.reason ? { reason: result.reason } : {}),
+          ...(derivation?.derived ? { reasonSource: "host", basis: derivation.basis } : {}),
           ...(result.queued ? { queued: true } : {}),
           pendingRemaining: sessionRecallLedger.pendingCount(),
         });
@@ -199,29 +213,16 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
 
   tools.ee_write = dynamicTool({
     description:
-      "Save a NEW lesson to the Experience Engine brain so you and future sessions recall it. Call this the MOMENT " +
-      "you hit a mistake / error / dead-end and find the working fix: record the pitfall AND the fix in one concise, " +
-      "generalizable lesson (1-3 sentences — what to do or avoid next time, NOT a play-by-play of this turn). The " +
-      "lesson is embedded immediately and becomes recallable via ee_query in THIS and future sessions. Use ee_query " +
-      "first when unsure if a lesson already exists. collection defaults to experience-behavioral (use " +
-      "experience-principles only for a broad, project-independent principle). Project lessons use the verified native recall scope; query first to resolve it, or pass an explicit project slug. Never derive scope from a folder basename.",
+      "Save a new lesson once you have found the fix for a mistake or dead-end: the pitfall and the fix in 1-3 " +
+      "generalizable sentences (not a log of this turn). Recallable at once via ee_query. Project scope is taken " +
+      "from this task's verified recall scope; experience-principles is for project-independent principles.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        lesson: {
-          type: "string",
-          description: "The lesson: the mistake/pitfall AND the fix, concise and generalizable.",
-        },
-        title: { type: "string", description: "Optional short title (<=120 chars)." },
-        project: {
-          type: "string",
-          description: "Optional explicit concrete EE project slug; otherwise reuse this task's verified recall scope",
-        },
-        collection: {
-          type: "string",
-          enum: ["experience-behavioral", "experience-principles"],
-          description: "Target tier; default experience-behavioral.",
-        },
+        lesson: { type: "string" },
+        title: { type: "string", description: "<=120 chars" },
+        project: { type: "string", description: "Concrete EE project slug" },
+        collection: { type: "string", enum: ["experience-behavioral", "experience-principles"] },
       },
       required: ["lesson"],
       additionalProperties: false,

@@ -28,6 +28,9 @@ export type InteractionEventType =
   | "final_answer_recovery"
   | "final_answer_failure"
   | "grounding_flag"
+  // Final-answer host checks (tool-engine finalize): unsupported test/build claim; done-claim vs open ledger.
+  | "verification_claim_flag"
+  | "completion_check"
   | "stall_rescue"
   | "stream_start"
   | "text_tool_resteer"

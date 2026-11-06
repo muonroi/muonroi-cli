@@ -324,7 +324,12 @@ export async function layer3EeInjection(ctx: PipelineContext): Promise<PipelineC
       // back-pressure cap, so passive debt stays bounded and drainable to zero.
       if (ledgerEnabled && sessionRecallLedger.pendingCount() < PIL_PASSIVE_LEDGER_CAP) {
         sessionRecallLedger.record(
-          rateable.map((p) => ({ id: String(p.id), collection: p.collection })),
+          rateable.map((p) => ({
+            id: String(p.id),
+            collection: p.collection,
+            ...(p.projectSlug !== undefined ? { projectSlug: p.projectSlug } : {}),
+            ...(p.scope !== undefined ? { scope: p.scope } : {}),
+          })),
           `passive-injection (unified): ${ctx.raw.slice(0, 80)}`,
         );
         ledgerRecorded = rateable.length;

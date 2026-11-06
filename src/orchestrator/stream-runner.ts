@@ -29,7 +29,7 @@
 
 import { createHash } from "node:crypto";
 import { appendFileSync, realpathSync } from "node:fs";
-import { isAbsolute, relative, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import { InvalidPromptError } from "@ai-sdk/provider";
 import { type ModelMessage, stepCountIs, streamText, type ToolSet } from "ai";
 import { breadcrumb } from "../council/crash-breadcrumb.js";
@@ -146,6 +146,7 @@ import { combineAbortSignals, firstLine, formatSubagentActivity } from "./tool-u
 import { pingTurnProgress, startPeriodicTurnProgressPing } from "./turn-progress.js";
 import { gateWorkerTools, requestWorkerApproval, WORKER_APPROVAL_LIMITS } from "./worker-approval.js";
 import { ASK_MODE_WORKER_AGENTS, workerCommandCapabilityError } from "./worker-dispatch-guard.js";
+import { applyWorkerGrounding, assessWorkerAnswer, WorkerEvidence } from "./worker-grounding.js";
 import {
   LENGTH_CONTINUATION_PROMPT,
   MAX_LENGTH_CONTINUATIONS,
@@ -261,6 +262,8 @@ export interface PreparedSubAgentCall {
   artifactFailure?: { error?: string };
   /** run_gate observations: out-of-scope changes detected (not prevented) during a gate. */
   gateObservations?: string[];
+  /** Delegated (non-review) workers: tool evidence the final answer is grounded against. */
+  workerEvidence?: WorkerEvidence;
 }
 
 /**
@@ -279,6 +282,33 @@ export function applyGateObservations(result: ToolResult, observations: readonly
     error: result.error ? `${result.error}; ${error}` : error,
     output: `${result.output ?? ""}${block}`,
   };
+}
+
+/**
+ * Ground a completed delegated worker's answer before it is saved for the
+ * orchestrator: flag test/build claims without a recorded run and counts /
+ * file:line refs absent from its tool output, and attach the host's record of
+ * the runs it saw. Failed/incomplete results and review jobs pass unchanged.
+ */
+export function groundWorkerResult(
+  result: ToolResult,
+  prepared: Pick<PreparedSubAgentCall, "workerEvidence" | "request">,
+): ToolResult {
+  const evidence = prepared.workerEvidence;
+  if (!evidence || !result.success) return result;
+  const jobPath = prepared.request.artifactJobPath ?? "";
+  const jobId = basename(jobPath).replace(/\.json$/, "") || "unknown";
+  const report =
+    process.env.MUONROI_DISABLE_GROUNDING_CHECK === "1"
+      ? null
+      : assessWorkerAnswer(result.output ?? "", evidence, prepared.request.prompt);
+  if (report)
+    logger.file("warn", "orchestrator", "Worker result carries unsupported claims", {
+      jobId,
+      verification: report.verification.length,
+      unverified: report.unverified.length,
+    });
+  return applyWorkerGrounding(result, report, evidence.verifications(), `worker ${jobId}`);
 }
 
 /**
@@ -958,6 +988,10 @@ export class StreamRunner {
       approve,
       signal,
     );
+    // Observe what the worker's tools actually returned (outermost wrapper, so
+    // only calls that really executed are recorded) to ground its final answer.
+    const workerEvidence = request.artifactJobPath && !request.reviewOf ? new WorkerEvidence() : undefined;
+    if (workerEvidence) childTools = workerEvidence.wrap(childTools);
 
     const childPrompt =
       isVerify && verifyPreparedRecipe
@@ -1024,6 +1058,7 @@ export class StreamRunner {
         reviewEvidence: request.reviewOf ? reviewEvidence : undefined,
         artifactFailure,
         gateObservations,
+        workerEvidence,
       },
     };
   }
@@ -2096,18 +2131,21 @@ export class StreamRunner {
         );
       }
       return applyGateObservations(
-        {
-          success: !streamResult.incomplete,
-          ...(streamResult.incomplete ? { error: streamResult.incomplete } : {}),
-          output: streamResult.output,
-          reviewEvidence: prepared.reviewEvidence,
-          task: {
-            agent: request.agent,
-            description: request.description,
-            summary: firstLine(streamResult.output),
-            activity: lastActivity,
+        groundWorkerResult(
+          {
+            success: !streamResult.incomplete,
+            ...(streamResult.incomplete ? { error: streamResult.incomplete } : {}),
+            output: streamResult.output,
+            reviewEvidence: prepared.reviewEvidence,
+            task: {
+              agent: request.agent,
+              description: request.description,
+              summary: firstLine(streamResult.output),
+              activity: lastActivity,
+            },
           },
-        },
+          prepared,
+        ),
         prepared.gateObservations,
       );
     } catch (err: unknown) {
