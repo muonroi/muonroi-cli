@@ -66,8 +66,3 @@ export function hasSemanticHarness(cwd: string): boolean {
   cache.set(start, found);
   return found;
 }
-
-/** Test helper — forget memoised answers. */
-export function _resetSemanticHarnessCache(): void {
-  cache.clear();
-}

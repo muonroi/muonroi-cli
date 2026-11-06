@@ -13,7 +13,7 @@
  * worker result carries up to its orchestrator. git-safety.ts keeps only FAILED
  * verification commands for the push gate, so it cannot answer "did a passing
  * run happen"; when a session-wide pass/fail ledger lands there, swap
- * `recordVerifications`/`recordedVerifications` for it — callers do not change.
+ * `recordVerifications` for it — callers do not change.
  *
  * Pure except for the process-scoped session ledger at the bottom. Designed for
  * LOW false positives: quoted/code text, questions, conditional, future,
@@ -479,10 +479,6 @@ export function recordVerifications(
   const bounded = list.slice(-MAX_LEDGER);
   ledger().set(sessionKey, bounded);
   return bounded;
-}
-
-export function recordedVerifications(sessionKey: string): RecordedVerification[] {
-  return [...(ledger().get(sessionKey) ?? [])];
 }
 
 /** Test helper. */
