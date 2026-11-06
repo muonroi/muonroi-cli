@@ -205,6 +205,22 @@ export function wrapToolsWithActivity(tools: ToolSet, owned: Set<number>): ToolS
     out[name] = {
       ...tool,
       execute: async (input: unknown, ctx: unknown) => {
+        // An aborted turn must not START another tool. The AI SDK keeps its
+        // internal step loop running after the consumer aborts and breaks out
+        // (it only hands the signal to doStream/execute; it checks neither), so
+        // a tool call of the NEXT step can still reach here after the
+        // failing-tool-loop guard, a stall or a user cancel aborted the turn —
+        // ci-matrix run 42131417821 (ubuntu+mac): the failure-loop worker's
+        // tool ran a 9th time 50ms after run() had returned at N=8.
+        const signal = (ctx as { abortSignal?: AbortSignal } | undefined)?.abortSignal;
+        if (signal?.aborted) {
+          const reason = signal.reason instanceof Error ? signal.reason.message : String(signal.reason);
+          logger.file("warn", "orchestrator", "Worker tool call refused: the turn was already aborted", {
+            tool: name,
+            reason,
+          });
+          throw new Error(`tool_refused_turn_aborted: ${name} was not run because the turn was aborted (${reason}).`);
+        }
         const declared = (input as { timeout?: unknown } | undefined)?.timeout;
         const id = beginToolActivity(typeof declared === "number" ? declared : undefined);
         owned.add(id);

@@ -143,4 +143,25 @@ describe("wrapToolsWithActivity", () => {
     await exec({ timeout: 1_000 }, {});
     expect(liveLater).toBe(false);
   });
+
+  it("never starts a tool whose turn was already aborted (no side effects after the abort)", async () => {
+    const owned = new Set<number>();
+    let ran = 0;
+    const tools = {
+      read_file: { description: "read", inputSchema: {}, execute: async () => ++ran },
+    } as unknown as ToolSet;
+    const exec = (
+      wrapToolsWithActivity(tools, owned).read_file as unknown as {
+        execute: (i: unknown, c: unknown) => Promise<unknown>;
+      }
+    ).execute;
+    const controller = new AbortController();
+    await expect(exec({}, { abortSignal: controller.signal })).resolves.toBe(1);
+    controller.abort(new DOMException("tool-failure-loop", "AbortError"));
+    await expect(exec({}, { abortSignal: controller.signal })).rejects.toThrow(
+      /tool_refused_turn_aborted: read_file .*tool-failure-loop/,
+    );
+    expect(ran).toBe(1);
+    expect(owned.size).toBe(0);
+  });
 });

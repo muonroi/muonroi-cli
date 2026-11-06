@@ -5,7 +5,16 @@
 // tests/harness/cost-leak-{f1,g1,b3,b4,c3}.spec.ts — those exercise real
 // streamText with MockLanguageModelV3.
 
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { APICallError } from "@ai-sdk/provider";
@@ -32,7 +41,13 @@ import type { TaskRequest, ToolResult } from "../../types/index";
 import { logger } from "../../utils/logger.js";
 import * as settings from "../../utils/settings.js";
 import type { CrossTurnDedup } from "../cross-turn-dedup.js";
-import { completeDelegation, loadDelegation, type StoredDelegation, saveDelegationToolResult } from "../delegations.js";
+import {
+  completeDelegation,
+  loadDelegation,
+  readReviewArtifact,
+  type StoredDelegation,
+  saveDelegationToolResult,
+} from "../delegations.js";
 import type { ReadPathBudget } from "../read-path-budget.js";
 import { prepareSubAgentPromptMessages, StreamRunner, type StreamRunnerDeps } from "../stream-runner.js";
 import { FOLDED_SYSTEM_PREFIX } from "../system-message-fold.js";
@@ -583,6 +598,69 @@ describe("StreamRunner provider errors (steady-copper-badger)", () => {
       handle.uninstall();
       if (prepared?.kind === "prepared") await prepared.prepared.childBash.cleanup();
       rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+    }
+  });
+
+  // The same read through an ANCESTOR alias of the delegation directory — the shape
+  // of macOS /var -> /private/var and the windows runner's 8.3 TEMP (RUNNER~1),
+  // reproduced on every platform with a directory link. The artifact file itself
+  // being a link must still be refused.
+  it("reads a peer artifact through an aliased ancestor directory but refuses a linked artifact file", async () => {
+    const realHome = mkdtempSync(join(tmpdir(), "peer-artifact-alias-"));
+    const home = `${realHome}-alias`;
+    symlinkSync(realHome, home, process.platform === "win32" ? "junction" : "dir");
+    try {
+      const cwd = join(home, "workspace");
+      mkdirSync(cwd);
+      const targetPath = join(home, "implementation.json"),
+        reviewPath = join(home, "reviewer.json");
+      const base = {
+        agent: "general",
+        kind: "task",
+        description: "Recorded runtime output",
+        prompt: "p",
+        cwd,
+        model: getTestModels().fast,
+        sandboxMode: "off",
+        maxToolRounds: 4,
+        maxTokens: 1000,
+        status: "running",
+        startedAt: new Date().toISOString(),
+        parentSessionId: "fixture-main",
+      };
+      writeFileSync(
+        targetPath,
+        JSON.stringify({ ...base, id: "implementation", outputPath: join(home, "implementation.md") }),
+      );
+      await saveDelegationToolResult(targetPath, "peer-docs-call", "mcp_docs__search", { q: 1 }, { title: "ALIASED" });
+      await completeDelegation(targetPath, "done");
+      const target = await loadDelegation(targetPath);
+      const binding = { jobId: target.id, resultVersion: target.resultVersion! };
+      writeFileSync(
+        reviewPath,
+        JSON.stringify({
+          ...base,
+          id: "reviewer",
+          agent: "verify",
+          reviewOf: binding,
+          outputPath: join(home, "reviewer.md"),
+          hostReview: { contextId: "fixture-review-context", sourceFingerprint: "fixture-source" },
+        }),
+      );
+      const read = await readReviewArtifact(reviewPath, binding, "peer-docs-call");
+      expect(read.output).toContain("ALIASED");
+      expect(read.success).toBe(true);
+
+      const file = join(targetPath.replace(/\.json$/, ".tools"), target.toolArtifacts![0]!.fileName);
+      const elsewhere = join(realHome, "elsewhere.json");
+      renameSync(file, elsewhere);
+      symlinkSync(elsewhere, file, "file");
+      const linked = await readReviewArtifact(reviewPath, binding, "peer-docs-call");
+      expect(linked.success).toBe(false);
+      expect(linked.output).toContain("Linked artifact path refused.");
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+      rmSync(realHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     }
   });
 

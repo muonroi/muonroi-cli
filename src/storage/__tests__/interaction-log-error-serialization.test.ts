@@ -5,7 +5,7 @@
  * non-enumerable on a real Error, so a raw Error nested in `data` used to
  * persist as `{}`, discarding the cause from a DB forensics query.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const runMock = vi.fn();
 const prepareMock = vi.fn(() => ({ run: runMock }));
@@ -17,9 +17,20 @@ vi.mock("../db.js", () => ({
 import { logInteraction } from "../interaction-log.js";
 
 describe("logInteraction — error serialization", () => {
+  let randomSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
     runMock.mockClear();
     prepareMock.mockClear();
+    // logInteraction runs a retention DELETE after ~1 in 200 inserts
+    // (maybePruneOld: Math.random() < 1/200), a second `.run` on the same mock.
+    // Unpinned, that made "called 1 times" fail at random (ci-matrix run
+    // 42131417821, macos: "expected vi.fn() to be called 1 times, but got 2
+    // times"). These tests are about the INSERT's serialization, not the prune.
+    randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+  });
+
+  afterEach(() => {
+    randomSpy.mockRestore();
   });
 
   it("persists an Error nested in data.error with message + stack, not '{}'", () => {

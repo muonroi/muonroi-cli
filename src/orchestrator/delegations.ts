@@ -1499,7 +1499,17 @@ async function readStoredToolArtifact(
     throw new Error("Use offset>=0 and maxChars=256..24000.");
   const directory = toolArtifactDir(jobPath);
   const file = path.join(directory, entry.fileName);
-  if (path.resolve(await fs.realpath(file)) !== path.resolve(file) || (await fs.lstat(directory)).isSymbolicLink())
+  // The artifact directory and file must not be links, and the file must really
+  // live in that directory. Compare against the DIRECTORY's real path, not the
+  // lexical one: an ancestor alias the host did not create (macOS /var ->
+  // /private/var, a Windows 8.3 TEMP such as C:\Users\RUNNER~1) made realpath
+  // differ from the lexical path and refused every legitimate read (ci-matrix
+  // run 42131417821, mac+win: "artifact_refused: Error: Linked artifact path refused.").
+  if (
+    (await fs.lstat(directory)).isSymbolicLink() ||
+    (await fs.lstat(file)).isSymbolicLink() ||
+    (await fs.realpath(file)) !== path.join(await fs.realpath(directory), entry.fileName)
+  )
     throw new Error("Linked artifact path refused.");
   const body = await fs.readFile(file, "utf8");
   if (Buffer.byteLength(body) !== entry.bytes || resultVersion(body) !== entry.digest)

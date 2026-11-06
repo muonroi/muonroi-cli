@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -125,6 +125,32 @@ describe("run_gate detective control (real temp git repo)", () => {
     expect(out).toContain("scope check: 1 changed path(s), 0 outside writeScope.");
     expect(violations).toEqual([]);
   });
+
+  // 8.3 short aliases exist only on Windows filesystems (the GitHub windows runner's
+  // TEMP is C:\Users\RUNNER~1\...), so there is nothing to alias elsewhere.
+  it.runIf(process.platform === "win32")(
+    "classifies in-scope changes as in scope when the worker cwd is an 8.3 short alias",
+    async () => {
+      const probe = spawnSync("cmd", ["/d", "/c", `for %I in ("${root}") do @echo %~sI`], {
+        encoding: "utf8",
+        windowsVerbatimArguments: true,
+      });
+      expect(probe.status, probe.stderr).toBe(0);
+      const short = probe.stdout.trim();
+      // The volume may have 8.3 generation disabled; then `short === root` and this is the plain case.
+      const command = script("in-scope-short.js", `require("fs").writeFileSync("src/generated.txt", "ok");`);
+      commitAll();
+      const outcome = await runScopedGate({
+        gate: { id: "build-1", kind: "build", command },
+        cwd: short,
+        timeoutMs: 15_000,
+        currentScope: async () => new WorkerWriteScope(short, ["src/"]),
+      });
+      expect(outcome.outOfScopeChanges).toEqual([]);
+      expect(outcome.inScopeChanges).toEqual(["src/generated.txt"]);
+      expect(outcome.success).toBe(true);
+    },
+  );
 
   it("fails with the exact out-of-scope paths (new untracked + already-dirty tracked file), reported to main", async () => {
     // Reproduces the escape shape: a project-controlled script writes outside the scope.
