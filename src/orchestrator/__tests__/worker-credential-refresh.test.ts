@@ -87,7 +87,14 @@ describe("worker auth after provider credentials change", () => {
       return { success: true, output: "captured" };
     });
     const result = await (agent as any).runDelegation(
-      { agent: "general", modelId, description: "Credential probe", prompt: "No tools", background: true },
+      {
+        agent: "general",
+        modelId,
+        description: "Credential probe",
+        prompt: "No tools",
+        background: true,
+        writeScope: [],
+      },
       undefined,
       true,
     );
@@ -104,7 +111,14 @@ describe("worker auth after provider credentials change", () => {
       return { success: true, output: "captured" };
     });
     await (agent as any).runDelegation(
-      { agent: "general", modelId, description: "Explicit credential", prompt: "No tools", background: true },
+      {
+        agent: "general",
+        modelId,
+        description: "Explicit credential",
+        prompt: "No tools",
+        background: true,
+        writeScope: [],
+      },
       undefined,
       true,
     );
@@ -120,7 +134,14 @@ describe("worker auth after provider credentials change", () => {
       return { success: true, output: "captured" };
     });
     await (agent as any).runDelegation(
-      { agent: "general", modelId, description: "Other provider", prompt: "No tools", background: true },
+      {
+        agent: "general",
+        modelId,
+        description: "Other provider",
+        prompt: "No tools",
+        background: true,
+        writeScope: [],
+      },
       undefined,
       true,
     );

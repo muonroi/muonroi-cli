@@ -113,6 +113,9 @@ describe("worker recovery TUI: transient 503 retry + output-limit continuation",
             prompt: "read the notes file and report what it says",
             modelId: "deepseek-v4-flash",
             background: false,
+            // Unscoped shell-capable worker: an explicit choice, refused when omitted
+            // (workerWriteScopeRequiredError, src/orchestrator/orchestration-policy.ts).
+            sharedExecution: true,
           }),
           textRound("all done", "stop"),
         ],

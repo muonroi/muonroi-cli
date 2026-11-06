@@ -37,6 +37,7 @@ import { recordArtifact } from "../ee/artifact-cache.js";
 import { getDefaultEEClient } from "../ee/intercept.js";
 import { acquireMcpTools } from "../mcp/client-pool";
 import { mcpToolPrefix } from "../mcp/runtime.js";
+import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { normalizeModelId } from "../models/registry.js";
 import {
   cheapModelShellLine,
@@ -1282,6 +1283,7 @@ export class StreamRunner {
     // MUONROI_SUBAGENT_STEP_METER=0 (default on, fail-open, one tiny row/step).
     let subStepIndex = 0;
     const stepMeterEnabled = isSubAgentStepMeterEnabled();
+    const selfVerifyNotices: string[] = [];
 
     const result = streamText({
       model: childModel,
@@ -1309,6 +1311,14 @@ export class StreamRunner {
         const responseCountAtStep = Math.max(0, messages.length - subMessagesForCall.length);
         if (prepared.request.artifactJobPath)
           messages = await injectOwnerMessages(prepared.request.artifactJobPath, messages);
+        // Self-verify completion notices (selfverify_start runs in this process):
+        // carried on every later step like owner messages, so no polling.
+        selfVerifyNotices.push(...getSelfVerifyJobManager().consumeCompletionNotices());
+        if (selfVerifyNotices.length)
+          messages = [
+            ...messages,
+            ...selfVerifyNotices.map((notice) => ({ role: "user" as const, content: `[host-notice] ${notice}` })),
+          ];
         taskContext.alignCwd(prepared.childBash.getCwd());
         const taskBrief = messages.find((m) => m.role === "user");
         taskContext.working.setProtection({ pinned: taskBrief ? [taskBrief] : [] });

@@ -51,6 +51,7 @@ import {
   pendingQuestion,
 } from "./delegation-mailbox.js";
 import { beginBoundedWorkerWait, endBoundedWorkerWait } from "./interactive-pause.js";
+import { DELEGATION_ID_WORDS } from "./internal-ids.js";
 import { workerMcpGrantError } from "./orchestration-policy.js";
 import {
   assertPlanRevalidationEvidence,
@@ -77,11 +78,7 @@ import {
 } from "./worker-dispatch-guard.js";
 import { failureRecoveryGuidance, isMutationTool, workerFailureRecovery } from "./worker-failure-recovery.js";
 
-const ID_ADJECTIVES = ["brisk", "calm", "clever", "eager", "gentle", "keen", "lively", "nimble", "quiet", "steady"];
-
-const ID_COLORS = ["amber", "blue", "copper", "emerald", "indigo", "ivory", "silver", "teal", "violet", "white"];
-
-const ID_ANIMALS = ["badger", "falcon", "fox", "heron", "lynx", "otter", "owl", "panda", "sparrow", "wolf"];
+const { adjectives: ID_ADJECTIVES, colors: ID_COLORS, animals: ID_ANIMALS } = DELEGATION_ID_WORDS;
 
 export interface StoredDelegation {
   councilTrace?: import("../council/types.js").CouncilMemoryRecord;
@@ -203,7 +200,75 @@ interface StartDelegationOptions {
   workerAuthMode?: import("../providers/subscription-fallback.js").ProviderAuthMode;
 }
 
+/**
+ * A saved result whose COMPLETE body reached main: inline in a completion
+ * notice (`via: "notice"`, sequenced by consumption order) or as a
+ * delegation_read that returned it to its end (`via: "read"`).
+ */
+interface FullDelivery {
+  id: string;
+  resultVersion: string;
+  via: "notice" | "read";
+  seq: number;
+}
+
 export class DelegationManager {
+  /**
+   * Full deliveries waiting for a model turn to process them. The ACK exists to
+   * keep unprocessed results out of the working-context archive
+   * (working-context.ts outstanding-job protection and checkpoint replacement);
+   * a result the host delivered whole and a completed model turn read IS
+   * processed, so the host ACKs it ({@link acknowledgeProcessed}) instead of
+   * spending a model step on delegation_ack (147 calls in 4edc02516a92).
+   */
+  private fullDeliveries = new Map<string, FullDelivery>();
+  private deliverySeq = 0;
+
+  /** Watermark: notices consumed at or before this sequence were in a turn's starting prompt. */
+  currentDeliverySeq(): number {
+    return this.deliverySeq;
+  }
+
+  private noteFullDelivery(id: string, resultVersion: string, via: FullDelivery["via"]): void {
+    if (process.env.MUONROI_BACKGROUND_CHILD === "1") return;
+    this.fullDeliveries.set(`${id}\n${resultVersion}`, { id, resultVersion, via, seq: ++this.deliverySeq });
+  }
+
+  /**
+   * ACK every full delivery a completed model turn processed: notices consumed
+   * before that turn started (`visibleNoticeSeq`), and delegation_read results
+   * the turn's model saw (`readResultTexts`: tool-result texts followed by a
+   * later assistant step). Returns the acknowledged jobIds. Never throws.
+   */
+  async acknowledgeProcessed(visibleNoticeSeq: number, readResultTexts: readonly string[]): Promise<string[]> {
+    const acked: string[] = [];
+    for (const [key, entry] of [...this.fullDeliveries]) {
+      const seen =
+        entry.via === "notice"
+          ? entry.seq <= visibleNoticeSeq
+          : readResultTexts.some((text) => text.includes(`jobId=${entry.id}\nresultVersion=${entry.resultVersion}\n`));
+      if (!seen) continue;
+      this.fullDeliveries.delete(key);
+      try {
+        const result = await this.acknowledge(entry.id, entry.resultVersion);
+        if (result.success) acked.push(entry.id);
+        else
+          logger.file("info", "orchestrator", "Auto-ACK skipped: result changed or not delivered to this owner", {
+            id: entry.id,
+            via: entry.via,
+            output: result.output,
+          });
+      } catch (err) {
+        logger.warn("orchestrator", "Auto-ACK of a processed delegation result failed", {
+          id: entry.id,
+          via: entry.via,
+          error: String(err),
+        });
+      }
+    }
+    return acked;
+  }
+
   async setPermissionMode(mode: import("../utils/permission-mode.js").PermissionMode): Promise<number> {
     let updated = 0;
     for (const jobPath of await this.jobPaths())
@@ -800,8 +865,13 @@ export class DelegationManager {
       });
   }
 
-  async read(id: string, deliverToOwner = true): Promise<string> {
-    return (await this.readResult(id, deliverToOwner)).output ?? "";
+  /**
+   * `via: "notice"` marks a delivery that reached main's context outside a tool
+   * result (a helper receipt system message): it counts as processed after the
+   * next model turn that starts with it, like an inline completion notice.
+   */
+  async read(id: string, deliverToOwner = true, via: FullDelivery["via"] = "read"): Promise<string> {
+    return (await this.readResult(id, deliverToOwner, undefined, via)).output ?? "";
   }
 
   /** Host I/O wait for headless foreground tools; never asks the model to poll. */
@@ -905,6 +975,7 @@ export class DelegationManager {
     id: string,
     deliverToOwner = true,
     page?: { offset?: number; maxChars?: number },
+    deliveryVia: FullDelivery["via"] = "read",
   ): Promise<ToolResult> {
     const record = await this.getById(id);
     if (!record) {
@@ -914,9 +985,7 @@ export class DelegationManager {
       };
     }
 
-    if (record.status === "running") {
-      return { success: true, output: `Delegation "${id}" is still running. ${BACKGROUND_WAIT_GUIDANCE}` };
-    }
+    if (record.status === "running") return runningRefusal(id);
 
     try {
       const jobPath = await this.jobPath(id);
@@ -961,13 +1030,17 @@ export class DelegationManager {
           `Delivery: ${delivered ? "delivered" : "pending"}`,
           `Acknowledgement: ${acknowledged ? "acknowledged" : "pending"}`,
           `Acceptance: ${accepted ? "accepted" : current.acceptance ? "stale-source-or-evidence" : "unverified"}`,
-          ...(acknowledged
+          ...(acknowledged || deliverToOwner
             ? []
             : [
-                `Main: after processing this result, call delegation_ack(${JSON.stringify({ jobId: current.id, resultVersion: current.resultVersion })}). Reading does not acknowledge the result; ACK records handling, not verification or acceptance. Helpers must forward this reference to main and must not ACK on main's behalf.`,
+                "Helper: forward this jobId/resultVersion to main; main's host acknowledges it once a main turn processes the result.",
               ]),
         ].join("\n");
         const body = page ? pageResultText(current.id, output, page.offset, page.maxChars) : output;
+        // The whole result (or its last page) is now in a tool result for main:
+        // the host ACKs it once a model turn has read it (acknowledgeProcessed).
+        if (deliverToOwner && !acknowledged && (!page || pageReachesEnd(output, page.offset, page.maxChars)))
+          this.noteFullDelivery(current.id, current.resultVersion, deliveryVia);
         return { success: true, output: `${resultReference(current)}\n${handling}\n\n${body}` };
       });
     } catch (err) {
@@ -993,8 +1066,7 @@ export class DelegationManager {
       const record = await this.getById(id);
       if (!record || record.parentSessionId !== this.getOwnerId())
         throw new Error("Artifact job is not owned by this session.");
-      if (record.status === "running")
-        return { success: true, output: `jobId=${id} is still running. ${BACKGROUND_WAIT_GUIDANCE}` };
+      if (record.status === "running") return runningRefusal(id);
       if (toolCallId.startsWith("report:")) {
         if (!version || version !== record.resultVersion)
           throw new Error("Council dossier requires the exact resultVersion.");
@@ -1269,13 +1341,16 @@ export class DelegationManager {
           }
           if (record.deliveredVersion === record.resultVersion || record.acknowledgedVersion === record.resultVersion)
             return;
-          const notification = { id: record.id, message: formatNotification(record, output) };
+          const inlineChars = inlineResultChars();
+          const notification = { id: record.id, message: formatNotification(record, output, inlineChars) };
           // A failed owner transcript write must leave this version pending.
           await persistDelivery?.(notification);
           record.notifiedAt = new Date().toISOString();
           record.deliveredAt = record.notifiedAt;
           record.deliveredVersion = record.resultVersion;
           await writeRecord(jobPath, record);
+          if (persistDelivery && inlineChars > 0 && inlinesResult(record) && output.length <= inlineChars)
+            this.noteFullDelivery(record.id, record.resultVersion, "notice");
           notifications.push(notification);
         });
       } catch (err) {
@@ -2061,6 +2136,21 @@ function inlinesResult(record: StoredDelegation): boolean {
  * One page of a saved result plus how to continue. `delegation_read` without a
  * toolCallId used to ignore offset/maxChars and always return everything.
  */
+/** Answer to any read of a job that has not finished: no content, no polling. */
+function runningRefusal(id: string): ToolResult {
+  return {
+    success: true,
+    output: `delegation_running: jobId=${id} is still running — you will be woken with its result on completion. No content is available yet; do not poll. If nothing else is pending, end the turn.`,
+  };
+}
+
+/** True when a page starting at `offset` returns the result through its last char. */
+function pageReachesEnd(output: string, offset = 0, maxChars?: number): boolean {
+  if (maxChars === undefined) return true;
+  const start = Math.min(Math.max(0, Math.floor(offset)), output.length);
+  return start + Math.max(1, Math.floor(maxChars)) >= output.length;
+}
+
 export function pageResultText(id: string, output: string, offset = 0, maxChars?: number): string {
   const start = Math.min(Math.max(0, Math.floor(offset)), output.length);
   const limit = maxChars === undefined ? output.length : Math.max(1, Math.floor(maxChars));
@@ -2130,9 +2220,7 @@ function formatNotification(record: StoredDelegation, output?: string, inlineCha
     lines.push(
       "This is native Flow plan advice; Flow state has not been updated. Main must read report:findings.json and inspect the dossier evidence before requesting fixes. Then call flow_plan_review(action=complete, jobId, resultVersion, assessment, decisions) with accept/reject/resolved/defer for each current/prior open finding and supporting evidence. Stale plan/context is refused. Do not repeat action=start to collect a result.",
     );
-  lines.push(
-    "After processing this result, call delegation_ack with its jobId and resultVersion. Delivery is not verification or acceptance of the worker's claims.",
-  );
+  lines.push("Delivery is not verification or acceptance of the worker's claims.");
   return lines.join("\n");
 }
 

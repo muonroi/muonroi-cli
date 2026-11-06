@@ -398,7 +398,6 @@ function createTools(
       signal?: AbortSignal,
       writeScope?: string[],
     ) => Promise<ToolResult>;
-    acknowledgeDelegation?: (id: string, resultVersion: string) => Promise<ToolResult>;
     acceptDelegation?: (input: import("../types/index.js").DelegationAcceptanceInput) => Promise<ToolResult>;
     startCouncil?: (input: {
       topic: string;
@@ -425,7 +424,6 @@ function createTools(
     runDelegation: _opts?.runDelegation,
     readDelegation: _opts?.readDelegation,
     sendDelegation: _opts?.sendDelegation,
-    acknowledgeDelegation: _opts?.acknowledgeDelegation,
     acceptDelegation: _opts?.acceptDelegation,
     startCouncil: _opts?.startCouncil,
     startPlanReview: _opts?.startPlanReview,
@@ -1684,7 +1682,11 @@ export class Agent {
         }
       };
       const delegationNotices = await this.delegations.consumeNotifications(persistNotification);
-      const processNotices = (await this.bash.consumeExitNotifications()).map((message) => ({ message }));
+      const { getSelfVerifyJobManager } = await import("../mcp/self-verify-runner.js");
+      const processNotices = [
+        ...(await this.bash.consumeExitNotifications()),
+        ...getSelfVerifyJobManager().consumeCompletionNotices(),
+      ].map((message) => ({ message }));
       const notifications = [...delegationNotices, ...processNotices];
       for (const notification of notifications) {
         if (!("id" in notification)) persistNotification(notification);
@@ -2364,22 +2366,51 @@ export class Agent {
     return { ...next, output: `${sent.output}\n\n${next.output}` };
   }
 
-  private async acknowledgeDelegation(id: string, resultVersion: string): Promise<ToolResult> {
+  /** Delivery watermark at the start of the current model turn (see consumeNotificationsForTurn). */
+  private _turnVisibleDeliverySeq = 0;
+
+  /**
+   * Pre-stream notification consume for a model turn. Every notice appended
+   * here is in this turn's starting prompt, so it is "read" once the turn
+   * completes. Mid-turn consumes (waitForDelegation) do not move the watermark:
+   * the running stream never sees deps.messages (tool-engine onStepFinish note).
+   */
+  private async consumeNotificationsForTurn(): Promise<string[]> {
+    const notices = await this.consumeBackgroundNotifications();
+    this._turnVisibleDeliverySeq = this.delegations.currentDeliverySeq();
+    return notices;
+  }
+
+  /**
+   * Host ACK of results a completed model turn processed (replaces the
+   * model-called delegation_ack): full inline notices from this turn's prompt,
+   * and full delegation_read results followed by a later assistant step.
+   */
+  private acknowledgeProcessedResults(newMessages: readonly ModelMessage[]): void {
     if (
       this.executionRole !== "orchestrator" ||
+      process.env.MUONROI_BACKGROUND_CHILD === "1" ||
       (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
-    ) {
-      return { success: false, output: "Only the owning main session may acknowledge a result after processing it." };
-    }
-    try {
-      return await this.delegations.acknowledge(id, resultVersion);
-    } catch (err) {
-      logger.warn("orchestrator", "Failed to acknowledge delegation result", { id, error: String(err) });
-      return {
-        success: false,
-        output: `Failed to acknowledge delegation result: ${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
+    )
+      return;
+    const lastAssistant = newMessages.map((m) => m.role).lastIndexOf("assistant");
+    const readTexts: string[] = [];
+    newMessages.slice(0, Math.max(0, lastAssistant)).forEach((message) => {
+      if (message.role !== "tool" || !Array.isArray(message.content)) return;
+      for (const part of message.content) {
+        if (part.type !== "tool-result" || part.toolName !== "delegation_read") continue;
+        const output = part.output as { type?: string; value?: unknown } | undefined;
+        readTexts.push(typeof output?.value === "string" ? output.value : JSON.stringify(output?.value ?? ""));
+      }
+    });
+    void this.delegations
+      .acknowledgeProcessed(this._turnVisibleDeliverySeq, readTexts)
+      .then((acked) => {
+        if (acked.length) logger.file("info", "orchestrator", "Host-acknowledged processed results", { acked });
+      })
+      .catch((err) => {
+        logger.warn("orchestrator", "Host acknowledgement of processed results failed", { error: String(err) });
+      });
   }
 
   private async acceptDelegation(input: import("../types/index.js").DelegationAcceptanceInput): Promise<ToolResult> {
@@ -4407,7 +4438,6 @@ export class Agent {
       readDelegation: (id, artifact) => self.readDelegation(id, artifact),
       sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
         self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
-      acknowledgeDelegation: (id, version) => self.acknowledgeDelegation(id, version),
       acceptDelegation: (input) => self.acceptDelegation(input),
       startCouncil: (input) => self.startCouncil(input),
       startPlanReview: (input, signal) => self.startPlanReview(input, signal),
@@ -4416,7 +4446,10 @@ export class Agent {
       killDelegation: (id) => self.killDelegation(id),
       executeBatchToolCall: (tools, toolCall, messages, signal) =>
         self.executeBatchToolCall(tools, toolCall, messages, signal),
-      appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
+      appendCompletedTurn: (user, asst) => {
+        self.appendCompletedTurn(user, asst);
+        self.acknowledgeProcessedResults(asst);
+      },
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
     };
@@ -5193,7 +5226,7 @@ export class Agent {
                   )
                     continue;
                   const jobId = result.output.value.match(/^jobId=([^\r\n]+)/)?.[1];
-                  if (jobId) await this.delegations.read(jobId);
+                  if (jobId) await this.delegations.read(jobId, true, "notice");
                 }
               }
               logger.info("orchestrator", "Returned helper evidence to main for acceptance", {
@@ -5513,7 +5546,7 @@ export class Agent {
         self.fireHook(input as Parameters<Agent["fireHook"]>[0], signal) as ReturnType<
           MessageProcessorDeps["fireHook"]
         >,
-      consumeBackgroundNotifications: () => self.consumeBackgroundNotifications(),
+      consumeBackgroundNotifications: () => self.consumeNotificationsForTurn(),
       initOAuthProvider: () => self._initOAuthProvider(),
       buildRecentTurnsSummary: () => self._buildRecentTurnsSummary(),
       estimateProjectSize: () => self._estimateProjectSize(),
@@ -5528,7 +5561,6 @@ export class Agent {
       readDelegation: (id, artifact) => self.readDelegation(id, artifact),
       sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
         self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
-      acknowledgeDelegation: (id, version) => self.acknowledgeDelegation(id, version),
       acceptDelegation: (input) => self.acceptDelegation(input),
       startCouncil: (input) => self.startCouncil(input),
       startPlanReview: (input, signal) => self.startPlanReview(input, signal),
@@ -5537,7 +5569,10 @@ export class Agent {
       killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => self.steerDrain?.() ?? [],
       appendMidTurnMessages: (msgs) => self.appendMidTurnMessages(msgs),
-      appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
+      appendCompletedTurn: (user, asst) => {
+        self.appendCompletedTurn(user, asst);
+        self.acknowledgeProcessedResults(asst);
+      },
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
       askToolApproval: async (info, signal) => {

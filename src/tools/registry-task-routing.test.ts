@@ -84,18 +84,114 @@ describe("task executor compatibility", () => {
     }
   });
 
-  it("forwards an explicit handled-result acknowledgement without changing its version", async () => {
-    const acknowledgeDelegation = vi.fn(async () => ({ success: true, output: "acknowledged" }));
+  it("exposes no model-called delegation_ack: the host acknowledges processed results", async () => {
+    const fn = vi.fn(async () => ({ success: true, output: "" }));
     const bash = new BashTool(process.cwd());
     try {
-      const tools = createBuiltinTools(bash, "agent", { acknowledgeDelegation });
-      expect(
-        await tools.delegation_ack.execute!(
-          { jobId: "owned-worker", resultVersion: "version-from-result" },
+      const tools = createBuiltinTools(bash, "agent", { readDelegation: fn, executionRole: "orchestrator" });
+      expect(tools.delegation_ack).toBeUndefined();
+      expect(tools.delegation_read).toBeDefined();
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it("assembles the structured brief into the worker prompt and keeps a plain prompt working", async () => {
+    const runTask = vi.fn(async () => ({ success: true, output: "done" }));
+    const bash = new BashTool(process.cwd());
+    try {
+      const tools = createBuiltinTools(bash, "agent", { runTask });
+      const brief = {
+        role: "implementer",
+        scope: "src/a.ts",
+        input: "issue #1",
+        question: "fix the parser",
+        exclusions: "no refactors",
+        budget: "10 steps",
+        evidence: "file:line of the change",
+      };
+      await tools.task.execute!(
+        { agent: "general", description: "fix", brief, prompt: "keep tabs", writeScope: ["src/a.ts"] },
+        {} as never,
+      );
+      const prompt = (runTask.mock.calls[0] as unknown as [{ prompt: string }])[0].prompt;
+      expect(prompt).toContain(
+        "Role: implementer\nScope/workspace: src/a.ts\nInput: issue #1\nQuestion: fix the parser",
+      );
+      expect(prompt).toContain("Return evidence: file:line of the change\n\nAdditional instructions:\nkeep tabs");
+
+      await tools.task.execute!({ agent: "verify", description: "t", prompt: "plain prompt" }, {} as never);
+      expect((runTask.mock.calls[1] as unknown as [{ prompt: string }])[0].prompt).toBe("plain prompt");
+
+      const incomplete = await tools.task.execute!(
+        { agent: "general", description: "t", brief: { ...brief, budget: " " } },
+        {} as never,
+      );
+      expect(String(incomplete)).toMatch(/^worker_brief_incomplete: brief is missing budget/);
+      expect(runTask).toHaveBeenCalledTimes(2);
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it("builds task/delegate modelId as an enum of the supplied live worker inventory", async () => {
+    const fn = vi.fn(async () => ({ success: true, output: "" }));
+    const bash = new BashTool(process.cwd());
+    try {
+      const schemaOf = (tool: unknown) =>
+        (tool as { inputSchema: { jsonSchema: { properties: Record<string, Record<string, unknown>> } } }).inputSchema
+          .jsonSchema.properties;
+      const withIds = createBuiltinTools(bash, "agent", {
+        runTask: fn,
+        runDelegation: fn,
+        executionRole: "orchestrator",
+        workerModelIds: ["inventory-a", "inventory-b"],
+      });
+      expect(schemaOf(withIds.task).modelId!.enum).toEqual(["inventory-a", "inventory-b"]);
+      expect(schemaOf(withIds.delegate).modelId!.enum).toEqual(["inventory-a", "inventory-b"]);
+      const withoutIds = createBuiltinTools(bash, "agent", { runTask: fn, executionRole: "orchestrator" });
+      expect(schemaOf(withoutIds.task).modelId!.enum).toBeUndefined();
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it("routes a jobId or resultVersion passed to retrieve_tool_result to delegation_read", async () => {
+    const bash = new BashTool(process.cwd());
+    try {
+      const tools = createBuiltinTools(bash, "agent", {});
+      const job = String(await tools.retrieve_tool_result.execute!({ tool_call_id: "steady-teal-otter" }, {} as never));
+      expect(job).toMatch(/^ERROR id_kind_mismatch: "steady-teal-otter" is a delegation jobId/);
+      expect(job).toContain('delegation_read({id:"steady-teal-otter"})');
+      const version = String(await tools.retrieve_tool_result.execute!({ tool_call_id: "a".repeat(64) }, {} as never));
+      expect(version).toMatch(/is a resultVersion\/digest \(sha256\), not a tool_call_id/);
+    } finally {
+      await bash.cleanup();
+    }
+  });
+
+  it("refuses ask_user questions that expose internal coordination IDs", async () => {
+    const askUser = vi.fn(async () => "yes");
+    const bash = new BashTool(process.cwd());
+    try {
+      const tools = createBuiltinTools(bash, "agent", { askUser });
+      const refused = String(
+        await tools.ask_user.execute!({ question: "Should I re-run jobId calm-blue-fox?" }, {} as never),
+      );
+      expect(refused).toMatch(
+        /^ERROR: ask_user_refused: the question contains the internal identifier "calm-blue-fox"/,
+      );
+      const refusedField = String(
+        await tools.ask_user.execute!(
+          { question: "Which one?", options: [{ label: "the resultVersion of the review" }] },
           {} as never,
         ),
-      ).toBe("acknowledged");
-      expect(acknowledgeDelegation).toHaveBeenCalledWith("owned-worker", "version-from-result");
+      );
+      expect(refusedField).toContain('internal identifier "resultVersion"');
+      expect(askUser).not.toHaveBeenCalled();
+      expect(String(await tools.ask_user.execute!({ question: "Proceed with the parser fix?" }, {} as never))).toBe(
+        "yes",
+      );
     } finally {
       await bash.cleanup();
     }

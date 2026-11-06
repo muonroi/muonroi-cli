@@ -54,24 +54,68 @@ describe("durable delegation delivery", () => {
 
   const stored = (file: string) => JSON.parse(fs.readFileSync(file, "utf8"));
 
-  it("returns exact main ACK guidance after direct read without automatically acknowledging", async () => {
+  it("a full read is delivered but not ACKed until a model turn has processed it", async () => {
     const output = await manager.read("owned-worker");
     const record = stored(jobPath);
     expect(output).toContain("Execution: complete");
     expect(output).toContain("Delivery: delivered");
     expect(output).toContain("Acknowledgement: pending");
-    expect(output).toContain(
-      `delegation_ack(${JSON.stringify({ jobId: record.id, resultVersion: record.resultVersion })})`,
-    );
-    expect(output).toContain("after processing");
+    expect(output).not.toContain("delegation_ack(");
     expect(record.acknowledgedVersion).toBeUndefined();
     expect(record.deliveredVersion).toBe(record.resultVersion);
+
+    // A completed turn whose model never saw that tool result does not ACK it.
+    expect(await manager.acknowledgeProcessed(manager.currentDeliverySeq(), [])).toEqual([]);
+    expect(stored(jobPath).acknowledgedVersion).toBeUndefined();
+    // Seen (the tool-result text followed by a later assistant step) → host ACK.
+    expect(await manager.acknowledgeProcessed(0, [output])).toEqual(["owned-worker"]);
+    expect(stored(jobPath).acknowledgedVersion).toBe(record.resultVersion);
+    // One ACK per delivery: nothing left to process.
+    expect(await manager.acknowledgeProcessed(0, [output])).toEqual([]);
+  });
+
+  it("a partial page is not a processed result; the page reaching the end is", async () => {
+    const first = (await manager.readResult("owned-worker", true, { offset: 0, maxChars: 256 })).output!;
+    const record = stored(jobPath);
+    const total = fs.readFileSync(outputPath, "utf8").length;
+    if (total > 256) {
+      expect(await manager.acknowledgeProcessed(0, [first])).toEqual([]);
+      const last = (await manager.readResult("owned-worker", true, { offset: 256, maxChars: 24_000 })).output!;
+      expect(await manager.acknowledgeProcessed(0, [last])).toEqual(["owned-worker"]);
+    } else {
+      expect(await manager.acknowledgeProcessed(0, [first])).toEqual(["owned-worker"]);
+    }
+    expect(stored(jobPath).acknowledgedVersion).toBe(record.resultVersion);
+  });
+
+  it("a fully inline completion notice is ACKed after the next turn that started with it", async () => {
+    const notices = await manager.consumeNotifications(() => undefined);
+    expect(notices).toHaveLength(1);
+    expect(notices[0]!.message).toContain("Result (complete, inline below; no delegation_read needed):");
+    expect(notices[0]!.message).not.toContain("delegation_ack");
+    const watermark = manager.currentDeliverySeq();
+    // A turn that started before the notice was consumed did not see it.
+    expect(await manager.acknowledgeProcessed(watermark - 1, [])).toEqual([]);
+    expect(await manager.acknowledgeProcessed(watermark, [])).toEqual(["owned-worker"]);
+    expect(stored(jobPath).acknowledgedVersion).toBe(stored(jobPath).resultVersion);
+  });
+
+  it("refuses to return content for a running job", async () => {
+    const running = stored(jobPath);
+    running.status = "running";
+    running.pid = process.pid;
+    fs.writeFileSync(jobPath, JSON.stringify(running));
+    const result = await manager.readResult("owned-worker");
+    expect(result.output).toMatch(/^delegation_running: jobId=owned-worker is still running/);
+    expect(result.output).toContain("you will be woken with its result on completion");
+    expect(result.output).not.toContain("Verified fixture.ts:12");
   });
 
   it("makes helper observation distinct from owner delivery and ACK", async () => {
     const output = await manager.read("owned-worker", false);
     expect(output).toContain("Delivery: pending");
-    expect(output).toContain("Helpers must forward this reference to main");
+    expect(output).toContain("Helper: forward this jobId/resultVersion to main");
+    expect(await manager.acknowledgeProcessed(manager.currentDeliverySeq(), [output])).toEqual([]);
     expect(stored(jobPath).deliveredVersion).toBeUndefined();
     expect(stored(jobPath).acknowledgedVersion).toBeUndefined();
   });

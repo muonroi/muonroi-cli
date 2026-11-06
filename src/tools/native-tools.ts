@@ -25,6 +25,7 @@ import { isConcreteEEProject, NativeEEContext } from "../ee/native-context.js";
 import { LSP_TOOL_OPERATIONS, LspError } from "../lsp/types.js";
 import { getSelfVerifyJobManager } from "../mcp/self-verify-runner.js";
 import { SETUP_GUIDE_TEXT } from "../mcp/setup-guide-text.js";
+import { beginBoundedWorkerWait, endBoundedWorkerWait } from "../orchestrator/interactive-pause.js";
 import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
 import { integrationHealth } from "../utils/integration-health.js";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -63,6 +64,9 @@ export const NATIVE_MUONROI_TOOL_NAMES = [
   "selfverify_list",
   "selfverify_cancel",
 ] as const;
+
+/** Upper bound of the selfverify_result host wait (agentic runs take minutes). */
+const SELFVERIFY_RESULT_MAX_WAIT_MS = 600_000;
 
 const json = (data: unknown): string => JSON.stringify(data);
 const errLine = (error: string, message: string): string => `ERROR ${error}: ${message}`;
@@ -427,8 +431,8 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   // ── Self-QA harness: selfverify_* (shared JobManager, in-process) ──────────
   tools.selfverify_start = dynamicTool({
     description:
-      "Start a self-verify run (mode=tier1 heuristic, or mode=agentic LLM-driven). Returns {runId} immediately; " +
-      "poll selfverify_status, then selfverify_result.",
+      "Start a self-verify run (mode=tier1 heuristic, or mode=agentic LLM-driven). Returns {runId} immediately and runs in the background; " +
+      "a completion notice arrives at your next step when it finishes. Keep working meanwhile; when you need the report, call selfverify_result — it waits for completion itself. Do not poll selfverify_status.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -489,7 +493,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   });
 
   tools.selfverify_status = dynamicTool({
-    description: "Get status + log tail of a self-verify run.",
+    description: "Get status + log tail of a self-verify run (for diagnosis; completion is notified, do not poll).",
     inputSchema: jsonSchema({
       type: "object",
       properties: { runId: { type: "string" } },
@@ -498,6 +502,7 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
     execute: async (input: any) => {
       const job = getSelfVerifyJobManager().status(input?.runId);
       if (!job) return errLine("not_found", `runId ${input?.runId} not found`);
+      getSelfVerifyJobManager().markReported(job.runId);
       const summary =
         job.report && job.kind === "tier1" && "summary" in job.report
           ? job.report.summary
@@ -519,16 +524,36 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   });
 
   tools.selfverify_result = dynamicTool({
-    description: "Fetch the full report of a completed self-verify run.",
+    description:
+      "Full report of a self-verify run. If the run is still going, the host waits for it to finish (bounded by waitMs, default 10 min) — no polling needed.",
     inputSchema: jsonSchema({
       type: "object",
-      properties: { runId: { type: "string" } },
+      properties: {
+        runId: { type: "string" },
+        waitMs: { type: "integer", minimum: 0, maximum: SELFVERIFY_RESULT_MAX_WAIT_MS },
+      },
       required: ["runId"],
     }),
-    execute: async (input: any) => {
-      const job = getSelfVerifyJobManager().status(input?.runId);
+    execute: async (input: any, context) => {
+      const jm = getSelfVerifyJobManager();
+      let job = jm.status(input?.runId);
       if (!job) return errLine("not_found", `runId ${input?.runId} not found`);
-      if (job.status === "running") return errLine("still_running", "run not finished; poll selfverify_status first");
+      if (job.status === "running") {
+        const waitMs = Math.min(
+          SELFVERIFY_RESULT_MAX_WAIT_MS,
+          Number.isSafeInteger(input?.waitMs) && input.waitMs >= 0 ? input.waitMs : SELFVERIFY_RESULT_MAX_WAIT_MS,
+        );
+        // Host I/O wait: pauses the idle/stall watchdogs, keeps the hard turn deadline.
+        beginBoundedWorkerWait();
+        try {
+          job = (await jm.waitFor(job.runId, context?.abortSignal, waitMs)) ?? job;
+        } finally {
+          endBoundedWorkerWait();
+        }
+      }
+      if (job.status === "running")
+        return errLine("still_running", `run not finished after waiting; call selfverify_result again later`);
+      jm.markReported(job.runId);
       if (job.status === "error") return errLine("run_error", job.error ?? "unknown error");
       if (job.status === "cancelled") return errLine("cancelled", "run was cancelled");
       return json(job.report ?? {});

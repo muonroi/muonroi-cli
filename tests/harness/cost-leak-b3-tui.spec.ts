@@ -124,6 +124,9 @@ describe("B3 TUI: sub-agent compactor reduces cumulative prompt size", () => {
             prompt: "read the three big payload files and summarize them",
             modelId: "deepseek-v4-flash",
             background: false,
+            // Unscoped shell-capable worker: an explicit choice, refused when omitted
+            // (workerWriteScopeRequiredError, src/orchestrator/orchestration-policy.ts).
+            sharedExecution: true,
           }),
           // Orchestrator closes with a stop after the task tool returns.
           buildFinalTextRound("all done"),

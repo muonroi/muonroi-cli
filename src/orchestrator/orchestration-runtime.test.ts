@@ -102,7 +102,13 @@ describe("orchestrator runtime integration", () => {
       .spyOn(internal.delegations, "waitResult")
       .mockResolvedValue({ success: true, output: "jobId=durable-worker\nresultVersion=current\nverified output" });
     try {
-      const request = { agent: "general", modelId: low.id, description: "Scope", prompt: "Brief" };
+      const request = {
+        agent: "general",
+        modelId: low.id,
+        description: "Scope",
+        prompt: "Brief",
+        writeScope: ["src/"],
+      };
       expect((await internal.runTask(request)).output).toContain("resultVersion=current");
       expect(dispatch).toHaveBeenCalledWith(expect.objectContaining(request), undefined, true);
       expect(wait).toHaveBeenCalledWith("durable-worker", undefined);
@@ -172,7 +178,7 @@ describe("orchestrator runtime integration", () => {
     vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
     vi.spyOn(keychain, "getConfiguredProviders").mockResolvedValue([]);
     const chosen = MODELS.find((row) => row.provider && row.supportsClientTools !== false && row.contextWindow > 0)!;
-    const request = { agent: "general", description: "Bounded work", prompt: "Inspect assigned scope" };
+    const request = { agent: "general", description: "Bounded work", prompt: "Inspect assigned scope", writeScope: [] };
     await expect(validateWorkerSelection(request)).rejects.toThrow("worker_model_required");
     await expect(validateWorkerSelection({ ...request, modelId: chosen.id })).rejects.toThrow(
       "worker_provider_unconfigured",

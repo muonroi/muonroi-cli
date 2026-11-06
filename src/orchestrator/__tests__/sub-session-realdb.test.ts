@@ -100,7 +100,7 @@ let simulatedCdTo: string | null = null;
 let cancelHelper = false;
 let failHelper = false;
 let helperDelegationFixture: { id: string; jobPath: string; abortAfterRead: boolean } | null = null;
-let helperReadObservation: { deliveredVersion?: string; ackAllowed?: boolean } = {};
+let helperReadObservation: { deliveredVersion?: string; ackChannel?: boolean } = {};
 
 // Simulate a read-heavy turn: write intermediate clutter to the CHILD session
 // (real DB), and leave [.., final assistant, final tool] in the in-memory working
@@ -159,8 +159,11 @@ vi.mock("../message-processor.js", () => ({
         const fixture = helperDelegationFixture;
         const result = await this.deps.readDelegation(fixture.id);
         const record = JSON.parse(fs.readFileSync(fixture.jobPath, "utf8"));
-        const ack = await this.deps.acknowledgeDelegation?.(fixture.id, record.resultVersion);
-        helperReadObservation = { deliveredVersion: record.deliveredVersion, ackAllowed: ack?.success };
+        // No ACK channel exists for a helper (or main): the host ACKs processed results.
+        helperReadObservation = {
+          deliveredVersion: record.deliveredVersion,
+          ackChannel: typeof this.deps.acknowledgeDelegation === "function",
+        };
         const output = [
           {
             role: "assistant",
@@ -591,7 +594,7 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
       for await (const _ of agent.processMessage("Inspect the owned worker proof")) {
         /* drain */
       }
-      expect(helperReadObservation).toEqual({ deliveredVersion: undefined, ackAllowed: false });
+      expect(helperReadObservation).toEqual({ deliveredVersion: undefined, ackChannel: false });
       const saved = JSON.parse(fs.readFileSync(jobPath, "utf8"));
       expect(saved.acknowledgedVersion).toBeUndefined();
       if (abortAfterRead) {

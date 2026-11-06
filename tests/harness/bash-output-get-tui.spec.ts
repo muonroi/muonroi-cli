@@ -162,6 +162,9 @@ describe("Fix #2 TUI: bash_output_get serves cached stdout instead of re-running
             prompt: "Execute the generator script and find the MARKER-42 line in its cached output.",
             modelId: "deepseek-v4-flash",
             background: false,
+            // Unscoped shell-capable worker: an explicit choice, refused when omitted
+            // (workerWriteScopeRequiredError, src/orchestrator/orchestration-policy.ts).
+            sharedExecution: true,
           }),
           // Round 2: the worker finished; close the turn.
           buildFinalTextRound("done"),

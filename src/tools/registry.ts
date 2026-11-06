@@ -12,15 +12,18 @@ import { MCP_FULL_INPUT_SCHEMA } from "../mcp/full-schema.js";
 import type { AskUserAskInfo, AskUserOption } from "../orchestrator/ask-user.js";
 import { requestProactiveCompact } from "../orchestrator/compact-request.js";
 import { requestCouncilConvene } from "../orchestrator/council-request.js";
+import { findInternalId, nonToolCallIdKind, wrongIdKindPointer } from "../orchestrator/internal-ids.js";
 import {
   type ExecutionRole,
   filterExecutionTools,
+  workerModelIdSchema,
   workerModelInventory,
 } from "../orchestrator/orchestration-policy.js";
 import { carriesElidedArgsMarker } from "../orchestrator/subagent-compactor.js";
 import { TaskContext } from "../orchestrator/task-context.js";
 import { canonicalizeBashCommand } from "../orchestrator/tool-args-hash.js";
 import { isUnattendedTurn } from "../orchestrator/unattended-turn.js";
+import { assembleWorkerPrompt, WORKER_BRIEF_SCHEMA } from "../orchestrator/worker-brief.js";
 import {
   analyzeImageFromSource,
   askVisionProxy,
@@ -89,6 +92,8 @@ interface ToolRegistryOpts {
   getToolSet?: () => ToolSet;
   executionRole?: ExecutionRole;
   credentialedProvider?: import("../providers/types.js").ProviderId;
+  /** Live worker inventory ids (workerModelIds); task/delegate modelId becomes this enum. */
+  workerModelIds?: readonly string[];
   taskContext?: TaskContext;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
@@ -112,7 +117,6 @@ interface ToolRegistryOpts {
     timeoutMs: number,
     signal?: AbortSignal,
   ) => Promise<ToolResult>;
-  acknowledgeDelegation?: (id: string, resultVersion: string) => Promise<ToolResult>;
   acceptDelegation?: (input: import("../types/index.js").DelegationAcceptanceInput) => Promise<ToolResult>;
   startCouncil?: (input: {
     topic: string;
@@ -674,6 +678,17 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           options: options.length > 0 ? options : undefined,
           defaultIndex: typeof obj.defaultIndex === "number" ? obj.defaultIndex : undefined,
         };
+        // Internal coordination IDs mean nothing to the user and asking about
+        // them is a recorded failure (the contract's "never ask the user for
+        // internal IDs"); the host refuses before a card is shown.
+        const internalId = findInternalId(
+          [question, info.context ?? "", ...options.flatMap((o) => [o.label, o.description ?? ""])].join("\n"),
+        );
+        if (internalId)
+          return formatResult({
+            success: false,
+            output: `ask_user_refused: the question contains the internal identifier "${internalId}". The user cannot act on jobIds, resultVersions, toolCallIds or messageIds: describe the work in user terms (its title or outcome), and look IDs up yourself with delegation_list or retrieve_tool_result({view:"index"}). No question was shown.`,
+          });
         const answer = await askUser(info);
         return formatResult({ success: true, output: answer });
       },
@@ -1252,11 +1267,8 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     if (opts?.runTask) {
       tools.task = dynamicTool({
         description:
-          "Launch a focused native sub-agent for edit/execute/verify work. In the interactive TUI it runs in the background by default, " +
-          "so the main session can accept new messages. The launch receipt is not the completed result; completion arrives via notifications or delegation_read. " +
-          "Do not poll or sleep while waiting. Set background=false to wait; an interim correlated worker question can return before completion when main input is required. " +
-          "Headless callers retain foreground execution by default. Use delegate for read-only research/exploration. " +
-          "Choose an explicit modelId from worker_models. Supply seven brief fields in prompt: role, scope/workspace, ground/input, question, exclusions, budget, return evidence.",
+          "Launch a native worker for implementation, commands or verification. In the interactive TUI it runs in the background and returns a launch receipt; you are woken with the result when it finishes. " +
+          "background=false waits (an interim correlated worker question can return first); headless callers wait by default. Use delegate for read-only research.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -1265,11 +1277,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               description: "Sub-agent type: general, explore, verify, computer, or a custom sub-agent name",
             },
             description: { type: "string", description: "Short description of the task" },
-            prompt: { type: "string", description: "Detailed instructions for the sub-agent" },
-            modelId: {
+            brief: WORKER_BRIEF_SCHEMA,
+            prompt: {
               type: "string",
-              description: "Exact catalog model chosen by main from worker_models; no silent tier substitution.",
+              description: "Free-form instructions; appended after brief when both are given.",
             },
+            modelId: workerModelIdSchema(opts?.workerModelIds),
             reasoningEffort: {
               type: "string",
               enum: ["low", "medium", "high", "xhigh"],
@@ -1299,7 +1312,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               maxItems: 64,
               items: { type: "string" },
               description:
-                "Host-enforced task write paths relative to cwd: exact files or recursive directories ending in '/'. [] allows no workspace writes. Scoped workers use native file tools plus run_gate (the verify recipe's build/test gates by id; out-of-scope effects are detected after the run, not prevented); shell/MCP/LSP are not granted. Set for every bounded editing task. Omitted means legacy shared execution, not isolation.",
+                "Paths relative to cwd this worker may write: exact files or directories ending in '/'; [] allows no writes. A scoped worker gets native file tools plus run_gate (the verify recipe's gates by id); no shell, MCP or LSP. Edit-capable agents need writeScope or sharedExecution.",
+            },
+            sharedExecution: {
+              type: "boolean",
+              description:
+                "Unscoped execution with shell (build, test, git) that may write anywhere in cwd; not isolated. Only when writeScope cannot serve the task.",
             },
             background: {
               type: "boolean",
@@ -1312,12 +1330,15 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
                 "Optional maximum tool execution rounds. For research/explore use delegate + higher values (default 60); low values (≤20) only for task.",
             },
           },
-          required: ["agent", "description", "prompt", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
+          required: ["agent", "description", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
+          anyOf: [{ required: ["brief"] }, { required: ["prompt"] }],
         }),
         execute: async (input: any) => {
           if (mode !== "agent" && input.agent !== "explore") {
             return "worker_role_refused: ask/plan mode permits read-only explore workers only. Switch to agent mode for implementation.";
           }
+          const assembled = assembleWorkerPrompt(input);
+          if ("error" in assembled) return assembled.error;
           // Research retains the read-only delegate route. Native task workers
           // use their own launch contract rather than widening delegate access.
           const isLongResearch = input.agent === "explore";
@@ -1336,12 +1357,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           const result = await executor({
             agent: input.agent,
             description: input.description,
-            prompt: input.prompt,
+            prompt: assembled.prompt,
             reviewOf: input.reviewOf,
             modelId: input.modelId,
             reasoningEffort: input.reasoningEffort,
             allowedMcpTools: input.allowedMcpTools,
             ...(input.writeScope !== undefined ? { writeScope: input.writeScope } : {}),
+            ...(input.sharedExecution === true ? { sharedExecution: true } : {}),
             ...(input.cwd !== undefined ? { cwd: input.cwd } : {}),
             maxToolRounds: input.maxToolRounds,
             ...(input.background !== undefined
@@ -1383,18 +1405,20 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const runDelegation = opts.runDelegation;
       tools.delegate = dynamicTool({
         description:
-          "Launch a read-only BACKGROUND research agent (usually 'explore') that runs independently in a separate process. " +
-          "Main decides whether independent background research will help. Give a concrete scope, exclusions and verification; avoid duplicating an active worker's assignment unless independent review is intentional. " +
-          "Main session continues working immediately. Results are delivered later via notifications or delegation_read. " +
-          "This is the PREFERRED tool over 'task' for explore/research to avoid blocking and timeouts.",
+          "Launch a read-only background research worker (usually 'explore') in a separate process; you keep working and are woken with its result. " +
+          "Preferred over task for exploration. Avoid duplicating an active worker's assignment unless independent review is intentional.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
             agent: { type: "string", description: "Sub-agent type (usually 'explore')" },
             description: { type: "string", description: "Short description of the research task" },
-            prompt: { type: "string", description: "Detailed research instructions" },
+            brief: WORKER_BRIEF_SCHEMA,
+            prompt: {
+              type: "string",
+              description: "Free-form instructions; appended after brief when both are given.",
+            },
             cwd: { type: "string", description: "Explicit worker workspace; never inferred from query text." },
-            modelId: { type: "string", description: "Exact enabled authenticated catalog model from worker_models." },
+            modelId: workerModelIdSchema(opts?.workerModelIds),
             reasoningEffort: { type: "string", enum: ["low", "medium", "high", "xhigh"] },
             allowedMcpTools: {
               type: "array",
@@ -1408,13 +1432,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
                 "Optional maximum tool execution rounds (high values like 60+ expected for background research; do not use task for high values).",
             },
           },
-          required: ["agent", "description", "prompt", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
+          required: ["agent", "description", ...(opts?.executionRole === "orchestrator" ? ["modelId"] : [])],
+          anyOf: [{ required: ["brief"] }, { required: ["prompt"] }],
         }),
         execute: async (input: any) => {
+          const assembled = assembleWorkerPrompt(input);
+          if ("error" in assembled) return assembled.error;
           const result = await runDelegation({
             agent: input.agent,
             description: input.description,
-            prompt: input.prompt,
+            prompt: assembled.prompt,
             cwd: input.cwd,
             modelId: input.modelId,
             reasoningEffort: input.reasoningEffort,
@@ -1430,7 +1457,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
     if (opts?.sendDelegation) {
       tools.delegation_send = dynamicTool({
         description:
-          "Send a proactive instruction to an owned running worker: omit replyTo; no prior question is required. Include writeScope to atomically narrow/widen file permissions before the next write, including when replying to the exact pending worker question messageId. Scope decisions do not undo previous writes or change workspace/model/role/tool grants/approvals. Message text arrives at the next safe model step; headless correlated replies host-wait the next question or terminal result. Blank replyTo means instruction. No polling, ACK or acceptance.",
+          "Message an owned running worker: an instruction (omit replyTo) or the answer to its pending question (replyTo = that messageId). It arrives at the worker's next model step. writeScope replaces a scoped worker's write paths before its next write; it never undoes earlier writes.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -1469,7 +1496,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const readDelegation = opts.readDelegation;
       tools.delegation_read = dynamicTool({
         description:
-          "Retrieve a completed background delegation result by ID, with execution/delivery/acknowledgement states. A completion notice already carries the result inline (or its first part); read only the remainder (offset/maxChars page the saved result), a raw tool artifact (toolCallId) or a council dossier file. Main must call delegation_ack with the jobId and resultVersion AFTER processing the evidence; reading alone does not ACK or verify it. Helpers forward the reference to main.",
+          "Read a finished background job: the remainder of a result whose notice carried only its first part (offset/maxChars), a failed/plan-review result, a raw tool artifact (toolCallId + resultVersion) or a council dossier file (report:<file>). A running job returns no content. The host acknowledges a result once a turn has processed it.",
         inputSchema: jsonSchema({
           type: "object",
           properties: {
@@ -1506,23 +1533,6 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
           );
           return formatResult(result);
         },
-      });
-    }
-
-    if (opts?.acknowledgeDelegation) {
-      const acknowledge = opts.acknowledgeDelegation;
-      tools.delegation_ack = dynamicTool({
-        description:
-          "Acknowledge a delivered background result AFTER you have processed it. Supply its jobId and resultVersion from delegation_read or its completion notice. This records handling, not a claim that verification passed. A stale version is rejected.",
-        inputSchema: jsonSchema({
-          type: "object",
-          properties: {
-            jobId: { type: "string" },
-            resultVersion: { type: "string" },
-          },
-          required: ["jobId", "resultVersion"],
-        }),
-        execute: async (input: any) => formatResult(await acknowledge(input.jobId, input.resultVersion)),
       });
     }
 
@@ -1745,7 +1755,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       "Retrieve the full output of a previous tool call by its tool_call_id. " +
       "Searches exact local cache, disk cache and database history in the current session family; never substitutes semantic EE lessons. " +
       "If the ID was lost or shortened after compaction, use view=index without tool_call_id to discover bounded local references; query is a literal tool-name, ID or input-path filter. Page with chunk_index. Copy the complete returned ID for the next exact read; metadata candidates are not evidence contents. A miss is not proof of cache loss, and EE is not required. " +
-      "For another worker use delegation_read({id: jobId, toolCallId, resultVersion}) from its host manifest, not its filesystem path. A resultVersion/digest is not a tool_call_id. Set view=arguments to read captured original arguments from the current session family only; this never executes them. Arguments default to 4000-character pages. Optional max_chars and chunk_index allow paginated retrieval.",
+      "Worker results and artifacts are read with delegation_read, not this tool. Set view=arguments to read captured original arguments from the current session family only; this never executes them. Arguments default to 4000-character pages. Optional max_chars and chunk_index allow paginated retrieval.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -1795,6 +1805,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       if (!toolCallId) {
         return "ERROR: tool_call_id is required.";
       }
+      // A jobId or resultVersion/digest is never a tool_call_id: route it to the
+      // tool that owns it instead of a guaranteed miss across three tiers.
+      const wrongKind = nonToolCallIdKind(toolCallId);
+      if (wrongKind) return wrongIdKindPointer(toolCallId, wrongKind);
       const view = input.view ?? "result";
       if (view !== "result" && view !== "arguments") return "ERROR: view must be result or arguments.";
       const requestedMax = typeof input.max_chars === "number" ? input.max_chars : undefined;
