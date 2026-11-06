@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -82,5 +82,33 @@ describe("host council evidence dossiers", () => {
     const record = await loadDelegation(job);
     record.councilReport!.files = record.councilReport!.files.filter((f) => f !== "participants.json");
     expect(() => readCouncilReport(job, record, "findings.json")).toThrow("file list");
+  });
+  // CI run 42131417821: every dossier on macOS was refused because tmpdir()
+  // (/var/...) sits under a link (/private/var/...). A linked ANCESTOR must not
+  // count; a linked dossier directory still must.
+  const linkDir = (target: string, link: string) =>
+    symlinkSync(target, link, process.platform === "win32" ? "junction" : "dir");
+  it("writes and reads a dossier whose job directory is reached through a linked ancestor", async () => {
+    const outer = mkdtempSync(join(tmpdir(), "council-dossier-link-"));
+    try {
+      linkDir(dir, join(outer, "alias"));
+      const linkedJob = join(outer, "alias", "fixture.json");
+      await saveDelegationToolResult(linkedJob, "raw-path", "read_file", { path: "PLAN.md" }, "exact plan excerpt");
+      await completeDelegation(linkedJob, synthesis);
+      const record = await loadDelegation(linkedJob);
+      expect(readCouncilReport(linkedJob, record, "leader.md")).toBe(synthesis);
+      const capture = record.councilReport!.files.find(
+        (f) => f.startsWith("evidence/") && f !== "evidence/manifest.json",
+      )!;
+      expect(JSON.parse(readCouncilReport(linkedJob, record, capture))).toMatchObject({ toolCallId: "raw-path" });
+    } finally {
+      rmSync(outer, { recursive: true, force: true });
+    }
+  });
+  it("still refuses a dossier directory that is itself a link", async () => {
+    const elsewhere = join(dir, "elsewhere");
+    mkdirSync(elsewhere);
+    linkDir(elsewhere, councilReportDirectory(job));
+    await expect(completeDelegation(job, synthesis)).rejects.toThrow("Linked council dossier path refused.");
   });
 });

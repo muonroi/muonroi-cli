@@ -492,7 +492,10 @@ describe("sub-session SPAWN on real SQLite — labeling + absorption + parent le
         done: 1,
         failed: 2,
       });
-      expect(state.bash.getCwd()).toBe(worktree);
+      // Same directory, compared canonically: in "resume" the cwd comes from
+      // process.cwd() after chdir, which macOS reports as the realpath
+      // (/private/var/...) of the /var/... tmpdir the test built `worktree` from.
+      expect(fs.realpathSync(state.bash.getCwd())).toBe(fs.realpathSync(worktree));
       expect(await agent.consumeBackgroundNotifications()).toHaveLength(0);
       expect(await agent.consumeBackgroundNotifications()).toEqual([]);
     } finally {

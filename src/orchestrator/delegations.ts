@@ -16,6 +16,7 @@ import type { DelegationFailureKind, DelegationRun, DelegationStatus, TaskReques
 import type { DelegationAcceptanceInput, ReviewToolEvidence, ReviewVerdict } from "../types/index.js";
 import { BACKGROUND_WAIT_GUIDANCE, formatDelegationStarted } from "../utils/background-jobs.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { isLinkFreeBelow } from "../utils/link-free-path.js";
 import { logger, redactSecrets } from "../utils/logger.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import {
@@ -1497,10 +1498,10 @@ async function readStoredToolArtifact(
     maxChars > 24000
   )
     throw new Error("Use offset>=0 and maxChars=256..24000.");
-  const directory = toolArtifactDir(jobPath);
-  const file = path.join(directory, entry.fileName);
-  if (path.resolve(await fs.realpath(file)) !== path.resolve(file) || (await fs.lstat(directory)).isSymbolicLink())
-    throw new Error("Linked artifact path refused.");
+  const file = path.join(toolArtifactDir(jobPath), entry.fileName);
+  // Anchored at the job directory so a linked ancestor (macOS /var, Windows 8.3
+  // temp) is not mistaken for a planted link; .tools and the capture must be real.
+  if (!isLinkFreeBelow(path.dirname(jobPath), file)) throw new Error("Linked artifact path refused.");
   const body = await fs.readFile(file, "utf8");
   if (Buffer.byteLength(body) !== entry.bytes || resultVersion(body) !== entry.digest)
     throw new Error("Tool artifact content changed.");
