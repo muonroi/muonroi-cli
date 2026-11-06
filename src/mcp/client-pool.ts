@@ -32,6 +32,7 @@ import { logger, redactSecrets } from "../utils/logger.js";
 import type { McpServerConfig } from "../utils/settings.js";
 import { MCP_KEY_REQUIREMENTS, noticeNeedsKeyOnce, partitionEnabledServers } from "./key-requirements.js";
 import { publishNeedsKey } from "./needs-key-bus.js";
+import { onMcpOAuthSignedIn } from "./oauth-provider.js";
 import {
   type ConnectedServer,
   connectOneServer,
@@ -44,6 +45,7 @@ import { validateMcpServerConfig } from "./validate.js";
 
 interface PoolEntry {
   key: string;
+  serverId: string;
   promise: Promise<ConnectedServer>;
   /**
    * The resolved server, set once `promise` fulfils. Lets the in-turn self-heal
@@ -54,8 +56,31 @@ interface PoolEntry {
 }
 
 const pool = new Map<string, PoolEntry>();
-const authFailures = new Map<string, { until: number; error: Error }>();
+const authFailures = new Map<string, { until: number; error: Error; serverId: string }>();
 const AUTH_RETRY_DELAY_MS = 60000;
+
+/**
+ * A completed OAuth sign-in invalidates everything the pool concluded while
+ * the server was unauthenticated: lift its 60s auth pause (otherwise the
+ * post-sign-in warm-up is rejected by the very pause the sign-in fixes) and
+ * drop any client connected without the new tokens.
+ */
+onMcpOAuthSignedIn((serverId) => {
+  for (const [key, f] of authFailures) if (f.serverId === serverId) authFailures.delete(key);
+  for (const [key, entry] of pool) {
+    if (entry.serverId !== serverId) continue;
+    pool.delete(key);
+    void entry.promise.then(
+      (cs) => {
+        cs.cleanup?.();
+        return cs.client.close();
+      },
+      (err: unknown) => {
+        logger.file("debug", "mcp", `[mcp:pool] superseded connect for '${serverId}' had failed: ${String(err)}`);
+      },
+    );
+  }
+});
 
 function isAuthFailure(error: unknown): boolean {
   const status =
@@ -72,7 +97,7 @@ function pauseForAuth(server: McpServerConfig, key: string, cause: unknown): Err
   const error = new Error(
     `mcp_auth_required: ${server.id}: ${detail.slice(0, 1200)}. Configure this server's Authorization header or sign in via /mcp. Unchanged configuration will not reconnect for 60s; changed configuration reconnects immediately. No credentials were changed by the CLI.`,
   );
-  authFailures.set(key, { until: Date.now() + AUTH_RETRY_DELAY_MS, error });
+  authFailures.set(key, { until: Date.now() + AUTH_RETRY_DELAY_MS, error, serverId: server.id });
   recordIntegrationHealth({
     component: `mcp:${server.id}`,
     check: "authentication",
@@ -154,7 +179,7 @@ function getOrConnect(server: McpServerConfig, opts?: McpBuildOptions): Promise<
     if (isAuthFailure(error)) throw pauseForAuth(server, key, error);
     throw error;
   });
-  const entry: PoolEntry = { key, promise };
+  const entry: PoolEntry = { key, serverId: server.id, promise };
   pool.set(key, entry);
   promise.then(
     // Record the resolved server so evictDeadServer can match by identity.
