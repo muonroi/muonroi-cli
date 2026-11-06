@@ -9,7 +9,7 @@
  * project's verify-recipe test gate has passed.
  *
  * Path: the TUI top-level agent is the orchestrator (no bash), so the main
- * agent dispatches `task` (agent=general, unscoped, background=false); the
+ * agent dispatches `task` (agent=general, sharedExecution, background=false); the
  * worker — a separate process scripted by a `routes` entry keyed on its role
  * line — runs the bash calls. Every cwd is a FRESH temp git repo with a LOCAL
  * bare remote next to it; nothing is ever pushed anywhere real.
@@ -107,6 +107,9 @@ function makeFixture(workerCalls: unknown[][]): Fixture {
           prompt: "Push the current branch to origin as main using bash.",
           modelId: "deepseek-v4-flash",
           background: false,
+          // The worker runs bash (git push); an unscoped shell-capable worker must
+          // declare shared execution or the host refuses the dispatch (M9).
+          sharedExecution: true,
         }),
         textRound("done"),
       ],
