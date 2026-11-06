@@ -9,35 +9,68 @@
  *   2. swept the CLI's own `.muonroi-cli/settings.json` (which can hold
  *      provider API keys) into a public repo via `git add -A`.
  *
- * Two guards, both cheap and side-effect-free:
- *   - PUSH GATE: a session-scoped record of failed verification commands
- *     (test/build/lint/typecheck). A `git push` is BLOCKED (not executed)
- *     while any verification command has failed this session and not been
- *     re-run green. Mirrors the repo's mandatory Pre-Push Test Gate.
- *   - STAGING WARNING: a non-blocking warning when a broad `git add -A` /
- *     `git add .` / `git commit -a` is run while sensitive paths (`.env`,
- *     `.muonroi-cli/`, private keys, credentials) exist in the repo root.
+ * Guards (host-enforced — the prompt only carries a one-line pointer):
+ *   - PUSH GATE: `git push` is BLOCKED (not executed) unless the session has
+ *     a PASSING run of every required test gate of the project's verify recipe
+ *     (`resolveGateCatalog`, the same source as run_gate / prepareVerifyRun),
+ *     STARTED after the session's last native file write; and while any
+ *     verification command failed and was not re-run green. Runs are recorded
+ *     from bash, `run_gate` and `verification_run` (failures only — a subset of
+ *     test files is not the gate). A run whose exit status a pipe/`;`/`||`
+ *     masks never counts as a pass. No detectable test gate → allowed with a
+ *     recorded warning (nothing to name; blocking would be a dead end).
+ *   - HOOK BYPASS: `--no-verify` / `commit -n` / `-c core.hooksPath=` /
+ *     `HUSKY=0` / `git config core.hooksPath` writes are refused.
+ *   - BROAD STAGING: `git add -A|.|-u` / `commit -a` is refused while dirty
+ *     paths exist that this session did not write (lists them), and while
+ *     sensitive paths (`.env`, `.muonroi-cli/`, keys) exist in the repo root.
  *
- * The push gate is deterministic for the sequential case (a failed check then
- * a later push). The concurrent case (push batched in the same parallel tool
- * call as the check) is covered by the system-prompt git-safety clause.
+ * Every refusal is a `BLOCKED (git-safety)` result, so the existing safety
+ * override applies: interactive → safety askcard (allow once / session), yolo
+ * → auto-allow, headless → hard block. User env escape hatches:
+ * `MUONROI_ALLOW_PUSH_ON_RED=1` (push gate), `MUONROI_ALLOW_BROAD_STAGE=1`
+ * (staging), `MUONROI_ALLOW_HOOK_BYPASS=1` (hook bypass).
  *
- * Override the push gate with `MUONROI_ALLOW_PUSH_ON_RED=1`.
+ * Known limits: file writes made through bash (`sed -i`, generators) or MCP
+ * tools are not seen as "writes" by the push gate; a concurrent test run and
+ * push in one parallel batch is blocked (the run has not passed yet).
  */
 
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isVerificationCommand } from "../orchestrator/tool-args-hash.js";
+import { logger } from "../utils/logger.js";
+import { normalizeMsysDrivePath } from "./write-scope.js";
+
+/** One bash/run_gate command observed in a directory. Seqs are run START seqs. */
+interface RunRecord {
+  dir: string;
+  command: string;
+  passSeq: number;
+  failSeq: number;
+  /** A success whose exit status was masked (pipe / `;` / `||`) — never a pass. */
+  maskedPassSeq: number;
+}
 
 interface GitSafetyEntry {
   /** canonical verification command -> epoch ms it last failed. */
   failedVerifies: Map<string, number>;
+  /** Seq of the last successful native file write (0 = none this session). */
+  lastWriteSeq: number;
+  /** Normalized absolute paths written by native file tools this session. */
+  writtenPaths: Set<string>;
+  /** `${dir}\0${command}` -> outcome record (insertion-ordered, bounded). */
+  runs: Map<string, RunRecord>;
 }
+
+const MAX_RUN_RECORDS = 300;
 
 declare global {
   // eslint-disable-next-line no-var
   var __muonroiGitSafetyState: Map<string, GitSafetyEntry> | undefined;
+  // eslint-disable-next-line no-var
+  var __muonroiGitSafetySeq: number | undefined;
 }
 
 function getState(): Map<string, GitSafetyEntry> {
@@ -47,9 +80,199 @@ function getState(): Map<string, GitSafetyEntry> {
   return globalThis.__muonroiGitSafetyState;
 }
 
+function getEntry(sessionKey: string): GitSafetyEntry {
+  const state = getState();
+  let entry = state.get(sessionKey);
+  if (!entry) {
+    entry = { failedVerifies: new Map(), lastWriteSeq: 0, writtenPaths: new Set(), runs: new Map() };
+    state.set(sessionKey, entry);
+  }
+  return entry;
+}
+
 /** Test helper — clear all session git-safety state. */
 export function __resetGitSafetyState(): void {
   globalThis.__muonroiGitSafetyState = new Map<string, GitSafetyEntry>();
+}
+
+/**
+ * Monotonic ordering stamp shared by writes and command starts. A counter, not
+ * a clock: a write and a test start in the same millisecond must still order.
+ */
+export function nextGitSafetySeq(): number {
+  globalThis.__muonroiGitSafetySeq = (globalThis.__muonroiGitSafetySeq ?? 0) + 1;
+  return globalThis.__muonroiGitSafetySeq;
+}
+
+/** Normalized absolute path/dir key (MSYS drive spelling, case-folded on win32). */
+export function normalizeSafetyPath(p: string, base?: string): string {
+  const spelled = normalizeMsysDrivePath(p);
+  const abs = base ? path.resolve(normalizeMsysDrivePath(base), spelled) : path.resolve(spelled);
+  const trimmed = abs.length > 1 ? abs.replace(/[\\/]+$/, "") : abs;
+  return process.platform === "win32" ? trimmed.toLowerCase() : trimmed;
+}
+
+/**
+ * Record successful native file writes (write_file / edit_file). Invalidates
+ * every earlier test pass for the push gate and feeds the broad-staging guard.
+ */
+export function noteFileWrites(sessionKey: string, absolutePaths: readonly string[]): void {
+  if (absolutePaths.length === 0) return;
+  const entry = getEntry(sessionKey);
+  entry.lastWriteSeq = nextGitSafetySeq();
+  for (const p of absolutePaths) entry.writtenPaths.add(normalizeSafetyPath(p));
+}
+
+/** Normalized absolute paths written by native file tools this session. */
+export function sessionWrittenPaths(sessionKey: string): string[] {
+  return [...(getState().get(sessionKey)?.writtenPaths ?? [])];
+}
+
+const normalizeCommandText = (command: string): string => command.trim().replace(/\s+/g, " ");
+
+// Redirections never change an exit status; strip them before comparing a run
+// to a gate command (`bun run test 2>&1 > out.log` IS `bun run test`).
+function stripRedirections(command: string): string {
+  // Park quoted spans so a `=>` / `>` inside a string argument is never read
+  // as a redirection, then restore them.
+  // Private-use code point as the placeholder fence: never valid shell text.
+  const fence = "";
+  const quoted: string[] = [];
+  const parked = command.replace(/"[^"]*"|'[^']*'/g, (m) => `${fence}${quoted.push(m) - 1}${fence}`);
+  const stripped = parked
+    .replace(/[ \t]*\d*>>?[ \t]*&[ \t]*\d+/g, "")
+    .replace(/[ \t]*&>>?[ \t]*\S+/g, "")
+    .replace(/[ \t]*\d*>>?[ \t]*[^\s&|;]+/g, "");
+  return stripped.replace(new RegExp(`${fence}(\\d+)${fence}`, "g"), (_m, i: string) => quoted[Number(i)] ?? "");
+}
+
+interface ParsedRun {
+  clauses: Array<{ dir: string; command: string }>;
+  /** True when the overall exit status does not prove every clause succeeded. */
+  masked: boolean;
+}
+
+/**
+ * Split a bash command at top-level `&&` (quote-aware), following `cd <dir>`
+ * clauses so each remaining clause is keyed by the directory it ran in. Any
+ * other top-level control operator (`|`, `||`, `;`, newline, background `&`)
+ * makes the exit status unreliable for the clauses → `masked`.
+ */
+export function parseRunClauses(command: string, cwd: string): ParsedRun {
+  const text = stripRedirections(command);
+  const parts: string[] = [];
+  let masked = false;
+  let current = "";
+  let quote: '"' | "'" | null = null;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "&" && text[i + 1] === "&") {
+      parts.push(current);
+      current = "";
+      i++;
+      continue;
+    }
+    if (ch === "|" || ch === ";" || ch === "\n" || ch === "&") {
+      masked = true;
+      if (ch === "|" && text[i + 1] === "|") i++;
+      parts.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  parts.push(current);
+  // `set -o pipefail; cmd | tail` still counts as masked: honoring pipefail
+  // would mean modelling `;` too, and the refusal already says "run unpiped".
+  let dir = cwd;
+  const clauses: Array<{ dir: string; command: string }> = [];
+  for (const raw of parts) {
+    const clause = normalizeCommandText(raw);
+    if (!clause) continue;
+    const cd = clause.match(/^cd[ \t]+(?:"([^"]+)"|'([^']+)'|(\S+))$/);
+    if (cd) {
+      dir = path.resolve(normalizeMsysDrivePath(dir), normalizeMsysDrivePath(cd[1] ?? cd[2] ?? cd[3]!));
+      continue;
+    }
+    clauses.push({ dir, command: clause });
+  }
+  return { clauses, masked };
+}
+
+function upsertRun(entry: GitSafetyEntry, dir: string, command: string, update: (rec: RunRecord) => void): void {
+  const key = `${normalizeSafetyPath(dir)}\0${command}`;
+  const rec = entry.runs.get(key) ?? { dir, command, passSeq: 0, failSeq: 0, maskedPassSeq: 0 };
+  update(rec);
+  entry.runs.delete(key); // re-insert → most recently used last
+  entry.runs.set(key, rec);
+  while (entry.runs.size > MAX_RUN_RECORDS) {
+    const oldest = entry.runs.keys().next().value;
+    if (oldest === undefined) break;
+    entry.runs.delete(oldest);
+  }
+}
+
+/**
+ * Record a finished bash command for the push gate's test-gate ledger. Every
+ * command is recorded (the recipe's test command may be anything — `make
+ * test`, `uv run pytest`); only gate-matching entries are ever read.
+ * `startSeq` is taken BEFORE the command ran, so a write that lands while the
+ * tests run makes that pass stale.
+ */
+export function recordBashRun(
+  sessionKey: string,
+  cwd: string,
+  command: string,
+  success: boolean,
+  startSeq: number,
+): void {
+  const parsed = parseRunClauses(command, cwd);
+  if (parsed.clauses.length === 0) return;
+  const entry = getEntry(sessionKey);
+  for (const clause of parsed.clauses) {
+    upsertRun(entry, clause.dir, clause.command, (rec) => {
+      if (!success) rec.failSeq = Math.max(rec.failSeq, startSeq);
+      else if (parsed.masked) rec.maskedPassSeq = Math.max(rec.maskedPassSeq, startSeq);
+      else rec.passSeq = Math.max(rec.passSeq, startSeq);
+    });
+  }
+}
+
+/** Record a host-executed `run_gate` outcome (the command is exactly the gate's). */
+export function recordGateRun(
+  sessionKey: string,
+  cwd: string,
+  command: string,
+  success: boolean,
+  startSeq: number,
+): void {
+  const entry = getEntry(sessionKey);
+  upsertRun(entry, cwd, normalizeCommandText(command), (rec) => {
+    if (success) rec.passSeq = Math.max(rec.passSeq, startSeq);
+    else rec.failSeq = Math.max(rec.failSeq, startSeq);
+  });
+}
+
+/**
+ * Record a `verification_run` outcome. It runs an explicit subset of test
+ * files, so a PASS never satisfies the test gate — but a FAIL is red evidence
+ * that blocks a push until the same files pass again (legacy failed-verify map).
+ */
+export function recordVerificationRun(sessionKey: string, files: readonly string[], success: boolean): void {
+  const key = `verification_run ${[...files].map(String).sort().join(" ")}`;
+  const entry = getEntry(sessionKey);
+  if (success) entry.failedVerifies.delete(key);
+  else entry.failedVerifies.set(key, Date.now());
 }
 
 /**
@@ -69,7 +292,9 @@ function stripQuoted(command: string): string {
 // hits. Allowing `[^|&;\n]*` between `git` and the subcommand covers global
 // options like `git -c key=val push`.
 const PUSH_RE = /\bgit\b[^|&;\n]*[ \t]push\b/;
-const BROAD_ADD_RE = /\bgit\b[^|&;\n]*[ \t]add[ \t]+(?:-A\b|--all\b|\.(?=[ \t]|$))/;
+const BROAD_ADD_RE = /\bgit\b[^|&;\n]*[ \t]add[ \t]+(?:-A\b|--all\b|-u\b|--update\b|\.(?=[ \t]|$))/;
+const ADD_ALL_RE = /\bgit\b[^|&;\n]*[ \t]add[ \t]+(?:-A\b|--all\b)/;
+const ADD_UPDATE_RE = /\bgit\b[^|&;\n]*[ \t]add[ \t]+(?:-u\b|--update\b)/;
 // `-a` / `-am` / `-ma` etc. — a short-flag cluster CONTAINING `a`, terminated by
 // whitespace or end (so `-a--otherflag` and `--amend` do NOT match).
 const COMMIT_ALL_RE = /\bgit\b[^|&;\n]*[ \t]commit\b[^|&;\n]*[ \t]-[a-z]*a[a-z]*(?=[ \t]|$)/;
@@ -89,18 +314,142 @@ export interface GitCommandShape {
   isBroadAdd: boolean;
   /** `git commit -a[m]` (auto-stages tracked modifications at commit time). */
   isCommitAll: boolean;
+  /**
+   * What a broad stage would sweep: `all` (tracked + untracked, repo-wide),
+   * `cwd` (`git add .` — tracked + untracked under the cwd), `tracked`
+   * (`add -u` / `commit -a` — tracked modifications only), or null.
+   */
+  broadStageScope: "all" | "cwd" | "tracked" | null;
+  /** Description of a hook-bypass construct on a commit/push, or null. */
+  hookBypass: string | null;
 }
 
 export function analyzeGitCommand(command: string): GitCommandShape {
   const c = stripQuoted(command);
   const isBroadAdd = BROAD_ADD_RE.test(c);
   const isCommitAll = COMMIT_ALL_RE.test(c);
+  const isPush = PUSH_RE.test(c);
+  const isCommit = COMMIT_RE.test(c);
+  const broadStageScope: GitCommandShape["broadStageScope"] = ADD_ALL_RE.test(c)
+    ? "all"
+    : isBroadAdd && !ADD_UPDATE_RE.test(c)
+      ? "cwd"
+      : isBroadAdd || isCommitAll
+        ? "tracked"
+        : null;
   return {
-    isPush: PUSH_RE.test(c),
+    isPush,
     isBroadStage: isBroadAdd || isCommitAll,
-    isCommit: COMMIT_RE.test(c),
+    isCommit,
     isBroadAdd,
     isCommitAll,
+    broadStageScope,
+    hookBypass: detectHookBypass(c, isCommit || isPush),
+  };
+}
+
+// ── Hook bypass (M2) ─────────────────────────────────────────────────────────
+//
+// The repo's pre-commit/pre-push hooks ARE the gate for every contributor; a
+// model reaching for `--no-verify` turns the gate off for itself. Detected on
+// the quote-stripped command, clause by clause, so a commit MESSAGE that
+// mentions `--no-verify` never trips it.
+
+/** `--no-verify` and its unique abbreviations (`--no-ver` is ambiguous with `--no-verbose`). */
+const NO_VERIFY_LONG_RE = /^--no-veri(?:f(?:y)?)?$/;
+/** git commit short options that take a value — letters after them are the value, not flags. */
+const COMMIT_VALUE_FLAGS = new Set(["m", "F", "C", "c", "t"]);
+/** Optional ATTACHED value (`-S<keyid>`, `-u<mode>`): the rest of the cluster is the value. */
+const COMMIT_ATTACHED_VALUE_FLAGS = new Set(["S", "u"]);
+
+function gitSubcommandTokens(clause: string): { sub: string; args: string[]; globals: string[] } | null {
+  const tokens = clause
+    .trim()
+    .split(/[ \t]+/)
+    .filter(Boolean);
+  const gitIdx = tokens.findIndex((t) => t === "git" || t.endsWith("/git") || t.toLowerCase() === "git.exe");
+  if (gitIdx < 0) return null;
+  const globals: string[] = [];
+  let j = gitIdx + 1;
+  while (j < tokens.length && tokens[j]!.startsWith("-")) {
+    const flag = tokens[j]!;
+    globals.push(flag);
+    if (GIT_GLOBAL_FLAGS_WITH_ARG.has(flag) && j + 1 < tokens.length) globals.push(tokens[++j]!);
+    j++;
+  }
+  if (j >= tokens.length) return null;
+  return { sub: tokens[j]!.toLowerCase(), args: tokens.slice(j + 1), globals };
+}
+
+function commitShortClusterSkipsVerify(token: string): { noVerify: boolean; takesNext: boolean } {
+  const letters = token.slice(1);
+  for (let k = 0; k < letters.length; k++) {
+    const ch = letters[k]!;
+    if (ch === "n") return { noVerify: true, takesNext: false };
+    if (COMMIT_VALUE_FLAGS.has(ch)) return { noVerify: false, takesNext: k === letters.length - 1 };
+    if (COMMIT_ATTACHED_VALUE_FLAGS.has(ch)) return { noVerify: false, takesNext: false };
+  }
+  return { noVerify: false, takesNext: false };
+}
+
+function detectHookBypass(quoteStripped: string, isCommitOrPush: boolean): string | null {
+  for (const clause of quoteStripped.split(/[|&;\n]+/)) {
+    const shape = gitSubcommandTokens(clause);
+    if (!shape) continue;
+    const hooksPathOverride = shape.globals.some((g, idx) => {
+      const value = g === "-c" ? (shape.globals[idx + 1] ?? "") : "";
+      return /^core\.hookspath=/i.test(value);
+    });
+    if (shape.sub === "config") {
+      const writesHooksPath = shape.args.some((a, idx) => {
+        if (!/^core\.hookspath$/i.test(a)) return false;
+        const rest = shape.args.slice(idx + 1);
+        const reads = shape.args.some((x) => /^--(?:get|get-all|get-regexp|list|show-origin)$/.test(x));
+        const unsets = shape.args.some((x) => /^--unset(?:-all)?$/.test(x));
+        return unsets || (!reads && rest.length > 0);
+      });
+      if (writesHooksPath) return "`git config core.hooksPath …` (re-points or removes the repo's hooks)";
+      continue;
+    }
+    if (shape.sub !== "commit" && shape.sub !== "push") continue;
+    if (hooksPathOverride) return `\`git -c core.hooksPath=… ${shape.sub}\` (skips the repo's hooks)`;
+    if (/(?:^|[ \t])(?:export[ \t]+)?HUSKY(?:=0\b|_SKIP_HOOKS=(?:1|true)\b)/.test(clause))
+      return `\`HUSKY=0 git ${shape.sub}\` (disables the husky hooks)`;
+    let skipNext = false;
+    for (const arg of shape.args) {
+      if (skipNext) {
+        skipNext = false;
+        continue;
+      }
+      if (arg === "--") break;
+      if (NO_VERIFY_LONG_RE.test(arg)) return `\`git ${shape.sub} --no-verify\``;
+      // `-n` means --no-verify only for commit; for push it is --dry-run.
+      if (shape.sub === "commit" && /^-[a-zA-Z]+$/.test(arg)) {
+        const r = commitShortClusterSkipsVerify(arg);
+        if (r.noVerify) return "`git commit -n` (short for --no-verify)";
+        skipNext = r.takesNext;
+      }
+    }
+  }
+  // `export HUSKY=0` in an earlier clause still disables hooks for the commit.
+  if (isCommitOrPush && /(?:^|[ \t;&|\n])export[ \t]+HUSKY=0\b/.test(quoteStripped))
+    return "`export HUSKY=0` before a commit/push (disables the husky hooks)";
+  return null;
+}
+
+export interface HookBypassBlockResult {
+  blocked: boolean;
+  message: string;
+}
+
+/** Refuse a hook-bypassing commit/push. User escape hatch: MUONROI_ALLOW_HOOK_BYPASS=1. */
+export function checkHookBypass(shape: GitCommandShape): HookBypassBlockResult {
+  if (!shape.hookBypass || process.env.MUONROI_ALLOW_HOOK_BYPASS === "1") return { blocked: false, message: "" };
+  return {
+    blocked: true,
+    message:
+      `refusing ${shape.hookBypass} — the repository's git hooks are its commit/push gate and are not skipped by the agent. ` +
+      "Run the command without the bypass and fix whatever the hook reports. If the user explicitly wants the hooks skipped, they approve it in the safety prompt.",
   };
 }
 
@@ -112,12 +461,7 @@ export function analyzeGitCommand(command: string): GitCommandShape {
  */
 export function recordCommandOutcome(sessionKey: string, canonical: string, success: boolean): void {
   if (!canonical || !isVerificationCommand(canonical)) return;
-  const state = getState();
-  let entry = state.get(sessionKey);
-  if (!entry) {
-    entry = { failedVerifies: new Map() };
-    state.set(sessionKey, entry);
-  }
+  const entry = getEntry(sessionKey);
   if (success) {
     entry.failedVerifies.delete(canonical);
   } else {
@@ -125,28 +469,142 @@ export function recordCommandOutcome(sessionKey: string, canonical: string, succ
   }
 }
 
+/** A required test gate (shape-compatible with run-gate.ts `GateEntry`). */
+export interface RequiredTestGate {
+  id: string;
+  command: string;
+}
+
+export interface PushGateContext {
+  /** Directory the push runs in; gate commands are relative to it (as for run_gate). */
+  cwd: string;
+  /** The recipe's required test gates (style gates excluded unless blocking). */
+  requiredGates: RequiredTestGate[];
+  /** Where the gates came from (manifest path / disk derivation), for messages. */
+  gateSource: string;
+}
+
+export type MissingGateReason = "never-run" | "failed" | "stale" | "masked";
+
+export interface MissingGate {
+  id: string;
+  command: string;
+  reason: MissingGateReason;
+}
+
 export interface PushGateResult {
   blocked: boolean;
   /** Canonical commands that failed and gate the push. */
   failed: string[];
+  /** Required test gates with no valid pass since the last write. */
+  missing: MissingGate[];
+  /** Set when the push is allowed but no test gate could be detected. */
+  warning?: string;
 }
 
-export function checkPushGate(sessionKey: string): PushGateResult {
-  if (process.env.MUONROI_ALLOW_PUSH_ON_RED === "1") return { blocked: false, failed: [] };
+/**
+ * Commands equivalent to a gate: the gate itself, plus the package.json script
+ * body for `npm|pnpm|yarn [run] <script>` / `bun run <script>` gates (so a
+ * model running `bunx vitest run` satisfies a `bun run test` gate whose script
+ * IS `bunx vitest run`). `bun test` is bun's built-in runner, not a script.
+ */
+function gateEquivalents(dir: string, command: string): string[] {
+  const out = [normalizeCommandText(command)];
+  const m = command.trim().match(/^(?:(?:npm|pnpm|yarn)(?:[ \t]+run(?:-script)?)?|bun[ \t]+run)[ \t]+([\w:.-]+)$/);
+  if (!m) return out;
+  try {
+    const pkgPath = path.join(dir, "package.json");
+    if (!fs.existsSync(pkgPath)) return out;
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { scripts?: Record<string, unknown> };
+    const body = pkg.scripts?.[m[1]!];
+    if (typeof body === "string" && body.trim()) out.push(normalizeCommandText(body));
+  } catch (err) {
+    logger.file("warn", "orchestrator", "[git-safety] package.json script lookup failed", {
+      operation: "gateEquivalents",
+      dir,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return out;
+}
+
+function evaluateGate(entry: GitSafetyEntry | undefined, cwd: string, gate: RequiredTestGate): MissingGate | null {
+  const parsed = parseRunClauses(gate.command, cwd);
+  const target = parsed.clauses[parsed.clauses.length - 1];
+  if (!target) return { ...gate, reason: "never-run" };
+  const dirKey = normalizeSafetyPath(target.dir);
+  const commands = new Set(gateEquivalents(target.dir, target.command));
+  let best: RunRecord | null = null;
+  for (const rec of entry?.runs.values() ?? []) {
+    if (normalizeSafetyPath(rec.dir) !== dirKey || !commands.has(rec.command)) continue;
+    if (
+      !best ||
+      Math.max(rec.passSeq, rec.failSeq, rec.maskedPassSeq) > Math.max(best.passSeq, best.failSeq, best.maskedPassSeq)
+    )
+      best = rec;
+  }
+  const lastWrite = entry?.lastWriteSeq ?? 0;
+  if (!best) return { ...gate, reason: "never-run" };
+  if (best.passSeq > 0 && best.passSeq > best.failSeq && best.passSeq > lastWrite) return null;
+  if (best.failSeq > 0 && best.failSeq >= best.passSeq && best.failSeq >= best.maskedPassSeq)
+    return { ...gate, reason: "failed" };
+  if (best.maskedPassSeq > best.passSeq && best.maskedPassSeq > lastWrite) return { ...gate, reason: "masked" };
+  return { ...gate, reason: best.passSeq > 0 || best.maskedPassSeq > 0 ? "stale" : "never-run" };
+}
+
+/**
+ * The push gate. Without `ctx` (not a git repository, or a caller with no
+ * catalog) only the legacy failed-verify rule applies. With `ctx`, every
+ * required test gate must have a pass that STARTED after the last native write.
+ */
+export function checkPushGate(sessionKey: string, ctx?: PushGateContext): PushGateResult {
+  if (process.env.MUONROI_ALLOW_PUSH_ON_RED === "1") return { blocked: false, failed: [], missing: [] };
   const entry = getState().get(sessionKey);
-  if (!entry || entry.failedVerifies.size === 0) return { blocked: false, failed: [] };
-  return { blocked: true, failed: [...entry.failedVerifies.keys()] };
+  const failed = [...(entry?.failedVerifies.keys() ?? [])];
+  if (!ctx) return { blocked: failed.length > 0, failed, missing: [] };
+  if (ctx.requiredGates.length === 0) {
+    return {
+      blocked: failed.length > 0,
+      failed,
+      missing: [],
+      warning: `no test gate detected in the verify recipe (${ctx.gateSource}); the push is not backed by a test run.`,
+    };
+  }
+  const missing = ctx.requiredGates
+    .map((gate) => evaluateGate(entry, ctx.cwd, gate))
+    .filter((m): m is MissingGate => m !== null);
+  return { blocked: failed.length > 0 || missing.length > 0, failed, missing };
 }
 
-/** Message returned in place of running a blocked `git push`. */
-export function pushBlockedMessage(failed: string[]): string {
-  const list = failed.map((c) => `  • ${c}`).join("\n");
-  return (
-    "BLOCKED: refusing to run `git push` — a verification command failed earlier this session and has not passed since:\n" +
-    `${list}\n\n` +
-    "Re-run the failing check until it passes (0 failures), then push. This mirrors the mandatory Pre-Push Test Gate " +
-    "(never push on red). If you must override for a genuine reason, set MUONROI_ALLOW_PUSH_ON_RED=1."
+const MISSING_REASON_TEXT: Record<MissingGateReason, string> = {
+  "never-run": "no run recorded this session",
+  failed: "its last run FAILED",
+  stale: "last pass predates your latest file edit",
+  masked: "last run was piped/chained (`|`, `;`, `||`), which hides its exit code",
+};
+
+/** Message returned in place of running a blocked `git push`. Names what to run. */
+export function pushBlockedMessage(result: PushGateResult | string[]): string {
+  const gate: PushGateResult = Array.isArray(result) ? { blocked: true, failed: result, missing: [] } : result;
+  const lines = ["refusing to run `git push`."];
+  if (gate.missing.length > 0) {
+    lines.push("The project's test gate has not passed since your last file edit:");
+    for (const m of gate.missing) lines.push(`  • ${m.id} \`${m.command}\` — ${MISSING_REASON_TEXT[m.reason]}`);
+    lines.push(
+      "Run each command above as its own bash call (no pipe, `;` or `||`), or `run_gate gate=<id>` where available; " +
+        "wait for it to pass with 0 failures, then push.",
+    );
+  }
+  if (gate.failed.length > 0) {
+    lines.push("These verification commands failed this session and have not passed since:");
+    for (const c of gate.failed) lines.push(`  • ${c}`);
+    lines.push("Re-run each until it passes (0 failures), then push.");
+  }
+  lines.push(
+    "Never push on red. If the user explicitly wants to push anyway, they approve it in the safety prompt " +
+      "(or set MUONROI_ALLOW_PUSH_ON_RED=1).",
   );
+  return lines.join("\n");
 }
 
 /**
@@ -263,6 +721,115 @@ export function checkSensitiveStaging(cwd: string): StagingBlockResult {
     "secrets or credentials. Ensure these paths are listed in .gitignore. " +
     "To bypass this gate (not recommended), set MUONROI_ALLOW_BROAD_STAGE=1.";
   return { blocked: true, sensitive, message };
+}
+
+// ── Foreign-path broad staging (M3) ──────────────────────────────────────────
+//
+// `git add -A` / `.` / `-u` / `commit -a` sweep EVERY dirty path into the
+// commit — including the user's unrelated work-in-progress and the CLI's own
+// artifacts. Refuse it while any dirty path in scope was not written by this
+// session's native file tools, and name the explicit `git add` that is safe.
+
+const GIT_STATUS_TIMEOUT_MS = 8000;
+
+/** `git` with optional-locks off, so a status probe never contends for index.lock. */
+function gitRaw(cwd: string, args: string[]): { ok: boolean; stdout: string; error?: string } {
+  try {
+    const r = spawnSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      timeout: GIT_STATUS_TIMEOUT_MS,
+      maxBuffer: 16 * 1024 * 1024,
+      windowsHide: true,
+      env: { ...process.env, GIT_OPTIONAL_LOCKS: "0" },
+    });
+    if (r.error) return { ok: false, stdout: "", error: r.error.message };
+    return { ok: r.status === 0, stdout: r.stdout ?? "", error: r.status === 0 ? undefined : String(r.stderr ?? "") };
+  } catch (err) {
+    return { ok: false, stdout: "", error: err instanceof Error ? err.message : String(err) };
+  }
+}
+
+/** Repository top level containing `cwd`, or null outside a git work tree. */
+export function gitTopLevel(cwd: string): string | null {
+  const r = gitRaw(cwd, ["rev-parse", "--show-toplevel"]);
+  const top = r.stdout.trim();
+  return r.ok && top ? path.resolve(normalizeMsysDrivePath(top)) : null;
+}
+
+export interface DirtyPath {
+  /** Repo-relative, forward slashes. */
+  rel: string;
+  untracked: boolean;
+}
+
+/** Dirty paths (`git status --porcelain -z --untracked-files=all`), renames by NEW path. */
+export function listDirtyPaths(root: string): DirtyPath[] | null {
+  const r = gitRaw(root, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  if (!r.ok) {
+    logger.file("warn", "orchestrator", "[git-safety] git status failed", {
+      operation: "listDirtyPaths",
+      root,
+      error: r.error,
+    });
+    return null;
+  }
+  const tokens = r.stdout.split("\0");
+  const out: DirtyPath[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token.length < 4) continue;
+    const xy = token.slice(0, 2);
+    out.push({ rel: token.slice(3), untracked: xy === "??" });
+    if (/[RC]/.test(xy)) i++; // skip the rename/copy SOURCE token
+  }
+  return out;
+}
+
+export interface ForeignStagingResult {
+  blocked: boolean;
+  /** Dirty paths in scope this session did not write (repo-relative). */
+  foreign: string[];
+  /** Dirty paths in scope this session DID write (repo-relative). */
+  own: string[];
+  message: string;
+}
+
+export function checkForeignStaging(sessionKey: string, cwd: string, shape: GitCommandShape): ForeignStagingResult {
+  const none: ForeignStagingResult = { blocked: false, foreign: [], own: [], message: "" };
+  if (!shape.broadStageScope || process.env.MUONROI_ALLOW_BROAD_STAGE === "1") return none;
+  const root = gitTopLevel(cwd);
+  if (!root) return none;
+  const dirty = listDirtyPaths(root);
+  if (!dirty) return none; // logged; fail open — the commit LSP gate + sensitive check still apply
+  const written = new Set(sessionWrittenPaths(sessionKey));
+  const cwdKey = normalizeSafetyPath(cwd);
+  const foreign: string[] = [];
+  const own: string[] = [];
+  for (const d of dirty) {
+    if (shape.broadStageScope === "tracked" && d.untracked) continue;
+    const abs = normalizeSafetyPath(d.rel, root);
+    if (shape.broadStageScope === "cwd" && abs !== cwdKey && !abs.startsWith(`${cwdKey}${path.sep}`)) continue;
+    // --untracked-files=all lists files, never collapsed directories, so an
+    // exact path match is complete.
+    (written.has(abs) ? own : foreign).push(d.rel);
+  }
+  if (foreign.length === 0) return { ...none, own };
+  const shown = foreign.slice(0, 30).map((p) => `  • ${p}`);
+  if (foreign.length > 30) shown.push(`  … and ${foreign.length - 30} more`);
+  const explicit = own.length
+    ? `Stage only your own files explicitly, e.g. \`git add -- ${own.slice(0, 10).join(" ")}\`${own.length > 10 ? " …" : ""}, or use the git_commit tool (it stages exactly the files you wrote).`
+    : "Stage the specific files you mean with `git add -- <path>`, or use the git_commit tool (it stages exactly the files you wrote).";
+  return {
+    blocked: true,
+    foreign,
+    own,
+    message:
+      "refusing broad staging (`git add -A`/`.`/`-u`/`commit -a`) — these dirty paths were NOT written by you this session " +
+      "and would be swept into the commit:\n" +
+      `${shown.join("\n")}\n\n` +
+      `${explicit} Leave the paths above alone unless the user asked to commit them; if so, the user approves it in the safety prompt.`,
+  };
 }
 
 // ── Destructive-op guard (2026-07-12) ──────────────────────────────────────

@@ -50,7 +50,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 
 7. ANTI-MÙ/COMPACTION: on compaction emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results; re-hydrate via ee_query "tool-artifact id=XXX". Use 'compact' near limits.
 
-8. GIT SAFETY: never push on red — run the check, await its result in a SEPARATE step, confirm 0 failures, then push. Never \`git add -A\`/\`commit -a\`; stage explicitly so secrets (.env, .muonroi-cli/, keys) aren't committed. Never \`--no-verify\`.
+8. GIT: push, broad staging and hook bypass are host-gated; a refusal names what to run.
 
 9. VERIFICATION: run focused checks for changed logic; add \`selfverify_*\` for UI/harness/workflow changes. Pure discussion needs no harness. Use VERIFICATION ROUTING in native capabilities and honor repository-required checks.
 

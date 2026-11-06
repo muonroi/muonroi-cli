@@ -50,13 +50,15 @@ describe("AGENT_OPERATING_CONTRACT", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/END CONTRACT/i);
   });
 
-  it("carries the git-safety rule (never push on red; no broad git add of secrets)", () => {
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/GIT SAFETY/i);
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/push on red|never push/i);
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/git add -A|stage explicitly/i);
+  it("git rules are host-enforced: the contract keeps only a pointer, not the procedure", () => {
+    // Push / broad staging / hook bypass are refused by src/tools/git-safety.ts
+    // (behavior covered in git-safety-native-guards.test.ts and
+    // registry-native-git-guards.test.ts). The prompt only says a gate exists.
+    expect(AGENT_OPERATING_CONTRACT).toMatch(/host-gated/i);
+    expect(AGENT_OPERATING_CONTRACT).not.toMatch(/push on red|stage explicitly|--no-verify/i);
   });
 
-  it("stays compact (under 2000 chars) to preserve attention budget on every turn (git-safety rule added)", () => {
+  it("stays compact (under 2000 chars) to preserve attention budget on every turn", () => {
     expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(2000);
   });
 });

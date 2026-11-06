@@ -51,7 +51,13 @@ import { createHash } from "node:crypto";
 import { promises as fsp, realpathSync } from "node:fs";
 import path from "node:path";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
-import { type FloorCheck, getFloorTimeoutMs, isStyleGate, runFloorCommand } from "../product-loop/verify-floor.js";
+import {
+  areStyleGatesBlocking,
+  type FloorCheck,
+  getFloorTimeoutMs,
+  isStyleGate,
+  runFloorCommand,
+} from "../product-loop/verify-floor.js";
 import { logger } from "../utils/logger.js";
 import { checkCatastrophicCommand } from "../utils/permission-mode.js";
 import { loadVerifyEnvironment } from "../verify/environment.js";
@@ -139,6 +145,18 @@ export function findServingGate(requirement: GateRequirement, catalog: GateCatal
     default:
       return undefined;
   }
+}
+
+/**
+ * The test gates a push must have passed: every `test-N` gate except style
+ * gates (`lint`/`check` scripts), which block only under
+ * MUONROI_SPRINT_FLOOR_STYLE_GATES=1 — the same rule as the verify floor
+ * (`resolveFloorCommands`), for the same measured reason (a base-red lint gate
+ * would block every push for a reason the session did not cause).
+ */
+export function requiredTestGates(catalog: GateCatalog): GateEntry[] {
+  const blockStyle = areStyleGatesBlocking();
+  return catalog.gates.filter((gate) => gate.kind === "test" && (blockStyle || !isStyleGate(gate.command)));
 }
 
 export function describeGateCatalog(catalog: GateCatalog): string {

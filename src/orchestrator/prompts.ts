@@ -21,6 +21,7 @@ import {
 import { resolveShell } from "../utils/shell.js";
 import { discoverSkills, formatCompactSkillsForPrompt, formatSkillsForPrompt } from "../utils/skills";
 import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable } from "../verify/host-capabilities.js";
+import { gitPromptStatus } from "./git-prompt-status.js";
 import { type ExecutionRole, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
 
 // F3a — hard cap on tool rounds per user turn. Reduced 100 → 40
@@ -667,7 +668,10 @@ export function buildSystemPromptParts(
     : "";
 
   const currentDateTime = new Date();
-  const dateTimeSection = `- Current date/time (UTC): ${currentDateTime.toISOString()}\n- Current working directory: ${cwd}`;
+  // Git state lives HERE (dynamic suffix), never in the cached static prefix:
+  // it changes with every edit/commit. "" outside a git work tree.
+  const gitLine = gitPromptStatus(cwd);
+  const dateTimeSection = `- Current date/time (UTC): ${currentDateTime.toISOString()}\n- Current working directory: ${cwd}${gitLine ? `\n${gitLine}` : ""}`;
   const permissionSection = `Runtime policy snapshot — permission mode: ${options?.permissionMode ?? "unavailable"}; sandbox mode: ${sandboxMode}. Tool-specific approval and workflow guards still apply; this snapshot grants no authorization.`;
   const dynamicSuffix = `${planSection}${resumeSection}\n\n${dateTimeSection}\n${permissionSection}`;
 
