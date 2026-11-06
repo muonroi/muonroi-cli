@@ -51,7 +51,7 @@ describe("/compact progress card E2E", () => {
   it("shows a live stage + percent while compaction runs, and retires the card when it ends", async () => {
     // Press Enter only once the composer holds the whole command and the UI has
     // settled: typed as a burst, the slash menu can still be filtering when Enter
-    // lands and take the key (CLAUDE.md caveat) — then /compact never runs and
+    // lands and take the key (docs/agent-harness/HARNESS-GUIDE.md caveat) — then /compact never runs and
     // the card never mounts (CI: 20 s wait_for timeout on the first attempt).
     const command = "/compact keep the greeting";
     ctx.driver.type(command);

@@ -168,5 +168,5 @@ once EE becomes reachable again.
 ## See also
 
 - `docs/agent-harness/EE-INGESTION.md` — how the EE collections are seeded.
-- `CLAUDE.md` § *BB-aware `/ideal`* — feature flag + injection markers.
+- `docs/architecture/FLOW-PIPELINE.md` § *BB-aware `/ideal`* — feature flag + injection markers.
 - `src/ee/offline-queue.ts` — queue replay semantics.
