@@ -264,7 +264,11 @@ describe("host-only exact worker approval", () => {
     try {
       const view = await pending(f.jobPath);
       expect(effect).not.toHaveBeenCalled();
-      expect(isBoundedWorkerWaitActive()).toBe(true);
+      // requestWorkerApproval writes the pending record inside the file lock and
+      // only then (worker-approval.ts, after the lock resolves) begins the bounded
+      // wait, so `pending()` can observe the record a tick before the flag flips.
+      // Measured: this assertion failed 1 of 3 isolated runs when read eagerly.
+      await vi.waitFor(() => expect(isBoundedWorkerWaitActive()).toBe(true), { timeout: 2_000 });
       expect(view).toMatchObject({
         ownerId: "owner",
         jobId: "job",

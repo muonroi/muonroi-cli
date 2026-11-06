@@ -131,7 +131,8 @@ import {
   setModelDisabled,
   setProviderDisabled,
 } from "../utils/settings";
-import { discoverSkills, formatSkillsForChat } from "../utils/skills";
+import { runSkillCreateFlow } from "../utils/skill-authoring.js";
+import { resolveSkillSlashCommand } from "../utils/skill-invocation.js";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
 import { setRetryReporter } from "../utils/visible-retry.js";
@@ -224,7 +225,7 @@ import {
   type SlashMenuItem,
   VISIBLE_SLASH_MENU_ITEMS,
 } from "./slash/menu-items.js";
-import { dispatchSlash } from "./slash/registry.js";
+import { dispatchSlash, listSlashCommands } from "./slash/registry.js";
 import { handlePermissionsSlash } from "./slash/permissions.js";
 import { StatusBar } from "./status-bar/index.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
@@ -247,6 +248,7 @@ import "./slash/ideal.js";
 import "./slash/export.js";
 import "./slash/status.js";
 import "./slash/ponytail.js";
+import "./slash/skills.js";
 import {
   CONNECT_CHANNELS,
   getSandboxVisibleRows,
@@ -3359,9 +3361,11 @@ export function useAppLogic(props: AppLogicProps) {
   // ONLY from the model's tool input; the CLI synthesises nothing) and blocks
   // until the human answers or dismisses. The resolved string becomes the tool
   // result the agent reads to decide its next step.
-  useEffect(() => {
-    agent.setAskUserHandler(async (info: AskUserAskInfo) => {
-      return new Promise<string>((resolve) => {
+  // The same card also serves UI-initiated questions (/skill-create), so the
+  // opener is shared: answer/Esc drain through askUserResolversRef either way.
+  const openAskUserCard = useCallback(
+    (info: AskUserAskInfo) =>
+      new Promise<string>((resolve) => {
         const qid = `ask-user-${Date.now()}`;
         askUserResolversRef.current.set(qid, resolve);
         const question = buildAskUserQuestion(info, qid);
@@ -3377,16 +3381,22 @@ export function useAppLogic(props: AppLogicProps) {
             optionCount: question.options?.length ?? 0,
             defaultIndex: question.defaultIndex ?? 0,
           });
-        } catch {
-          /* best-effort */
+        } catch (err) {
+          logger.warn("ui", "[ask-user] askcard-open harness event failed", {
+            questionId: qid,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-      });
-    });
+      }),
+    [setPendingCouncilQuestionSync, setCouncilCardStateSync],
+  );
+  useEffect(() => {
+    agent.setAskUserHandler(openAskUserCard);
     return () => {
       agent.setAskUserHandler(null);
       askUserResolversRef.current.clear();
     };
-  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+  }, [agent, openAskUserCard]);
 
   // Safe-mode approval for main's own tool calls (read_file/grep). The tool's
   // execute awaits this promise INSIDE the live turn, so approve → the tool runs
@@ -5076,6 +5086,62 @@ export function useAppLogic(props: AppLogicProps) {
         processMessage(buildCustomSubagentSlashPrompt(customSubagentCommand.agentName, customSubagentCommand.prompt));
         return true;
       }
+      // /skill-create [name] [--project|--user] [description]: asks (askcard)
+      // only for what was not typed, then writes the SKILL.md scaffold.
+      if (c === "/skill-create" || c.startsWith("/skill-create ")) {
+        if (pendingCouncilQuestionRef.current) {
+          pushToast("warn", "Answer the open question first, then run /skill-create again.");
+          return true;
+        }
+        const argsText = cmd.trim().slice("/skill-create".length);
+        // Also makes the transcript (where askcards render) mount on a fresh session.
+        setMessages((prev) => [
+          ...prev,
+          buildUserEntry(cmd.trim()),
+          buildAssistantEntry("Creating an Agent Skill — answer the questions below (Esc cancels)."),
+        ]);
+        runSkillCreateFlow({
+          cwd: agent.getCwd(),
+          argsText,
+          ask: async (q) => {
+            const answer = await openAskUserCard({
+              question: q.question,
+              context: q.context,
+              options: q.options,
+              defaultIndex: q.defaultIndex,
+            });
+            return answer === ASK_USER_DISMISSED ? null : answer;
+          },
+        })
+          .then((result) => {
+            setMessages((prev) => [...prev, buildAssistantEntry(result.message)]);
+            if (result.ok) pushToast("info", "Skill created");
+          })
+          .catch((err: unknown) => {
+            const emsg = err instanceof Error ? err.message : String(err);
+            logger.warn("ui", "[/skill-create] flow failed", { error: emsg });
+            setMessages((prev) => [...prev, buildAssistantEntry(`/skill-create failed: ${emsg}`)]);
+          });
+        return true;
+      }
+      // /skill <name> [args] and /<skill-name> [args]: the rendered SKILL.md
+      // body becomes this turn's message. Commands that already own a name win.
+      const skillInvocation = resolveSkillSlashCommand(cmd, agent.getCwd(), (name) => {
+        return listSlashCommands().includes(name) || SLASH_MENU_ITEMS.some((item) => item.id === name);
+      });
+      if (skillInvocation) {
+        if (skillInvocation.kind === "error") {
+          setMessages((prev) => [...prev, buildAssistantEntry(skillInvocation.text)]);
+          return true;
+        }
+        if (isProcessingRef.current) {
+          queuedMessagesRef.current.push({ text: skillInvocation.message, displayText: skillInvocation.display });
+          setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+          return true;
+        }
+        processMessage(skillInvocation.message, skillInvocation.display);
+        return true;
+      }
       // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
       if (c.startsWith("/")) {
         // Parse the ARGUMENTS off the raw input, not off `c`. `c` is
@@ -5883,6 +5949,7 @@ export function useAppLogic(props: AppLogicProps) {
       setSessionPickerList,
       setSessionPickerIndex,
       setShowSessionPicker,
+      openAskUserCard,
     ],
   );
 
@@ -5952,6 +6019,13 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "update":
           runUpdateFromUi();
+          break;
+        case "skill-create":
+          handleCommand("/skill-create");
+          break;
+        case "skill":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/skill ");
           break;
         case "clear":
           agent.clearHistory();

@@ -17,6 +17,7 @@ export const SCOPED_WORKER_TOOL_NAMES = [
   "compact",
   "retrieve_tool_result",
   "context_load",
+  "skill_load",
   "list_tools",
   "describe_tool",
   // Host-executed verification gate (src/tools/run-gate.ts): a catalog id, never

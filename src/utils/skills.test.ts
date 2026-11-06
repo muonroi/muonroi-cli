@@ -2,7 +2,58 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { discoverSkills, resetSkillsCache } from "./skills";
+import {
+  type DiscoveredSkill,
+  discoverSkills,
+  formatCompactSkillsForPrompt,
+  formatSkillsForChat,
+  formatWorkerSkillsForPrompt,
+  resetSkillsCache,
+  SKILLS_INDEX_MAX_CHARS,
+  skillsGeneration,
+  WORKER_SKILLS_INDEX_MAX_CHARS,
+} from "./skills";
+
+function fakeSkill(i: number, scope: DiscoveredSkill["scope"] = "project"): DiscoveredSkill {
+  return {
+    name: `skill-${String(i).padStart(3, "0")}`,
+    description: `Description number ${i} ${"padding ".repeat(12)}`,
+    skillMdPath: `/x/skill-${i}/SKILL.md`,
+    rootDir: `/x/skill-${i}`,
+    scope,
+  };
+}
+
+describe("skills prompt indexes", () => {
+  it("bounds the main index and points at the remainder", () => {
+    const text = formatCompactSkillsForPrompt(Array.from({ length: 400 }, (_, i) => fakeSkill(i)))!;
+    expect(text.length).toBeLessThan(SKILLS_INDEX_MAX_CHARS + 600);
+    expect(text).toContain("skill_load(name)");
+    expect(text).toMatch(/- \.\.\.and \d+ more \(context_load topic=skills lists them\)$/);
+  });
+
+  it("gives workers names only, bounded", () => {
+    const text = formatWorkerSkillsForPrompt(Array.from({ length: 400 }, (_, i) => fakeSkill(i)))!;
+    expect(text.length).toBeLessThanOrEqual(WORKER_SKILLS_INDEX_MAX_CHARS + 40);
+    expect(text).toContain("skill-000");
+    expect(text).not.toContain("Description number");
+    expect(text).toMatch(/\.\.\.and \d+ more$/);
+    expect(formatWorkerSkillsForPrompt([])).toBeNull();
+  });
+
+  it("lists project skills before user and bundled ones in /skills", () => {
+    const text = formatSkillsForChat([fakeSkill(1, "builtin"), fakeSkill(2, "user"), fakeSkill(3, "project")], "/repo");
+    expect(text.indexOf("skill-003 [project]")).toBeLessThan(text.indexOf("skill-002 [user]"));
+    expect(text.indexOf("skill-002 [user]")).toBeLessThan(text.indexOf("skill-001 [builtin]"));
+    expect(text).toContain("/skill-create");
+  });
+
+  it("bumps the generation on every cache reset (prompt prefix cache key)", () => {
+    const before = skillsGeneration();
+    resetSkillsCache();
+    expect(skillsGeneration()).toBe(before + 1);
+  });
+});
 
 const tempDirs: string[] = [];
 
@@ -114,6 +165,34 @@ describe("discoverSkills", () => {
     expect(() => discoverSkills(repoRoot)).not.toThrow();
     const skills = discoverSkills(repoRoot);
     expect(skills.find((skill) => skill.name === "ghost-skill")).toBeUndefined();
+  });
+
+  it("outside a git repository scans only the cwd, not every parent up to the drive root", () => {
+    const outer = makeTempDir("muonroi-skills-nogit-");
+    const inner = path.join(outer, "work");
+    fs.mkdirSync(inner, { recursive: true });
+    writeSkill(outer, "parent-only", "Lives in a non-git parent");
+    writeSkill(inner, "cwd-skill", "Lives in the cwd");
+    const names = discoverSkills(inner).map((s) => s.name);
+    expect(names).toContain("cwd-skill");
+    expect(names).not.toContain("parent-only");
+  });
+
+  it("reads user skills from <cli home>/skills", () => {
+    const repoRoot = makeTempDir("muonroi-skills-clihome-");
+    fs.mkdirSync(path.join(repoRoot, ".git"));
+    const home = makeTempDir("muonroi-skills-clihome-home-");
+    const saved = process.env.MUONROI_CLI_HOME;
+    process.env.MUONROI_CLI_HOME = home;
+    try {
+      const dir = path.join(home, "skills", "cli-owned");
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "SKILL.md"), "---\nname: cli-owned\ndescription: From cli home\n---\n");
+      expect(discoverSkills(repoRoot).find((s) => s.name === "cli-owned")?.scope).toBe("user");
+    } finally {
+      if (saved === undefined) delete process.env.MUONROI_CLI_HOME;
+      else process.env.MUONROI_CLI_HOME = saved;
+    }
   });
 
   it("skips a symlink that resolves to a plain FILE, not a directory", () => {

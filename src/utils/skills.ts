@@ -21,9 +21,21 @@ function escapeXml(text: string): string {
 
 function stripQuotes(s: string): string {
   const t = s.trim();
-  if ((t.startsWith('"') && t.endsWith('"')) || (t.startsWith("'") && t.endsWith("'"))) {
+  if (t.length >= 2 && t.startsWith('"') && t.endsWith('"')) {
+    // A YAML double-quoted scalar uses JSON-compatible escapes for the common
+    // cases; skill_create writes descriptions this way, so `"` and `\` inside
+    // one must round-trip instead of surfacing as `\"`.
+    try {
+      const parsed: unknown = JSON.parse(t);
+      if (typeof parsed === "string") return parsed;
+    } catch (error) {
+      logger.file("debug", "skills", "Double-quoted frontmatter value is not JSON-escaped; using raw text", {
+        error: String(error),
+      });
+    }
     return t.slice(1, -1).replace(/\\n/g, "\n");
   }
+  if (t.length >= 2 && t.startsWith("'") && t.endsWith("'")) return t.slice(1, -1).replace(/''/g, "'");
   return t;
 }
 
@@ -146,17 +158,26 @@ function listSkillDirectories(skillsRoot: string): string[] {
   }
 }
 
+/**
+ * Project skill roots, outermost first: `.agents/skills` in every directory
+ * from the git root down to `projectRoot` (the span Codex scans).
+ *
+ * Outside a git repository only `projectRoot` itself is scanned. The walk used
+ * to run to the filesystem root, so a non-git cwd under the home directory
+ * re-listed `~/.agents/skills` labelled "project" — measured by the skills
+ * harness audit: a temp cwd with HOME isolated still listed the developer's
+ * real ~/.agents/skills entries (qc-flow, qc-lock, shipd-*).
+ */
 function listProjectSkillRoots(projectRoot: string): string[] {
   const start = path.resolve(projectRoot);
   const gitRoot = findGitRoot(start);
+  if (!gitRoot) return [path.join(start, ".agents", "skills")];
   const roots: string[] = [];
   let current = start;
 
   while (true) {
     roots.push(path.join(current, ".agents", "skills"));
-    if (gitRoot ? current === gitRoot : path.dirname(current) === current) {
-      break;
-    }
+    if (current === gitRoot) break;
     const parent = path.dirname(current);
     if (parent === current) break;
     current = parent;
@@ -165,19 +186,52 @@ function listProjectSkillRoots(projectRoot: string): string[] {
   return roots.reverse();
 }
 
-// --- Skills discovery cache ---
-let _skillsCache: { skills: DiscoveredSkill[]; cachedAt: number; cwd: string } | null = null;
-const SKILLS_CACHE_TTL_MS = 120_000; // 2 minutes — skills almost never change mid-session
-
-/** Clear the skills discovery cache (for tests). */
-export function resetSkillsCache(): void {
-  _skillsCache = null;
+/** CLI-owned home, honouring MUONROI_CLI_HOME like every other CLI store. */
+function cliHomeDir(): string {
+  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 /**
- * Discover Agent Skills under ~/.agents/skills and from <projectRoot> upward through
- * parent directories to the git root. The nearest project-level skill overrides
- * user-level and higher-level project skills with the same `name` (frontmatter).
+ * User-level skill roots in ascending precedence. `~/.agents/skills` is the
+ * cross-client location (Codex reads it too); `<cli home>/skills` is
+ * muonroi-cli's own, and is where user-scope skills are created.
+ */
+export function userSkillRoots(): string[] {
+  return [path.join(os.homedir(), ".agents", "skills"), path.join(cliHomeDir(), "skills")];
+}
+
+/** Directory a newly created skill of `scope` is written under. */
+export function skillCreateRoot(scope: "user" | "project", cwd: string): string {
+  if (scope === "user") return path.join(cliHomeDir(), "skills");
+  const start = path.resolve(cwd);
+  return path.join(findGitRoot(start) ?? start, ".agents", "skills");
+}
+
+// --- Skills discovery cache ---
+let _skillsCache: { skills: DiscoveredSkill[]; cachedAt: number; cwd: string } | null = null;
+const SKILLS_CACHE_TTL_MS = 120_000; // 2 minutes — skills almost never change mid-session
+let _skillsGeneration = 0;
+
+/**
+ * Drop the discovery cache so the next lookup re-reads disk. Called after a
+ * skill is created and by `/skills`; it also bumps {@link skillsGeneration} so
+ * the system-prompt prefix cache, which embeds the index, misses too.
+ */
+export function resetSkillsCache(): void {
+  _skillsCache = null;
+  _skillsGeneration++;
+}
+
+/** Monotonic counter that changes whenever the skills cache is invalidated. */
+export function skillsGeneration(): number {
+  return _skillsGeneration;
+}
+
+/**
+ * Discover Agent Skills under ~/.agents/skills, <cli home>/skills and
+ * `.agents/skills` from the git root down to <projectRoot>. The nearest
+ * project-level skill overrides user-level and higher project skills with the
+ * same frontmatter `name`; the bundled muonroi-flow skill cannot be replaced.
  */
 export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
   const now = Date.now();
@@ -185,13 +239,13 @@ export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
     return _skillsCache.skills;
   }
 
-  const userRoot = path.join(os.homedir(), ".agents", "skills");
-
   const byName = new Map<string, DiscoveredSkill>();
 
-  for (const dir of listSkillDirectories(userRoot)) {
-    const s = loadSkillFromDir(dir, "user");
-    if (s) byName.set(s.name, s);
+  for (const userRoot of userSkillRoots()) {
+    for (const dir of listSkillDirectories(userRoot)) {
+      const s = loadSkillFromDir(dir, "user");
+      if (s) byName.set(s.name, s);
+    }
   }
   for (const skillsRoot of listProjectSkillRoots(projectRoot)) {
     for (const dir of listSkillDirectories(skillsRoot)) {
@@ -213,10 +267,21 @@ export function discoverSkills(projectRoot: string): DiscoveredSkill[] {
 
 const SKILLS_INSTRUCTIONS = `AGENT SKILLS (optional):
 The following <available_skills> list specialized workflows. Use them when they might help the user's request — not only on exact keyword matches.
-If a skill's description fits the task or could improve consistency, read that skill's instructions first using read_file with the path from <location>, then follow the SKILL.md body.
+If a skill's description fits the task or could improve consistency, load it first with skill_load(name) (or read_file on <location>), then follow the SKILL.md body.
 Paths inside a skill (scripts/, references/, assets/) are relative to the skill directory (the folder containing SKILL.md); prefer absolute paths in tool calls.`;
 
-/** OpenCode-style XML catalog plus activation instructions for read_file. Returns null if no skills. */
+/**
+ * Upper bound on the compact index in the system prompt. Codex caps its initial
+ * skill list at 8,000 characters when the context window is unknown
+ * (https://learn.chatgpt.com/docs/build-skills); this index is re-sent on every
+ * call, so it stays below that. Skills past the cap stay reachable through
+ * skill_load / context_load(topic=skills).
+ */
+export const SKILLS_INDEX_MAX_CHARS = 6000;
+/** Worker prompts carry names only, under a much smaller budget. */
+export const WORKER_SKILLS_INDEX_MAX_CHARS = 1200;
+
+/** OpenCode-style XML catalog plus activation instructions. Returns null if no skills. */
 export function formatSkillsForPrompt(skills: DiscoveredSkill[]): string | null {
   if (skills.length === 0) return null;
   const parts = skills.map(
@@ -226,29 +291,151 @@ export function formatSkillsForPrompt(skills: DiscoveredSkill[]): string | null 
   return `${SKILLS_INSTRUCTIONS}\n\n<available_skills>\n${parts.join("\n")}\n</available_skills>`;
 }
 
-/** Full names remain visible; descriptions/paths are available through context_load. */
+function boundedLines(lines: string[], maxChars: number, overflow: (remaining: number) => string): string {
+  const kept: string[] = [];
+  let used = 0;
+  for (let i = 0; i < lines.length; i++) {
+    if (used + lines[i].length + 1 > maxChars) {
+      kept.push(overflow(lines.length - i));
+      break;
+    }
+    kept.push(lines[i]);
+    used += lines[i].length + 1;
+  }
+  return kept.join("\n");
+}
+
+/** Names plus abbreviated descriptions; bodies load on demand through skill_load. */
 export function formatCompactSkillsForPrompt(skills: DiscoveredSkill[]): string | null {
   if (!skills.length) return null;
   return (
-    "AGENT SKILLS: compact index (descriptions abbreviated). Use context_load(topic=skills, query=<name or topic>) for original metadata/path; offset pages the entire catalog. Read the selected SKILL.md before acting; do not omit user-named or repo-required skills.\n" +
-    skills.map((s) => `- ${s.name}: ${s.description.replace(/\s+/g, " ").slice(0, 72)}`).join("\n")
+    "AGENT SKILLS: compact index (descriptions abbreviated). When a skill fits the request, call skill_load(name) and follow the returned instructions; context_load(topic=skills, query=<name or topic>) searches full metadata/paths. Do not omit user-named or repo-required skills. To author a new skill the user asks for, call skill_create.\n" +
+    boundedLines(
+      skills.map((s) => `- ${s.name}: ${s.description.replace(/\s+/g, " ").slice(0, 72)}`),
+      SKILLS_INDEX_MAX_CHARS,
+      (n) => `- ...and ${n} more (context_load topic=skills lists them)`,
+    )
   );
 }
 
-/** Plain-text listing for /skills slash command in the TUI. */
+/** Worker index: names only and bounded; the owning main names the skill to use. */
+export function formatWorkerSkillsForPrompt(skills: DiscoveredSkill[]): string | null {
+  if (!skills.length) return null;
+  const header =
+    "AGENT SKILLS available via skill_load(name); load one only when the delegated task names it or clearly needs it: ";
+  let out = header;
+  for (let i = 0; i < skills.length; i++) {
+    const piece = (i ? ", " : "") + skills[i].name;
+    if (out.length + piece.length > WORKER_SKILLS_INDEX_MAX_CHARS) {
+      out += `, ...and ${skills.length - i} more`;
+      break;
+    }
+    out += piece;
+  }
+  return out;
+}
+
+/** Exact name first, then a case-insensitive match. */
+export function findSkill(skills: DiscoveredSkill[], name: string): DiscoveredSkill | undefined {
+  const wanted = name.trim();
+  if (!wanted) return undefined;
+  return skills.find((s) => s.name === wanted) ?? skills.find((s) => s.name.toLowerCase() === wanted.toLowerCase());
+}
+
+/** SKILL.md content without its frontmatter block. */
+export function readSkillBody(skill: DiscoveredSkill): string {
+  const content = fs.readFileSync(skill.skillMdPath, "utf-8").replace(/^﻿/, "");
+  const trimmed = content.trimStart();
+  if (!trimmed.startsWith("---")) return content.trim();
+  const lines = trimmed.split(/\r?\n/);
+  const end = lines.findIndex((l, i) => i > 0 && l.trim() === "---");
+  return end < 0
+    ? content.trim()
+    : lines
+        .slice(end + 1)
+        .join("\n")
+        .trim();
+}
+
+const MAX_LISTED_RESOURCES = 40;
+
+/** Files bundled next to SKILL.md (relative paths, depth <= 2, bounded). */
+export function listSkillResources(skill: DiscoveredSkill): { files: string[]; truncated: boolean } {
+  const files: string[] = [];
+  let truncated = false;
+  const walk = (dir: string, rel: string, depth: number): void => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch (error) {
+      logger.file("warn", "skills", "Could not list skill resources", { dir, error: String(error) });
+      return;
+    }
+    for (const e of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+      if (truncated) return;
+      if (e.name.startsWith(".")) continue;
+      const relPath = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        if (depth < 2) walk(path.join(dir, e.name), relPath, depth + 1);
+        continue;
+      }
+      if (relPath === "SKILL.md") continue;
+      if (files.length >= MAX_LISTED_RESOURCES) {
+        truncated = true;
+        return;
+      }
+      files.push(relPath);
+    }
+  };
+  walk(skill.rootDir, "", 0);
+  return { files, truncated };
+}
+
+/**
+ * The text a skill contributes to a turn. `$ARGUMENTS` in the body is replaced
+ * by the argument string; when the body has no placeholder and arguments were
+ * given they are appended as `ARGUMENTS: ...` — Claude Code's convention
+ * (https://code.claude.com/docs/en/skills).
+ */
+export function renderSkillInstructions(skill: DiscoveredSkill, args: string): string {
+  const body = readSkillBody(skill);
+  const trimmedArgs = args.trim();
+  const hasPlaceholder = body.includes("$ARGUMENTS");
+  const rendered = hasPlaceholder ? body.split("$ARGUMENTS").join(trimmedArgs) : body;
+  const tail = !hasPlaceholder && trimmedArgs ? `\n\nARGUMENTS: ${trimmedArgs}` : "";
+  return `<skill name="${escapeXml(skill.name)}" dir="${escapeXml(skill.rootDir)}">\n${rendered}${tail}\n</skill>`;
+}
+
+/** Plain-text listing for the /skills slash command. */
 export function formatSkillsForChat(skills: DiscoveredSkill[], projectRoot: string): string {
+  const where = [
+    `  project: ${path.join(skillCreateRoot("project", projectRoot), "<name>", "SKILL.md")}`,
+    ...userSkillRoots().map((r) => `  user:    ${path.join(r, "<name>", "SKILL.md")}`),
+  ];
+  const usage = [
+    "Use: /skill <name> [args]  (or /<name> [args] when no command already has that name)",
+    "Create: /skill-create [name] [--project|--user] [description]",
+  ];
   if (skills.length === 0) {
     return [
       "No Agent Skills found.",
       "",
-      `Add skills under ${path.join(projectRoot, ".agents", "skills", "<name>", "SKILL.md")} or ~/.agents/skills/<name>/SKILL.md`,
-      "Install manually or use scripts such as skills.sh; see https://agentskills.io",
+      "Skills are read from:",
+      ...where,
+      "",
+      ...usage,
+      "Format: https://agentskills.io/specification",
     ].join("\n");
   }
-  const lines = [
+  // Project skills first, then user, then bundled: the ones a user just added
+  // or is most likely to look for lead the list.
+  const rank: Record<SkillScope, number> = { project: 0, user: 1, builtin: 2 };
+  const ordered = [...skills].sort((a, b) => rank[a.scope] - rank[b.scope] || a.name.localeCompare(b.name));
+  return [
     `Agent Skills (${skills.length})`,
     "",
-    ...skills.map((s) => `- ${s.name} [${s.scope}]\n  ${s.description}\n  ${s.skillMdPath}`),
-  ];
-  return lines.join("\n");
+    ...ordered.map((s) => `- ${s.name} [${s.scope}]\n  ${s.description}\n  ${s.skillMdPath}`),
+    "",
+    ...usage,
+  ].join("\n");
 }

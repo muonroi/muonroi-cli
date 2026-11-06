@@ -19,7 +19,13 @@ import {
   type SandboxSettings,
 } from "../utils/settings";
 import { resolveShell } from "../utils/shell.js";
-import { discoverSkills, formatCompactSkillsForPrompt, formatSkillsForPrompt } from "../utils/skills";
+import {
+  discoverSkills,
+  formatCompactSkillsForPrompt,
+  formatSkillsForPrompt,
+  formatWorkerSkillsForPrompt,
+  skillsGeneration,
+} from "../utils/skills";
 import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable } from "../verify/host-capabilities.js";
 import { type ExecutionRole, ORCHESTRATOR_CONTRACT } from "./orchestration-policy.js";
 
@@ -547,7 +553,8 @@ function staticPrefixCacheKey(
   toolTurn = false,
   executionRole?: ExecutionRole,
 ): string {
-  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}|${progressiveContextEnabled()}|${executionRole ?? ""}`;
+  // skillsGeneration: a skill created mid-session must reach the next prompt's index.
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}|${progressiveContextEnabled()}|${executionRole ?? ""}|${skillsGeneration()}`;
 }
 
 function computeStaticPrefix(
@@ -569,9 +576,12 @@ function computeStaticPrefix(
   // The agent was already shown these in the first call of this turn and does not need
   // to re-read them on every tool round-trip.
   const progressive = progressiveContextEnabled();
-  const skillsTextRaw =
-    chitchat || subAgent
-      ? ""
+  // Children get a names-only index (bounded) so a worker told to apply a
+  // skill can skill_load it; the full catalog stays with main.
+  const skillsTextRaw = chitchat
+    ? ""
+    : subAgent
+      ? formatWorkerSkillsForPrompt(discoverSkills(cwd))
       : progressive || executionRole === "orchestrator"
         ? formatCompactSkillsForPrompt(discoverSkills(cwd))
         : toolTurn

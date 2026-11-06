@@ -29,6 +29,7 @@ import "../route.js";
 import "../permissions.js";
 import "../status.js";
 import "../ponytail.js";
+import "../skills.js";
 
 describe("slash menu / registry parity", () => {
   it("every registered slash command has a menu entry", () => {
