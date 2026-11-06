@@ -1,8 +1,14 @@
 import type { ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
 import { minimalReasoningProviderOptions } from "../providers/capabilities.js";
-import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from "../providers/runtime.js";
+import {
+  resolveMaxOutputTokensParam,
+  resolveModelRuntime,
+  resolveTemperatureParam,
+  shouldDropParam,
+} from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
+import type { ModelInfo } from "../types/index.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
 import { parseCompactionProposal } from "./compaction-proposal.js";
@@ -80,6 +86,21 @@ export async function proposeCompaction(
   const runtime = resolveModelRuntime(modelId, { stage: "compaction" });
   const serialized = serializeConversation(messages);
   const deadlineMs = getProposerDeadlineMs();
+  // The proposer returns per-message-index actions, so its input cannot be
+  // head/tail-capped like the summary's. When the transcript does not fit the
+  // proposer model's window, skip it (the caller's heuristic decides) instead
+  // of sending a request the provider must refuse. Session c2fda568be6b,
+  // 2026-11-06 11:19/11:39: "maximum context length is 262144 tokens. However,
+  // you requested 857116 tokens" — plus a 30s+30s deadline burned every turn.
+  const proposerWindow = runtime.modelInfo?.contextWindow ?? 0;
+  if (exceedsModelInputBudget(serialized, proposerWindow)) {
+    logger.file("warn", "orchestrator", "Compaction proposer skipped: transcript exceeds the proposer window", {
+      modelId,
+      contextWindow: proposerWindow,
+      serializedChars: serialized.length,
+    });
+    return null;
+  }
 
   for (let attempt = 1; attempt <= PROPOSER_MAX_ATTEMPTS; attempt++) {
     signal?.throwIfAborted();
@@ -903,36 +924,134 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(modelId);
-  const dropMaxOutput = shouldDropParam(runtime, "maxOutputTokens");
   // Ask for the cheapest reasoning the provider exposes: output tokens are
   // shared with reasoning, and a summary whose budget is spent thinking comes
   // back empty (see CompactionSummaryRejectedError). Providers with no knob
   // return undefined and the merge is a no-op.
   const providerOptions = minimalReasoningProviderOptions(runtime);
-  const result = await generateTextStreamed({
-    model: runtime.model,
-    system: SUMMARIZATION_SYSTEM_PROMPT,
-    prompt: promptParts.filter(Boolean).join("\n\n"),
-    abortSignal: signal,
-    maxRetries: 0,
-    ...resolveTemperatureParam(runtime, 0.2),
-    // See proposeCompaction — the OAuth registry veto must be honoured here too.
-    // This call has NO caller-side catch (compactForContext awaits it directly),
-    // so a 400 here aborts the user's turn outright.
-    ...(dropMaxOutput ? {} : { maxOutputTokens: effectiveMax }),
-    ...(providerOptions ? { providerOptions } : {}),
-  });
+  // `effectiveMax` is a VISIBLE-summary budget. On a reasoning model the
+  // provider's max_tokens bounds thinking + answer together, so it must go
+  // through the catalog-driven resolver (widened to the model's declared
+  // ceiling) — never inlined. Session c2fda568be6b (2026-11-06 07:11:56Z on):
+  // step-3.7-flash and step-5-preview both came back `finishReason=length
+  // outputTokens=1536 budget=1536 textChars=0 reasoningChars≈6.0-6.5k` with
+  // reasoning_effort=low already applied — the inlined 1536 was spent thinking.
+  // The OAuth `unsupportedParams` veto (shouldDropParam) is honoured inside.
+  const outputParam = resolveMaxOutputTokensParam(runtime, effectiveMax);
+  // The summarizer must fit its OWN window, which can be far smaller than the
+  // main model's (same session: step-3.7-flash, 262,144-token window, was sent
+  // 301k-334k tokens and refused with "maximum context length").
+  const prompt = capSummarizerInput(promptParts.filter(Boolean).join("\n\n"), runtime.modelInfo?.contextWindow ?? 0);
+  const attempt = (maxOutput: { maxOutputTokens?: number }) =>
+    generateTextStreamed({
+      model: runtime.model,
+      system: SUMMARIZATION_SYSTEM_PROMPT,
+      prompt,
+      abortSignal: signal,
+      maxRetries: 0,
+      ...resolveTemperatureParam(runtime, 0.2),
+      ...maxOutput,
+      ...(providerOptions ? { providerOptions } : {}),
+    });
 
-  const usage = readUsage(result.usage);
+  const first = await attempt(outputParam);
+  let usage = readUsage(first.usage);
   try {
-    assertUsableCompactionSummary(modelId, result, usage.completionTokens, dropMaxOutput ? undefined : effectiveMax);
-  } catch (err) {
+    assertUsableCompactionSummary(modelId, first, usage.completionTokens, outputParam.maxOutputTokens);
+    return { summary: first.text.trim(), usage };
+  } catch (firstErr) {
     // Rethrown, not swallowed: assertUsableCompactionSummary already logged the
     // rejection; this only carries the billed tokens to the caller.
-    attachBilledCompactionUsage(err, usage);
-    throw err;
+    const wider =
+      firstErr instanceof CompactionSummaryRejectedError && first.finishReason === "length"
+        ? widerSummaryBudget(runtime.modelInfo, outputParam.maxOutputTokens)
+        : null;
+    if (wider === null) {
+      attachBilledCompactionUsage(firstErr, usage);
+      throw firstErr;
+    }
+    // The budget ran out before any usable text: ask ONCE for MORE room, never
+    // less (a smaller cap only guarantees the same empty result sooner).
+    logger.warn("orchestrator", "[compaction] summary hit its output cap with no usable text; retrying once wider", {
+      modelId,
+      budget: outputParam.maxOutputTokens,
+      retryBudget: wider,
+      reasoningChars: first.reasoningText?.length ?? 0,
+    });
+    signal?.throwIfAborted();
+    let second: Awaited<ReturnType<typeof attempt>>;
+    try {
+      second = await attempt({ maxOutputTokens: wider });
+    } catch (retryErr) {
+      // The provider threw on the retry: the first attempt was still billed.
+      attachBilledCompactionUsage(retryErr, usage);
+      throw retryErr;
+    }
+    usage = addUsage(usage, readUsage(second.usage));
+    try {
+      assertUsableCompactionSummary(modelId, second, readUsage(second.usage).completionTokens, wider);
+    } catch (secondErr) {
+      attachBilledCompactionUsage(secondErr, usage);
+      throw secondErr;
+    }
+    return { summary: second.text.trim(), usage };
   }
-  return { summary: result.text.trim(), usage };
+}
+
+/** Fraction of a model's window its compaction INPUT may occupy (the rest is output + framing). */
+const SUMMARIZER_INPUT_WINDOW_FRACTION = 0.6;
+
+/**
+ * True when `text` cannot fit `contextWindowTokens` as compaction input. Cheap
+ * exit first (BPE never yields more tokens than characters), so a short prompt
+ * never pays for tokenization. Unknown window (0) = no bound known = false.
+ */
+export function exceedsModelInputBudget(text: string, contextWindowTokens: number): boolean {
+  if (!(contextWindowTokens > 0)) return false;
+  const budget = Math.floor(contextWindowTokens * SUMMARIZER_INPUT_WINDOW_FRACTION);
+  if (text.length <= budget) return false;
+  return countTokens(text) > budget;
+}
+
+/**
+ * Bound the summarizer prompt to the summarizer model's own window: keep the
+ * head (task setup, prior summary) and the tail (recent work, the summary
+ * instructions — which are appended last) and mark the elided middle.
+ */
+export function capSummarizerInput(text: string, contextWindowTokens: number): string {
+  if (!exceedsModelInputBudget(text, contextWindowTokens)) return text;
+  const budgetTokens = Math.floor(contextWindowTokens * SUMMARIZER_INPUT_WINDOW_FRACTION);
+  const tokens = countTokens(text);
+  // Scale chars by the measured chars/token ratio, with 10% slack for the marker
+  // and for the uneven density of the head vs the tail.
+  const keepChars = Math.max(1, Math.floor(text.length * (budgetTokens / tokens) * 0.9));
+  const headChars = Math.floor(keepChars * 0.4);
+  const tailChars = keepChars - headChars;
+  const elided = text.length - headChars - tailChars;
+  logger.warn("orchestrator", "[compaction] summarizer input capped to the summarizer's context window", {
+    contextWindow: contextWindowTokens,
+    inputTokens: tokens,
+    budgetTokens,
+    elidedChars: elided,
+  });
+  return (
+    `${text.slice(0, headChars)}\n\n[... ${elided} characters of the middle of the conversation elided to fit ` +
+    `the summarizer's context window ...]\n\n${text.slice(text.length - tailChars)}`
+  );
+}
+
+/**
+ * The output budget for the ONE retry after a summary ran out of budget with no
+ * usable text, or null when no wider budget exists (param not sent, or already
+ * at the model's declared ceiling). Catalog-driven: the declared
+ * `max_output_tokens` is the bound; an undeclared ceiling grows 4x.
+ */
+export function widerSummaryBudget(model: ModelInfo | undefined, current: number | undefined): number | null {
+  if (current === undefined || !(current > 0)) return null;
+  const ceiling = model?.maxOutputTokens;
+  if (ceiling !== undefined && current >= ceiling) return null;
+  const wider = current * 4;
+  return ceiling !== undefined ? Math.min(wider, ceiling) : wider;
 }
 
 function emptyUsage(): CompactionUsage {

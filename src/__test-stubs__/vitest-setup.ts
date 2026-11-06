@@ -70,6 +70,15 @@ vi.mock("@opentui/react", () => ({
 // or import resolveAfter directly, so they are unaffected by this env var.
 process.env.MUONROI_TEST_PIPELINE_TIMEOUT_MS = "5000";
 
+// The system prompt's git line is probed in the BACKGROUND (git-prompt-status.ts:
+// a synchronous probe blocked the event loop 1.5s per turn in session
+// c2fda568be6b). A background `git status` outlives the prompt build that
+// started it, and on Windows a running process pins its cwd: every test that
+// builds a prompt in a temp dir and then removes it hit EPERM (measured: 5
+// failures across orchestrator-contract / stream-runner). Off by default for
+// the suite; git-prompt-status.test.ts opts back in.
+process.env.MUONROI_PROMPT_GIT_STATUS ??= "0";
+
 // The verify floor's baseline witness lives outside the project tree, which by
 // default means the developer's real `~/.muonroi-cli/floor-baselines/`. Every
 // test calling `captureVerifyFloorBaseline` would write there — measured: four

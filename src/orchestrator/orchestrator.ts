@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type { ModelMessage, ToolSet } from "ai";
 import { breadcrumb, getLastOpenPhase } from "../council/crash-breadcrumb.js";
+import { recordArtifact } from "../ee/artifact-cache.js";
 import { extractSession } from "../ee/extract-session.js";
 import {
   bootstrapEEClient,
@@ -191,8 +192,13 @@ import {
   proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
+import { enforceCompactionBudget } from "./compaction-budget.js";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
-import { isCompactionModelCoolingDown, markCompactionModelCooldown } from "./compaction-model-cooldown.js";
+import {
+  clearCompactionModelCooldown,
+  isCompactionModelCoolingDown,
+  markCompactionModelCooldown,
+} from "./compaction-model-cooldown.js";
 import { markProposerStalled } from "./compaction-stall-notice.js";
 import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
@@ -2814,7 +2820,9 @@ export class Agent {
   ): Promise<boolean> {
     if (!this.session) return false;
 
-    const { WorkingContext, retainWorkingContext } = await import("./working-context.js");
+    const { WorkingContext, WORKING_CONTEXT_TAG, retainWorkingContext } = await import("./working-context.js");
+    const isWorkingContextReceiptMessage = (m: ModelMessage): boolean =>
+      m.role === "system" && typeof m.content === "string" && m.content.startsWith(`${WORKING_CONTEXT_TAG}\n`);
     const working = new WorkingContext(this.session.id, this.bash.getCwd(), this.messages);
     try {
       working.setProtection(await this.getContextProtection());
@@ -2864,7 +2872,19 @@ export class Agent {
     }
 
     const preparation = prepareCompaction(sourceMessages, system, settings);
-    if (!preparation) return false;
+    if (!preparation) {
+      logger.file("info", "orchestrator", "[compaction] nothing older than the kept tail to summarize", {
+        // Key names avoid "token": the file logger redacts any key matching it.
+        messages: sourceMessages.length,
+        historyEst: estimateConversationTokens("", sourceMessages),
+        keepRecentEst: settings.keepRecentTokens,
+        force,
+      });
+      return false;
+    }
+    // The contiguous suffix the cut point chose — anything kept beyond it is
+    // kept only by a protection, and is what enforceCompactionBudget shrinks first.
+    const verbatimTail = new Set<ModelMessage>(preparation.keptMessages);
     if (pruningEnabled) {
       const protectedEvidence = working.retainedMessages(sourceMessages);
       const kept = new Set([...preparation.keptMessages, ...protectedEvidence]);
@@ -2878,6 +2898,14 @@ export class Agent {
     preparation.messagesToSummarize = preparation.messagesToSummarize.filter((m) => !isDelegationLedgerMessage(m));
     preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !isDelegationLedgerMessage(m));
     preparation.keptMessages = preparation.keptMessages.filter((m) => !isDelegationLedgerMessage(m));
+    // Same for working-set receipts: only the newest (`workingReceipt`, re-inserted
+    // below) is authoritative. Session c2fda568be6b carried 41 stale receipts
+    // (117,528 tokens) because each compaction added one and none was dropped.
+    if (workingReceipt) {
+      preparation.keptMessages = preparation.keptMessages.filter(
+        (m) => m === workingReceipt || !isWorkingContextReceiptMessage(m),
+      );
+    }
 
     const trigger = force ? "manual" : "auto";
 
@@ -2977,6 +3005,7 @@ export class Agent {
     let summary: string;
     let compactUsage: { promptTokens: number; completionTokens: number };
     let summaryModelId = compactModelId;
+    let usedMechanicalSummary = false;
     const sessionIdForCooldown = this.session.id;
 
     const tryGenerateSummary = async (modelId: string) => {
@@ -2984,7 +3013,10 @@ export class Agent {
         throw new Error(`compaction model ${modelId} is cooling down after a recent failure this session`);
       }
       try {
-        return await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+        const result = await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+        // A success resets the backoff: the next failure starts at the base cooldown again.
+        clearCompactionModelCooldown(sessionIdForCooldown, modelId);
+        return result;
       } catch (err) {
         markCompactionModelCooldown(sessionIdForCooldown, modelId);
         // A summary REJECTED as empty/truncated was still billed (session
@@ -3047,6 +3079,7 @@ export class Agent {
           logSummaryFailure("main model fallback", secondErr);
           summary = buildMechanicalCompactionStub(preparation);
           compactUsage = { promptTokens: 0, completionTokens: 0 };
+          usedMechanicalSummary = true;
           markProposerStalled(
             `Compaction summarizers failed (${compactModelId} and ${this.modelId}) — used a mechanical fallback (no LLM). Context still shrank.`,
           );
@@ -3054,6 +3087,7 @@ export class Agent {
       } else {
         summary = buildMechanicalCompactionStub(preparation);
         compactUsage = { promptTokens: 0, completionTokens: 0 };
+        usedMechanicalSummary = true;
         markProposerStalled(
           `Compaction summarizer (${compactModelId}) failed — used a mechanical fallback (no LLM). Context still shrank.`,
         );
@@ -3173,6 +3207,42 @@ export class Agent {
       ...keptSeqs,
     ];
 
+    // Size guarantee, independent of whether a summarizer worked: protections
+    // choose which turns stay, never that their bulk stays (compaction-budget.ts
+    // has the session c2fda568be6b evidence: 41 compactions, nearly all saved 0).
+    const headCount = this.messages.length - preparation.keptMessages.length;
+    const windowRoom = contextWindow - settings.reserveTokens;
+    const tailBudget = settings.keepRecentTokens * 3;
+    const pinnedKept = new Set<ModelMessage>(
+      this.messages.filter((_, i) => {
+        const seq = this.messageSeqs[i];
+        return seq !== null && seq !== undefined && this._pinnedSeqs.has(seq);
+      }),
+    );
+    const budget = enforceCompactionBudget(this.messages, {
+      systemPrompt: system,
+      softBudgetTokens: windowRoom > 0 ? Math.min(Math.floor(windowRoom * 0.5), tailBudget) : tailBudget,
+      hardBudgetTokens: windowRoom > 0 ? Math.floor(windowRoom * 0.8) : 0,
+      headCount,
+      tail: verbatimTail,
+      neverDrop: pinnedKept,
+      persistArtifact: (toolCallId, toolName, fullContent) => recordArtifact(toolCallId, toolName, fullContent),
+    });
+    if (budget.level > 0) {
+      const seqsBefore = this.messageSeqs;
+      this.messages = budget.messages;
+      this.messageSeqs = budget.sourceIndices.map((i) => seqsBefore[i] ?? null);
+      logger.file("info", "orchestrator", "[compaction] host budget pass shrank retained history", {
+        level: budget.level,
+        tokensBefore: budget.tokensBefore,
+        tokensAfter: budget.tokensAfter,
+        stubbedToolResults: budget.stubbedToolResults,
+        strippedReasoningParts: budget.strippedReasoningParts,
+        truncatedTexts: budget.truncatedTexts,
+        droppedMessages: budget.droppedMessages,
+      });
+    }
+
     // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
     // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
     // (and sub-agents) even after further B3/B4 rewrites. Uses same client + fail-open pattern as promptStale above (1449).
@@ -3238,6 +3308,12 @@ export class Agent {
             saved,
             pct,
             isLongSession,
+            summaryModel: usedMechanicalSummary ? null : summaryModelId,
+            budgetLevel: budget.level,
+            budgetStubbedToolResults: budget.stubbedToolResults,
+            budgetStrippedReasoning: budget.strippedReasoningParts,
+            budgetTruncatedTexts: budget.truncatedTexts,
+            budgetDroppedMessages: budget.droppedMessages,
           },
         });
       }
