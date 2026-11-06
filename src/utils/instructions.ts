@@ -4,12 +4,40 @@ import * as path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { InstructionsLoadedHookInput } from "../hooks/types";
 import { findGitRoot } from "./git-root";
+import { logger } from "./logger.js";
+import { getProjectDocFallbackFilenames, getProjectDocMaxBytes } from "./settings.js";
+
+/**
+ * Project instruction loading — Codex AGENTS.md parity.
+ *
+ * Owner decision: the rule context injected into every orchestrator / worker
+ * system prompt was far too large (AGENTS.md + CLAUDE.md + GEMINI.md +
+ * DEEPSEEK.md + COPILOT.md + CURSOR.md per directory, plus every ancestor
+ * directory above the git root). Read ONE file per directory, like Codex.
+ *
+ * Rules mirror openai/codex `codex-rs/core/src/agents_md.rs` +
+ * `codex-rs/codex-home/src/instructions/mod.rs`:
+ *   1. Global: the muonroi home's first NON-EMPTY file of
+ *      `AGENTS.override.md`, `AGENTS.md`. Not counted in the project budget.
+ *   2. Project root = nearest ancestor of cwd holding `.git`; no root → cwd only.
+ *      Nothing ABOVE the project root is read.
+ *   3. Each directory from the root down to cwd contributes AT MOST one file:
+ *      the first that exists of `AGENTS.override.md`, `AGENTS.md`, then the
+ *      opt-in `projectDocFallbackFilenames` user setting (default empty). An
+ *      empty selected file is skipped (no retry with the next name).
+ *   4. Concatenated root → cwd with blank lines; a total project byte budget
+ *      (`projectDocMaxBytes`, default 32 KiB) truncates the file that crosses it
+ *      and drops everything after. A budget of 0 disables project instructions.
+ */
 
 const instructionsHookFiredFor = new Set<string>();
 
 // --- Instructions cache ---
 const _instructionsCache = new Map<string, { content: string | null; hash: string; cachedAt: number }>();
 const INSTRUCTIONS_CACHE_TTL_MS = 60_000; // 1 minute TTL — files rarely change mid-session
+
+export const DEFAULT_INSTRUCTIONS_FILENAME = "AGENTS.md";
+export const OVERRIDE_INSTRUCTIONS_FILENAME = "AGENTS.override.md";
 
 function computeHash(parts: string[]): string {
   const joined = parts.join("|");
@@ -21,54 +49,36 @@ export function resetInstructionsCache(): void {
   _instructionsCache.clear();
 }
 
-function readNonEmptyFile(filePath: string): string | null {
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function isFile(filePath: string): boolean {
   try {
-    if (!fs.existsSync(filePath)) return null;
-    const text = fs.readFileSync(filePath, "utf-8").trim();
-    return text.length > 0 ? text : null;
-  } catch {
-    return null;
+    return fs.statSync(filePath).isFile();
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    // ENOENT / ENOTDIR are the normal "no such instruction file" answer.
+    if (code !== "ENOENT" && code !== "ENOTDIR") {
+      logger.file("warn", "orchestrator", `[instructions] stat failed for ${filePath}: ${errMessage(err)}`);
+    }
+    return false;
   }
 }
 
-/**
- * Parity fix (G4): Claude Code also loads parent-directory CLAUDE.md files
- * ABOVE the project's own root, up to $HOME (and `~/.claude/CLAUDE.md`) —
- * this loader previously reached only from the git root DOWN to `cwd`.
- * Measured (FINDINGS.md G4): a Vietnamese request got an all-English reply
- * because the "reply in the user's own language" rule lives in
- * `~/Personal/Core/CLAUDE.md`, one directory above the git root
- * `~/Personal/Core/shipd-challenges` — a file this loader never reached.
- *
- * Ceiling on the total bytes loaded from ancestor directories, independent
- * of the (uncapped, pre-existing) git-root-down and muonroi-home segments —
- * an ancestor chain can be many levels deep on some machines and this is
- * new, previously-untested surface, so it gets its own explicit budget
- * rather than silently inflating every turn's system prompt.
- */
-export const MAX_ANCESTOR_INSTRUCTIONS_BYTES = 32 * 1024;
-
-/**
- * Directories from `home` down to (but EXCLUDING) `gitRoot` itself — the
- * git root's own instruction files are already the first entry of the
- * `directoryChain(root, canonicalCwd)` loop below, so including it here
- * would double-load it.
- *
- * Returns `[]` when `gitRoot` is not inside `home` at all (a repo checked
- * out somewhere like /tmp or /opt has no meaningful "ancestors up to
- * $HOME" to walk) or IS `home` itself (nothing sits between them).
- */
-export function ancestorDirsAboveGitRoot(home: string, gitRoot: string): string[] {
-  const rel = path.relative(home, gitRoot);
-  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return [];
-  const parent = path.dirname(gitRoot);
-  return directoryChain(home, parent);
+function readFileBytes(filePath: string): Buffer | null {
+  try {
+    return fs.readFileSync(filePath);
+  } catch (err) {
+    logger.file("warn", "orchestrator", `[instructions] read failed for ${filePath}: ${errMessage(err)}`);
+    return null;
+  }
 }
 
 function directoryChain(fromRoot: string, toCwd: string): string[] {
   const rel = path.relative(fromRoot, toCwd);
   if (rel === "") return [fromRoot];
-  if (rel.startsWith("..")) return [toCwd];
+  if (rel.startsWith("..") || path.isAbsolute(rel)) return [toCwd];
 
   const segments = rel.split(path.sep).filter(Boolean);
   const chain: string[] = [];
@@ -82,29 +92,32 @@ function directoryChain(fromRoot: string, toCwd: string): string[] {
 }
 
 /**
- * Filenames the loader treats as agent-instructions, in the order they are
- * concatenated for a given directory. AGENTS.md stays first as the canonical
- * source; the rest exist so projects already maintaining tool-specific
- * instructions (CLAUDE.md, GEMINI.md, DEEPSEEK.md, COPILOT.md) get auto-loaded
- * without duplicating content into AGENTS.md.
- *
- * AGENTS.override.md remains a wholesale replacement that short-circuits the
- * rest of the per-directory loop.
+ * Accept only a bare filename (Codex rejects `.`, `..`, and anything with path
+ * syntax before probing the filesystem). Returns the de-duplicated candidate
+ * list for a project directory: override, AGENTS.md, then the opt-in names.
  */
-const INSTRUCTION_FILENAMES = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "GEMINI.md",
-  "DEEPSEEK.md",
-  "COPILOT.md",
-  "CURSOR.md",
-] as const;
+export function projectCandidateFilenames(fallbacks: readonly string[]): string[] {
+  const names: string[] = [OVERRIDE_INSTRUCTIONS_FILENAME, DEFAULT_INSTRUCTIONS_FILENAME];
+  for (const raw of fallbacks) {
+    const name = raw.trim();
+    if (name === "") continue;
+    if (name === "." || name === ".." || /[\\/:\0]/.test(name)) {
+      logger.file(
+        "warn",
+        "orchestrator",
+        `[instructions] ignoring projectDocFallbackFilenames entry that is not a filename: ${JSON.stringify(raw)}`,
+      );
+      continue;
+    }
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
 
-function readSegmentWithHeader(dir: string, filename: string, label?: string): string | null {
-  const text = readNonEmptyFile(path.join(dir, filename));
-  if (!text) return null;
-  if (filename === "AGENTS.md") return text; // keep AGENTS.md unannotated for backcompat
-  return `<!-- ${label ?? filename} -->\n${text}`;
+/** Fallback files are labelled so the model can tell which tool's file it is reading. */
+function labelSegment(filename: string, label: string, text: string): string {
+  if (filename === DEFAULT_INSTRUCTIONS_FILENAME || filename === OVERRIDE_INSTRUCTIONS_FILENAME) return text;
+  return `<!-- ${label} -->\n${text}`;
 }
 
 /**
@@ -125,92 +138,68 @@ function muonroiHome(): string {
   return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
+/** Global instructions: first non-empty of AGENTS.override.md, AGENTS.md. */
+function loadGlobalSegment(): string | null {
+  const homeDir = muonroiHome();
+  for (const fname of [OVERRIDE_INSTRUCTIONS_FILENAME, DEFAULT_INSTRUCTIONS_FILENAME]) {
+    const fp = path.join(homeDir, fname);
+    if (!isFile(fp)) continue;
+    const data = readFileBytes(fp);
+    if (!data) continue;
+    const text = data.toString("utf-8").trim();
+    if (text.length > 0) return text;
+  }
+  return null;
+}
+
+function loadProjectSegments(canonicalCwd: string): string[] {
+  const maxBytes = getProjectDocMaxBytes();
+  if (maxBytes === 0) return [];
+
+  // `findGitRoot` walks up from the CANONICAL cwd, so root and cwd share one
+  // spelling (macOS /var → /private/var, Windows 8.3 short names) and
+  // `path.relative` between them never starts with `..` for a real descendant.
+  const root = findGitRoot(canonicalCwd) ?? canonicalCwd;
+  const candidates = projectCandidateFilenames(getProjectDocFallbackFilenames());
+
+  const segments: string[] = [];
+  let remaining = maxBytes;
+  for (const dir of directoryChain(root, canonicalCwd)) {
+    const fname = candidates.find((name) => isFile(path.join(dir, name)));
+    if (!fname) continue;
+    const fp = path.join(dir, fname);
+    if (remaining === 0) {
+      logger.file(
+        "warn",
+        "orchestrator",
+        `[instructions] skipped ${fp} and later project instructions: ${maxBytes}-byte projectDocMaxBytes budget exhausted`,
+      );
+      break;
+    }
+    let data = readFileBytes(fp);
+    if (!data) continue;
+    if (data.length > remaining) {
+      logger.file(
+        "warn",
+        "orchestrator",
+        `[instructions] loaded only ${remaining} of ${data.length} bytes from ${fp} under the ${maxBytes}-byte projectDocMaxBytes budget — trim the file or raise projectDocMaxBytes`,
+      );
+      data = data.subarray(0, remaining);
+    }
+    const text = data.toString("utf-8").trim();
+    if (text.length === 0) continue; // empty selected file: skipped, no retry with the next name (Codex parity)
+    const rel = path.relative(canonicalCwd, dir);
+    segments.push(labelSegment(fname, rel === "" ? fname : path.join(rel, fname), text));
+    remaining -= data.length;
+  }
+  return segments;
+}
+
 function loadAgentsSegments(canonicalCwd: string): string[] {
   const segments: string[] = [];
-
-  const homeDir = muonroiHome();
-  for (const fname of INSTRUCTION_FILENAMES) {
-    const seg = readSegmentWithHeader(homeDir, fname, `~/.muonroi-cli/${fname}`);
-    if (seg) segments.push(seg);
-  }
-
-  const root = findGitRoot(canonicalCwd) ?? canonicalCwd;
-
-  // Parity fix (G4): see `ancestorDirsAboveGitRoot`'s doc comment. Loaded
-  // BEFORE the git-root-down loop so priority mirrors distance from the
-  // project: most general (closest to $HOME) first, most specific
-  // (the project's own root and cwd) last — same ordering logic as the
-  // muonroi-home segment above already using.
-  //
-  // Round 2 (G4 HIGH — cap starvation): `ancestorDirsAboveGitRoot` walks
-  // BROADEST (home) first. The original cap loop walked candidates in that
-  // SAME order and `break`-ed on the first one that would exceed the
-  // budget — so one oversized file FARTHEST from the project (most likely:
-  // a broad, growing `$HOME/AGENTS.md`) starved out every closer, smaller,
-  // more project-relevant file, even ones trivially small. Repro'd: a 40KB
-  // `$HOME/AGENTS.md` alone exceeds `MAX_ANCESTOR_INSTRUCTIONS_BYTES`
-  // (32KB), so the loop broke on the very first candidate and
-  // `loadCustomInstructions` returned `null` even though a real 44-byte
-  // `~/Personal/Core/CLAUDE.md` sat right next to the project root.
-  //
-  // Fixed by separating admission from emission: collect every ancestor
-  // candidate broadest-first (unchanged order), decide which ones fit the
-  // cap by walking that same list CLOSEST-first (reversed) — skipping
-  // (never breaking) any single file that alone would exceed the
-  // remaining budget, so one oversized far-away file can never block a
-  // smaller, nearer one — then emit the ACCEPTED segments back in the
-  // original broadest-first order, so the "general first, specific last"
-  // ordering intent is unaffected by which candidates happened to fit.
-  //
-  // `home` is canonicalised the SAME way `canonicalCwd` was (and `root` is
-  // found by walking up from `canonicalCwd`, so it is canonical too).
-  // Comparing a raw `os.homedir()` against a realpath'd root silently
-  // answered "the git root is outside $HOME" — `path.relative` starts with
-  // `..` — whenever the two spellings of one directory differ: macOS paths
-  // under `/var` → `/private/var`, a symlinked `/home`, or Windows' 8.3 short
-  // `USERPROFILE` (`C:\Users\RUNNER~1`) vs the long name that
-  // `realpathSync.native` returns. CI measured exactly this on macOS and
-  // Windows: every ancestor test got `null` while Linux (no symlink in its
-  // tmpdir) passed. Both sides must live in one canonical space.
-  const home = canonicalizePath(os.homedir());
-  const ancestorCandidates: Array<{ seg: string; bytes: number }> = [];
-  for (const dir of ancestorDirsAboveGitRoot(home, root)) {
-    for (const fname of INSTRUCTION_FILENAMES) {
-      const rel = path.relative(home, dir);
-      const label = rel === "" ? path.join("~", fname) : path.join("~", rel, fname);
-      const seg = readSegmentWithHeader(dir, fname, label);
-      if (!seg) continue;
-      ancestorCandidates.push({ seg, bytes: Buffer.byteLength(seg, "utf-8") });
-    }
-  }
-  const acceptedAncestorIndices = new Set<number>();
-  let ancestorBytesUsed = 0;
-  for (let i = ancestorCandidates.length - 1; i >= 0; i--) {
-    const candidate = ancestorCandidates[i];
-    if (!candidate) continue;
-    if (ancestorBytesUsed + candidate.bytes > MAX_ANCESTOR_INSTRUCTIONS_BYTES) continue; // skip, never break
-    acceptedAncestorIndices.add(i);
-    ancestorBytesUsed += candidate.bytes;
-  }
-  for (let i = 0; i < ancestorCandidates.length; i++) {
-    if (acceptedAncestorIndices.has(i)) segments.push(ancestorCandidates[i]!.seg);
-  }
-
-  for (const dir of directoryChain(root, canonicalCwd)) {
-    const overridePath = path.join(dir, "AGENTS.override.md");
-    if (fs.existsSync(overridePath)) {
-      const text = readNonEmptyFile(overridePath);
-      if (text) segments.push(text);
-      continue;
-    }
-    for (const fname of INSTRUCTION_FILENAMES) {
-      const rel = path.relative(canonicalCwd, dir);
-      const label = rel === "" ? fname : path.join(rel, fname);
-      const seg = readSegmentWithHeader(dir, fname, label);
-      if (seg) segments.push(seg);
-    }
-  }
-
+  const global = loadGlobalSegment();
+  if (global) segments.push(global);
+  segments.push(...loadProjectSegments(canonicalCwd));
   return segments;
 }
 
@@ -223,9 +212,27 @@ function loadAgentsSegments(canonicalCwd: string): string[] {
 function canonicalizePath(p: string): string {
   try {
     return fs.realpathSync.native(p);
-  } catch {
+  } catch (err) {
+    logger.file(
+      "debug",
+      "orchestrator",
+      `[instructions] realpath failed for ${p}, using path.resolve: ${errMessage(err)}`,
+    );
     return path.resolve(p);
   }
+}
+
+function fireInstructionsLoadedHook(canonical: string, filesLoaded: number): void {
+  if (instructionsHookFiredFor.has(canonical)) return;
+  instructionsHookFiredFor.add(canonical);
+  const hookInput: InstructionsLoadedHookInput = {
+    hook_event_name: "InstructionsLoaded",
+    files_loaded: filesLoaded,
+    cwd: canonical,
+  };
+  executeEventHooks(hookInput, canonical).catch((err: unknown) => {
+    logger.file("warn", "orchestrator", `[instructions] InstructionsLoaded hook failed: ${errMessage(err)}`);
+  });
 }
 
 export function loadCustomInstructions(cwd: string): string | null {
@@ -236,34 +243,18 @@ export function loadCustomInstructions(cwd: string): string | null {
   const cached = _instructionsCache.get(canonical);
   if (cached && now - cached.cachedAt < INSTRUCTIONS_CACHE_TTL_MS) {
     // Still fire hook on first call even when returning cached content
-    if (cached.content !== null && !instructionsHookFiredFor.has(canonical)) {
-      instructionsHookFiredFor.add(canonical);
-      const hookInput: InstructionsLoadedHookInput = {
-        hook_event_name: "InstructionsLoaded",
-        files_loaded: cached.content.split("\n\n").length,
-        cwd: canonical,
-      };
-      executeEventHooks(hookInput, canonical).catch(() => {});
-    }
+    if (cached.content !== null) fireInstructionsLoadedHook(canonical, cached.content.split("\n\n").length);
     return cached.content;
   }
 
-  const parts: string[] = [...loadAgentsSegments(canonical)];
+  const parts: string[] = loadAgentsSegments(canonical);
 
   if (parts.length === 0) {
     _instructionsCache.set(canonical, { content: null, hash: "", cachedAt: now });
     return null;
   }
 
-  if (!instructionsHookFiredFor.has(canonical)) {
-    instructionsHookFiredFor.add(canonical);
-    const hookInput: InstructionsLoadedHookInput = {
-      hook_event_name: "InstructionsLoaded",
-      files_loaded: parts.length,
-      cwd: canonical,
-    };
-    executeEventHooks(hookInput, canonical).catch(() => {});
-  }
+  fireInstructionsLoadedHook(canonical, parts.length);
 
   const content = parts.join("\n\n");
   _instructionsCache.set(canonical, { content, hash: computeHash(parts), cachedAt: now });

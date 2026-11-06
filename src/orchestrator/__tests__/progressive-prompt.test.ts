@@ -80,6 +80,10 @@ describe("progressive prompt invariants", () => {
     const policy = loadCustomInstructions(root)!;
     expect(legacy.staticPrefix).toContain(policy);
     expect(progressive.staticPrefix).toContain(policy);
+    // Owner decision (Codex parity): only AGENTS.md is project instructions by
+    // default — a sibling CLAUDE.md never reaches the system prompt.
+    expect(legacy.staticPrefix).not.toContain("OTHER_REQUIRED_POLICY_SENTINEL");
+    expect(progressive.staticPrefix).not.toContain("OTHER_REQUIRED_POLICY_SENTINEL");
     expect(progressive.staticPrefix).not.toContain("CLI STEERING & PROMPT INJECTION");
     expect(legacy.staticPrefix).toContain("CLI STEERING & PROMPT INJECTION");
     expect(progressive.staticPrefix).toBe(reduced.staticPrefix);
