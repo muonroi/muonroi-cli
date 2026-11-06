@@ -222,6 +222,7 @@ import type { ReadPathBudget } from "./read-path-budget.js";
 import { wrapToolSetWithReadBudget } from "./read-path-budget.js";
 import { containsEncryptedReasoning, sanitizeModelMessages } from "./reasoning";
 import { repairToolCallHook } from "./repair-tool-call.js";
+import { wrapToolSetWithRepeatRefusal } from "./repeat-failure-refusal.js";
 import {
   buildRepetitionReminder,
   recordAssistantBurst,
@@ -625,6 +626,7 @@ export interface TurnToolPipelineOptions {
  *     → cumulative cap        (trims / dedups / exhausts tool OUTPUT)
  *     → cross-turn dedup      (stubs repeated tool OUTPUT)
  *     → read-path budget      (pre-empts a re-read BEFORE it runs)
+ *     → repeat refusal        (refuses an identical repeat of a failed call)
  *
  * The guard being innermost is what F3 turned on: every outer layer answers a
  * repeat with "you already have this result", which is a lie about a call that
@@ -640,7 +642,9 @@ export function buildTurnToolPipeline(
   // Apply the cumulative cap once over the fully-assembled raw tool set.
   const cap = wrapToolSetWithCap(raw, opts.capOptions);
   // Phase C3: layer cross-turn dedup on top of the cap, then the C4 read budget.
-  const tools = wrapToolSetWithReadBudget(wrapToolSetWithDedup(cap.tools, opts.dedup), opts.readBudget);
+  const tools = wrapToolSetWithRepeatRefusal(
+    wrapToolSetWithReadBudget(wrapToolSetWithDedup(cap.tools, opts.dedup), opts.readBudget),
+  );
   return { tools, capState: cap.state };
 }
 
@@ -2677,7 +2681,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             const _preWarnChars = cumulativeMessageChars(stripped) + envelopeChars;
             if (coalesced === stripped && shouldPreWarnCompaction(_preWarnChars, topLevelCompactThreshold)) {
               const _cp = buildCheckpointReminder(sn, true);
-              const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Summarize or finish if possible, or warn the user they can run the "/compact" command if they want a clean compressed history.]`;
+              const _pre = `[pre-compaction warning at step ${sn} — next step(s) will likely rewrite older tool results to stubs (threshold ${topLevelCompactThreshold}, keepLast=${topLevelCompactKeepLast}). ${_cp} Keep working toward the goal: the host compacts and continues by itself, and the compact tool sheds old history now if useful.]`;
               return withSteers({ messages: attachReminderToMessages(stripped, _pre) });
             }
             // ---- Read-only tool batching interceptor ----

@@ -223,6 +223,17 @@ describe("compaction helpers", () => {
     expect(r).toContain("KEEP_TOOL_IDS");
     expect(r).toContain("tool-artifact");
   });
+
+  it("buildCheckpointReminder teaches the EXACT literals context-preservation.ts parses (M14)", () => {
+    // The veto syntax is taught only here (pre-compaction warning / compaction
+    // note), so it must be the literal the parser accepts: the old "Emit
+    // PRESERVE" never matched /^\s*PRESERVE_FULL_CONTEXT\s*$/m.
+    const r = buildCheckpointReminder(123, true);
+    expect(r).toContain("PRESERVE_FULL_CONTEXT");
+    expect(r).toContain("KEEP_TOOL_IDS: id1,id2");
+    expect(r.length).toBeLessThanOrEqual(220);
+    expect(r.endsWith('"tool-artifact id=XXX".')).toBe(true);
+  });
 });
 
 describe("metaCompactionMaxTokens — meta summary cap (tunable, session 2b7a10219499)", () => {

@@ -8,20 +8,78 @@ export function progressiveContextEnabled(): boolean {
 
 export const WORKING_CONTEXT_GUIDANCE = `Context hygiene: use context_load(topic="working_set",action="inspect"), then update the current task/constraints/decisions/open items and retire unrelated closed turns with archive or archive_through. Keep negative evidence and dependency tool/turn IDs. Replace stale ledger fields, not append a session story. replace_checkpoint explicitly retires an old summary after carrying valid state forward. reset/restore_turn_ids restores available history; compact remains the overflow fallback. Context selection grants no permission.`;
 
-export const TASK_CONTEXT_CORE = `[NATIVE CAPABILITIES — progressive task context]
-Call exposed tools directly; list_tools / list_mcp_servers show availability and describe_tool supplies parameters. Native tools do not require a self-spawned MCP server. Missing tools must be reported, never invented.
-- read_file / grep for source/config/log text; no LSP prerequisite. lsp_query / wait_for_diagnostics / impact_of_change for semantic questions; partial/unavailable diagnostics are incomplete evidence.
-- bash output is cached: use sufficient returned output directly; bash_output_get retrieves missing slices without rerunning. Preserve full build/test/failure output and exit codes; focused read-only pipes are allowed. Use background execution for servers/watchers.
-- EE is native: recall before unfamiliar/risky work, rate used handles and save proven lessons. ee_query({query}) uses task/cwd scope; pass cwd or project once for another repo and strict success remembers it for this task. action=scope inspects, projects discovers slugs, reset returns to shell scope. ee_health separates reachability from lastRecall. ee_write reuses verified scope; ee_feedback rates shown handles in their original scope. Unavailable recall cannot block main. Rehydrate by exact tool-artifact ID or retrieve_tool_result(tool_call_id=...).
-- Stage guidance follows successful native reads, edits and verification without extra calls. context_load explicitly selects orient/research/plan/implement/verify and pins that choice for this run, with a bounded handoff for the NEXT request. Select a stage when intent differs from observed work; skip/revisit freely. It also pages/searches skill metadata or the CLI reference. Read selected SKILL.md before using it; named/repo-required skills remain discoverable.
-- task(agent="explore", ...) is read-only research; task general executes assigned work; verify validates its scope. delegate(agent="explore", ...) runs background research. Main chooses useful independent work, owns final acceptance, and collects versioned results; do not poll unfinished jobs. Delegation adds its own requests.
-- Children retain repository custom instructions and ownership boundaries; the skills catalog is omitted for children. Only the actual granted tools are callable.
-VERIFICATION ROUTING: pure discussion needs no harness. Default to verification_run for explicit local tests: Vitest/Jest/Mocha, JavaScript node:test, or Python pytest in .venv. Auto selects only an unambiguous installed runner; otherwise choose runner explicitly. Use bash for other repo workflows/builds, without duplicate runs. UI/harness/workflow changes additionally require selfverify_start(mode="tier1", emit=false, files=[task-owned files]) and status/result. Agentic selfverify can use paid calls. Honor repo-required checks; TUI pass is not logic verification.
-FLOW tools coordinate code workflows when required; context stages do not pass plan review or unlock mutations. The runtime permission/sandbox snapshot is descriptive; tool guards and audit remain authoritative. Never claim sandbox isolation from configuration alone. Resolve models/providers from catalog/settings/runtime, never hardcode IDs. Log caught errors with context, HTTP status/body when applicable, and redact secrets.
-${WORKING_CONTEXT_GUIDANCE}
-For CLI self-analysis, [Discovery]/PIL output is supporting context. Use bounded usage_forensics / usage forensics snapshots; distinguish descriptions, character/token estimates and actual provider usage. Consumer cwd is not necessarily CLI source. No fixed per-round cost or credit-exhaustion inference from 429.
-When respond_* is exposed, call it once with the complete final answer after investigation; otherwise answer directly.
-[END NATIVE CAPABILITIES]`;
+/** Which tools the block is written for; a name ending in `*` matches by prefix. */
+export type TaskContextToolPredicate = (name: string) => boolean;
+
+/**
+ * The progressive native-capabilities block, built from the tools the call can
+ * actually use. Lines about a tool the caller does not hold are omitted (a
+ * worker has no task/delegate/flow_*; selfverify_* exists only where a Semantic
+ * harness is detected — utils/semantic-harness.ts).
+ *
+ * Deliberately NOT in this block (host-owned or project knowledge):
+ * - EE recall/rating/saving prose: recall is host-injected every turn
+ *   (layer3-ee-injection.ts) and before tools (native PreToolUse intercept);
+ *   unrated hints are re-surfaced by the host; scope rules live in the ee_*
+ *   tool descriptions.
+ * - Working-ledger hygiene (WORKING_CONTEXT_GUIDANCE): the context_load
+ *   description states the same inspect/update/archive/reset contract.
+ * - CLI self-analysis guidance: served on demand by
+ *   context_load(topic="reference") (native-capabilities-workbook.ts).
+ * - The Zero Hardcode model/provider-ID rule: muonroi-cli project knowledge,
+ *   enforced on that repo by scripts/check-hardcoded-ids.ts, not sent to users.
+ */
+export function buildTaskContextCore(has: TaskContextToolPredicate = () => true): string {
+  const delegates = has("task") || has("delegate");
+  const verification = [
+    "VERIFICATION ROUTING: pure discussion needs no harness.",
+    ...(has("verification_run")
+      ? [
+          "Default to verification_run for explicit local tests: Vitest/Jest/Mocha, JavaScript node:test, or Python pytest in .venv. Auto selects only an unambiguous installed runner; otherwise choose runner explicitly.",
+        ]
+      : []),
+    ...(has("bash") ? ["Use bash for other repo workflows/builds, without duplicate runs."] : []),
+    ...(has("selfverify_start")
+      ? [
+          'UI/harness/workflow changes additionally require selfverify_start(mode="tier1", emit=false, files=[task-owned files]) and status/result. Agentic selfverify can use paid calls.',
+        ]
+      : []),
+    `Honor repo-required checks${has("selfverify_start") ? "; TUI pass is not logic verification" : ""}.`,
+  ].join(" ");
+  return [
+    "[NATIVE CAPABILITIES — progressive task context]",
+    "Call exposed tools directly; list_tools / list_mcp_servers show availability and describe_tool supplies parameters. Native tools do not require a self-spawned MCP server. Missing tools must be reported, never invented.",
+    "- read_file / grep for source/config/log text; no LSP prerequisite. lsp_query / wait_for_diagnostics / impact_of_change for semantic questions; partial/unavailable diagnostics are incomplete evidence.",
+    ...(has("bash")
+      ? [
+          "- bash output is cached: use sufficient returned output directly; bash_output_get retrieves missing slices without rerunning. Preserve full build/test/failure output and exit codes; focused read-only pipes are allowed. Use background execution for servers/watchers.",
+        ]
+      : []),
+    ...(has("context_load")
+      ? [
+          "- Stage guidance follows successful native reads, edits and verification without extra calls. context_load explicitly selects orient/research/plan/implement/verify and pins that choice for this run, with a bounded handoff for the NEXT request. Select a stage when intent differs from observed work; skip/revisit freely. It also pages/searches skill metadata or the CLI reference. Read selected SKILL.md before using it; named/repo-required skills remain discoverable.",
+        ]
+      : []),
+    ...(delegates
+      ? [
+          '- task(agent="explore", ...) is read-only research; task general executes assigned work; verify validates its scope. delegate(agent="explore", ...) runs background research. Main chooses useful independent work, owns final acceptance, and collects versioned results; do not poll unfinished jobs. Delegation adds its own requests.',
+          "- Children retain repository custom instructions and ownership boundaries; the skills catalog is omitted for children. Only the actual granted tools are callable.",
+        ]
+      : []),
+    verification,
+    ...(has("flow_*")
+      ? [
+          "FLOW tools coordinate code workflows when required; context stages do not pass plan review or unlock mutations.",
+        ]
+      : []),
+    "The runtime permission/sandbox snapshot is descriptive; tool guards and audit remain authoritative. Never claim sandbox isolation from configuration alone. Log caught errors with context, HTTP status/body when applicable, and redact secrets.",
+    "When respond_* is exposed, call it once with the complete final answer after investigation; otherwise answer directly.",
+    "[END NATIVE CAPABILITIES]",
+  ].join("\n");
+}
+
+/** The block for an unknown tool set (every tool line present). */
+export const TASK_CONTEXT_CORE = buildTaskContextCore();
 
 export const TASK_STAGE_GUIDANCE: Record<TaskStage, string> = {
   orient:

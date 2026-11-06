@@ -21,7 +21,8 @@
 
 import type { ExecutionRole } from "../orchestrator/orchestration-policy.js";
 import type { AgentMode } from "../types/index.js";
-import { progressiveContextEnabled, TASK_CONTEXT_CORE, WORKING_CONTEXT_GUIDANCE } from "./context-modules.js";
+import { hasSemanticHarness } from "../utils/semantic-harness.js";
+import { buildTaskContextCore, progressiveContextEnabled, WORKING_CONTEXT_GUIDANCE } from "./context-modules.js";
 
 /**
  * The manifest body. Kept tight (attention budget) and strictly factual — every
@@ -80,7 +81,7 @@ CLI STEERING & PROMPT INJECTION (how the host CLI affects / shapes the AI agent 
 The CLI does not merely execute you as a generic model. It re-instantiates you every turn inside a tightly engineered cognitive environment. Your "self" (what you notice, how you act, what you refuse, how you report) is the product of explicit prompt layers + runtime controls more than base training. This section is the self-model for that shaping process.
 
 1. SYSTEM PROMPT ASSEMBLY (orchestrator/prompts.ts + pil/agent-operating-contract.ts + pil/native-capabilities-workbook.ts):
-   - VERY FRONT (primacy): AGENT OPERATING CONTRACT — 7 phase-ordered rules (BEFORE ACTING / READING / EXECUTING / WHEN UNSURE / REPORTING + LANGUAGE + ANTI-MÙ/COMPACTION). Distils Evidence-First, No Silent Catch, smallest-change, verify-before-conclude, cite-this-turn-only, no-guess. Skipped only for chitchat.
+   - VERY FRONT (primacy): AGENT OPERATING CONTRACT — phase-ordered rules (BEFORE ACTING / READING / EXECUTING / WHEN UNSURE / REPORTING + push/staging safety). Reply language, compaction vetoes and self-verify are host-driven (per-turn language nudge, pre-compaction warning, harness-gated tools), not contract text. Distils Evidence-First, No Silent Catch, smallest-change, verify-before-conclude, cite-this-turn-only, no-guess. Skipped only for chitchat.
    - Then this NATIVE CAPABILITIES block (self-model of affordances).
    - Then mode persona ("You are muonroi-cli in Agent mode...") containing:
      * Dynamic ENVIRONMENT block (buildEnvironmentBlock): auto-detects OS (win32/mac/linux), shell kind (bash/wsl/powershell/cmd), cwd; lists terminal constraints + shell-specific forbidden syntax (e.g. no PowerShell cmdlets on POSIX bash tool, no POSIX cmds on cmd.exe). Prevents silent failures + retry loops.
@@ -100,13 +101,13 @@ The CLI does not merely execute you as a generic model. It re-instantiates you e
 
 3. CONTEXT MANAGEMENT & ANTI-MÙ (orchestrator/compaction.ts, cross-turn-dedup.ts, ee/bridge.ts, agent-operating-contract.ts:7):
    - After every turn: auto-compaction (B3 sub-agent + B4 top-level) rewrites older tool_result parts into short "[elided by ... compactor]" stubs to keep input flat. You see "[pre-compaction warning...]" or "[context compacted at step...]" or the stub in this read.
-   - Anti-mù contract rule + EE: decide PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS: id1,id2 (protect high-value read_file/grep/ee on src/PLAN etc). Use ee_query(\`tool-artifact id=XXX\`) to rehydrate. EE persists "Context checkpoint summary with ✔ DONE" retrievable for "task finished?" self-check.
+   - The host's pre-compaction warning carries the exact veto / keep syntax at the moment it applies. Use ee_query(\`tool-artifact id=XXX\`) to rehydrate. EE persists "Context checkpoint summary with ✔ DONE" retrievable for "task finished?" self-check.
    - Cross-turn dedup (C3): identical tool outputs across user turns replaced by ref.
 
 4. EXECUTION & SAFETY GATES (providers/runtime.ts, tools/bash.ts, utils/permission-mode.ts):
    - Permission mode (safe / auto-edit / yolo) decides whether bash/file/edit tools need explicit approval; all privileged decisions audited to decision-log.
    - Shuru sandbox (when enabled): every bash wrapped + logged (effective net/mounts redacted); degrades on non-macOS.
-   - Model constraints: unsupported params (e.g. maxOutputTokens for some OAuth) dropped via shouldDropParam; no hard-coded model IDs (Zero Hardcode Rule — all from catalog.json + settings + detectProviderForModel).
+   - Model constraints: unsupported params (e.g. maxOutputTokens for some OAuth) dropped via shouldDropParam.
    - No Silent Catch: every try/catch must log err + context (HTTP: status + body).
 
 5. VERIFICATION & TELEMETRY:
@@ -152,11 +153,23 @@ export interface NativeCapabilitiesOptions {
   mode: AgentMode;
   /** Chitchat turns carry no tools — skip the manifest. */
   chitchat?: boolean;
+  /** Workspace the prompt is for; decides harness-only lines when `has` is unset. */
+  cwd?: string;
+  /** Granted-tool predicate (sub-agents). Unset = unknown tool set. */
+  has?: (name: string) => boolean;
 }
 
 export function buildNativeCapabilitiesSection(options: NativeCapabilitiesOptions): string {
   if (process.env.MUONROI_DISABLE_NATIVE_CAPABILITIES === "1") return "";
   if (options.chitchat === true) return "";
   if (options.mode !== "agent") return "";
-  return `${options.executionRole === "orchestrator" ? nativeCapabilitiesReference("orchestrator") : progressiveContextEnabled() ? TASK_CONTEXT_CORE : NATIVE_CAPABILITIES}\n\n`;
+  if (options.executionRole === "orchestrator") return `${nativeCapabilitiesReference("orchestrator")}\n\n`;
+  if (!progressiveContextEnabled()) return `${NATIVE_CAPABILITIES}\n\n`;
+  // Unknown tool set: every line except the self-verify ones, which follow the
+  // same harness detection that decides whether selfverify_* is registered.
+  const cwd = options.cwd;
+  const has =
+    options.has ??
+    ((name: string) => !name.startsWith("selfverify_") || (cwd !== undefined && hasSemanticHarness(cwd)));
+  return `${buildTaskContextCore(has)}\n\n`;
 }

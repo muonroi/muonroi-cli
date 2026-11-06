@@ -2,14 +2,24 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AGENT_OPERATING_CONTRACT, buildContractSection } from "./agent-operating-contract.js";
 
 describe("AGENT_OPERATING_CONTRACT", () => {
-  it("covers core work phases + anti-mù compaction contract (upgrade)", () => {
+  it("covers the core work phases", () => {
     expect(AGENT_OPERATING_CONTRACT).toMatch(/BEFORE ACTING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/READING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/EXECUTING/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/WHEN UNSURE/i);
     expect(AGENT_OPERATING_CONTRACT).toMatch(/REPORTING/i);
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/ANTI-MÙ\s*\/\s*COMPACTION/i);
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/PRESERVE_FULL_CONTEXT/i);
+  });
+
+  it("leaves host-owned behaviour to the host, not to contract text", () => {
+    // Reply language: per-turn nudge (pil/reply-language.ts). Compaction veto
+    // syntax: the pre-compaction warning (scope-reminder.ts). Self-verify:
+    // registered only with a Semantic harness. convene_council: no reader of
+    // this contract holds it (workers are refused it; main gets the
+    // orchestrator contract instead).
+    expect(AGENT_OPERATING_CONTRACT).not.toMatch(/LANGUAGE:/);
+    expect(AGENT_OPERATING_CONTRACT).not.toMatch(/PRESERVE_FULL_CONTEXT|KEEP_TOOL_IDS|ANTI-MÙ/);
+    expect(AGENT_OPERATING_CONTRACT).not.toMatch(/selfverify_/);
+    expect(AGENT_OPERATING_CONTRACT).not.toContain("convene_council");
   });
 
   it("carries the anti-hallucination / grounding rule in the REPORTING phase", () => {

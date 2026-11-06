@@ -207,7 +207,11 @@ describe("compactForContext writes exactly one cost-log row per billed summary c
   // Before: recordUsage("compaction") appended a second copy of every row
   // (186 cost-log rows for 93 compactions, 2026-11-02..04), double-counting
   // compaction in `usage report --by callsite`.
-  async function compactionRows(): Promise<Array<Record<string, unknown>>> {
+  // appendCostLog is fire-and-forget, so neither the arrival time nor the
+  // append ORDER of two rows is deterministic under load (measured: a full
+  // shard run wrote the fallback row before the rejected one). Wait for the
+  // expected count and compare as a set — the contract is "one row each".
+  async function compactionRows(expected = 1): Promise<Array<Record<string, unknown>>> {
     const home = mkdtempSync(join(tmpdir(), "muonroi-compaction-costlog-"));
     vi.stubEnv("MUONROI_CLI_HOME", home);
     try {
@@ -223,7 +227,7 @@ describe("compactForContext writes exactly one cost-log row per billed summary c
               .map((l) => JSON.parse(l) as Record<string, unknown>)
               .filter((r) => r.phase === "compaction")
           : [];
-        if (rows.length > 0 && i >= 5) break;
+        if (rows.length >= expected && i >= 5) break;
         await new Promise((r) => setTimeout(r, 20));
       }
       return rows;
@@ -243,11 +247,15 @@ describe("compactForContext writes exactly one cost-log row per billed summary c
 
   it("a rejected-but-billed summary and its fallback: one row EACH (both were real calls)", async () => {
     replies.set(COMPACT_MODEL, { text: "", finishReason: "length", outputTokens: 4096, reasoningText: "r".repeat(50) });
-    const rows = await compactionRows();
-    expect(rows.map((r) => [r.callsite, r.model, r.actualInputTokens, r.actualOutputTokens])).toEqual([
-      ["orchestrator.compaction.rejected", COMPACT_MODEL, 100, 4096],
-      ["orchestrator.compaction", MAIN_MODEL, 100, 20],
-    ]);
+    const rows = await compactionRows(2);
+    const shape = (r: Record<string, unknown>) => [r.callsite, r.model, r.actualInputTokens, r.actualOutputTokens];
+    const byCallsite = (a: unknown[], b: unknown[]) => String(a[0]).localeCompare(String(b[0]));
+    expect(rows.map(shape).sort(byCallsite)).toEqual(
+      [
+        ["orchestrator.compaction.rejected", COMPACT_MODEL, 100, 4096],
+        ["orchestrator.compaction", MAIN_MODEL, 100, 20],
+      ].sort(byCallsite),
+    );
   }, 15_000);
 });
 
