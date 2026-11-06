@@ -11,7 +11,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeDatabase, getDatabase } from "../db.js";
 import { SessionStore } from "../sessions.js";
-import { appendMessages, getSessionChainInfos } from "../transcript.js";
+import { appendMessages, getSessionChain, getSessionChainInfos } from "../transcript.js";
 
 let tmpHome: string;
 let prevHome: string | undefined;
@@ -95,5 +95,38 @@ describe("getSessionChainInfos", () => {
     expect(nodes).toHaveLength(2);
     expect(nodes.find((n) => n.id === sub.id)?.isCurrent).toBe(true);
     expect(nodes.find((n) => n.id === root.id)?.isCurrent).toBe(false);
+  });
+});
+
+describe("getSessionChain — created_at ties", () => {
+  // A child forked in the same millisecond as its parent carries the SAME
+  // created_at. Session ids are random hex, so ~half the time the child's id
+  // sorts lower and an unbroken ORDER BY created_at put it at chain[0] — the
+  // slot every consumer treats as the root (CI run 42164466582, macOS:
+  // sub-session-realdb "renders the absorbed answer ONCE" got 1 entry, not 0).
+  // Pin the adversarial case: identical created_at AND a child id that sorts
+  // below the parent's.
+  it("orders a same-millisecond child after its parent even when the child id sorts lower", () => {
+    const store = new SessionStore(tmpHome);
+    const root = store.createSession("deepseek-v4-flash", "agent", tmpHome);
+    const db = getDatabase();
+    const childId = "000000000000";
+    expect(childId < root.id).toBe(true);
+    db.prepare(
+      `INSERT INTO sessions (id, workspace_id, parent_session_id, title, model, mode, cwd_at_start, cwd_last,
+                             status, created_at, updated_at, kind, root_session_id)
+       SELECT ?, workspace_id, id, NULL, model, mode, cwd_at_start, cwd_last, status, created_at, updated_at,
+              'subagent', id
+       FROM sessions WHERE id = ?`,
+    ).run(childId, root.id);
+    const rows = db.prepare("SELECT id, created_at FROM sessions ORDER BY created_at").all() as Array<{
+      id: string;
+      created_at: string;
+    }>;
+    expect(rows).toHaveLength(2);
+    expect(rows[0]!.created_at).toBe(rows[1]!.created_at); // the tie is real
+
+    expect(getSessionChain(root.id)).toEqual([root.id, childId]);
+    expect(getSessionChain(childId)).toEqual([root.id, childId]);
   });
 });

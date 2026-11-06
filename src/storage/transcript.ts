@@ -1010,7 +1010,15 @@ export function getSessionChain(sessionId: string): string[] {
     }
   }
 
-  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at
+  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at.
+  // created_at is a millisecond ISO string, so a parent and the child forked
+  // from it in the same millisecond TIE — and SQLite then returns them in its
+  // scan order (the random-hex primary key), putting the child FIRST about half
+  // the time. Every consumer treats chain[0] as the root (buildChatEntries skips
+  // index 0 when reconciling absorbed answers / helper receipts; the resume
+  // transcript concatenates in chain order), so the tie must break by insertion
+  // order: rowid is monotonic on this rowid table, and a child row is always
+  // INSERTed after its parent already exists (createSession, then linkChild).
   let chain: string[] = [];
   try {
     const placeholders = Array.from(allIds)
@@ -1018,9 +1026,9 @@ export function getSessionChain(sessionId: string): string[] {
       .join(",");
     const sortedRows = db
       .prepare(`
-      SELECT id FROM sessions 
-      WHERE id IN (${placeholders}) 
-      ORDER BY created_at ASC
+      SELECT id FROM sessions
+      WHERE id IN (${placeholders})
+      ORDER BY created_at ASC, rowid ASC
     `)
       .all(...Array.from(allIds)) as Array<{ id: string }>;
     chain = sortedRows.map((r) => r.id);
