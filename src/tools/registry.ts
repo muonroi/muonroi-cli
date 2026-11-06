@@ -50,18 +50,27 @@ import { beginGitEffectGuard, effectViolationMessage } from "./git-effect-guard.
 import {
   analyzeGitCommand,
   checkDestructiveOp,
+  checkForeignStaging,
+  checkHookBypass,
   checkPushGate,
   checkSensitiveStaging,
   commitBlockedMessage,
   detectBlockedGitSubcommand,
+  gitTopLevel,
+  nextGitSafetySeq,
+  noteFileWrites,
+  type PushGateResult,
   pushBlockedMessage,
+  recordBashRun,
   recordCommandOutcome,
+  recordGateRun,
+  recordVerificationRun,
   stagingWarning,
 } from "./git-safety.js";
 import { executeGrep } from "./grep.js";
 import { registerNativeMuonroiTools } from "./native-tools.js";
 import { registerNativeResearchTools } from "./research.js";
-import { type GateCatalog, registerRunGateTool, resolveGateCatalog } from "./run-gate.js";
+import { type GateCatalog, registerRunGateTool, requiredTestGates, resolveGateCatalog } from "./run-gate.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 import { workerProcessRefusal } from "./worker-process-boundary.js";
 import { filterScopedWorkerTools, WORKER_ISOLATION_CAPABILITIES, WorkerWriteScope } from "./worker-write-scope.js";
@@ -239,6 +248,52 @@ export function truncateOutput(text: string, maxChars = MAX_TOOL_OUTPUT_CHARS): 
   if (text.length <= maxChars) return text;
   const half = Math.floor(maxChars / 2);
   return `${text.slice(0, half)}\n\n... [${text.length - maxChars} chars truncated; full output in transcript] ...\n\n${text.slice(-half)}`;
+}
+
+/**
+ * Feed `run_gate` and `verification_run` outcomes to the push gate's ledger
+ * (git-safety.ts). run_gate runs a recipe gate verbatim, so a pass counts;
+ * verification_run runs a subset of test files, so only its FAILURES gate a
+ * push. Refused/unavailable calls ran nothing and are not recorded.
+ */
+function recordGateEvidence(tools: ToolSet, sessionKey: string, cwd: string): void {
+  const runGate = tools.run_gate as { execute?: (input: any, ctx: any) => Promise<unknown> } | undefined;
+  if (runGate?.execute) {
+    const original = runGate.execute;
+    runGate.execute = async (input: any, ctx: any) => {
+      const startSeq = nextGitSafetySeq();
+      const out = await original(input, ctx);
+      if (
+        typeof out === "string" &&
+        typeof input?.command === "string" &&
+        !/^ERROR: run_gate_(?:refused|unavailable)/.test(out)
+      )
+        recordGateRun(sessionKey, cwd, input.command, !out.startsWith("ERROR"), startSeq);
+      return out;
+    };
+  }
+  const verification = tools.verification_run as { execute?: (input: any, ctx: any) => Promise<unknown> } | undefined;
+  if (verification?.execute) {
+    const original = verification.execute;
+    verification.execute = async (input: any, ctx: any) => {
+      const out = await original(input, ctx);
+      if (typeof out === "string" && out.startsWith("{") && Array.isArray(input?.files)) {
+        try {
+          const parsed = JSON.parse(out) as { success?: unknown; output?: unknown };
+          // Only a run that launched a runner carries `exit=`; argument
+          // rejections are not test outcomes.
+          if (typeof parsed.output === "string" && /\nexit=/.test(parsed.output))
+            recordVerificationRun(sessionKey, input.files, parsed.success === true);
+        } catch (err) {
+          logger.file("warn", "orchestrator", "[git-safety] verification_run result not parseable", {
+            operation: "recordGateEvidence",
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      return out;
+    };
+  }
 }
 
 function formatResult(result: ToolResult): string {
@@ -788,19 +843,42 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         }
       }
 
-      // Hard-block broad staging when sensitive files are present.
-      // This runs PRE-EXECUTION (before bash.execute) regardless of permission mode.
+      // Hook bypass (`--no-verify`, `commit -n`, `-c core.hooksPath=`,
+      // `HUSKY=0`, `git config core.hooksPath`): the repo's hooks are its gate.
+      const hookBlock = checkHookBypass(gitShape);
+      if (hookBlock.blocked) return _prefixBlock("git-safety", hookBlock.message);
+
+      // Hard-block broad staging when sensitive files are present, or when it
+      // would sweep dirty paths this session did not write (user WIP, CLI
+      // artifacts). PRE-EXECUTION regardless of permission mode.
       if (gitShape.isBroadStage) {
         const stagingBlock = checkSensitiveStaging(bash.getCwd());
         if (stagingBlock.blocked) {
           return _prefixBlock("git-safety", stagingBlock.message);
         }
+        const foreignBlock = checkForeignStaging(gitSafetyKey, bash.getCwd(), gitShape);
+        if (foreignBlock.blocked) return _prefixBlock("git-safety", foreignBlock.message);
       }
+      // Push gate: a passing run of the recipe's test gate after the last
+      // native write. The catalog is resolved only inside a git work tree —
+      // outside one there is nothing to push, and the recipe scan of a large
+      // non-repo directory is unbounded (measured 51s on os.tmpdir()).
+      let pushGate: PushGateResult | undefined;
       if (gitShape.isPush) {
-        const gate = checkPushGate(gitSafetyKey);
-        if (gate.blocked) {
-          return _prefixBlock("git-safety", pushBlockedMessage(gate.failed));
+        const pushCwd = bash.getCwd();
+        const catalog = gitTopLevel(pushCwd) ? resolveGateCatalog(pushCwd) : undefined;
+        pushGate = checkPushGate(
+          gitSafetyKey,
+          catalog ? { cwd: pushCwd, requiredGates: requiredTestGates(catalog), gateSource: catalog.source } : undefined,
+        );
+        if (pushGate.blocked) {
+          return _prefixBlock("git-safety", pushBlockedMessage(pushGate));
         }
+        if (pushGate.warning)
+          logger.file("warn", "orchestrator", "[git-safety] push allowed without a test gate", {
+            cwd: pushCwd,
+            warning: pushGate.warning,
+          });
       }
 
       // G1 follow-up: a raw bash `git commit` must not bypass the LSP commit
@@ -863,11 +941,16 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       const repeatedIntent = canonical !== "" && canonical === entry.lastCanonical && entry.lastRunId !== null;
       const prevRunId = entry.lastRunId;
 
+      const runCwd = bash.getCwd();
+      const runStartSeq = nextGitSafetySeq();
       const result = await runBashWithEffectGuard(bash, input.command, input.timeout ?? 30000, extra?.abortSignal);
-      const formatted = formatResult(result);
+      const formatted = pushGate?.warning
+        ? `${formatResult(result)}\n\n[git-safety warning: ${pushGate.warning}]`
+        : formatResult(result);
 
       // Record verification outcome so a later `git push` can be gated on it.
       recordCommandOutcome(gitSafetyKey, canonical, result.success);
+      recordBashRun(gitSafetyKey, runCwd, cmd, result.success, runStartSeq);
 
       // Update last-canonical state AFTER we compared, so the current call's
       // runId becomes the comparison target for the next one. Session-scoped
@@ -1021,11 +1104,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         const apply = (current = scope) =>
           writeFile(input.file_path, input.content, bash.getCwd(), fileTracker, current);
         const result = opts?.runScopedWrite ? await opts.runScopedWrite(apply) : await apply();
+        if (result.success) noteFileWrites(gitSafetyKey, fileTracker.writtenPaths());
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),
           diff: result.diff,
           lspDiagnostics: result.lspDiagnostics,
+          ...(result.qualityWarnings?.length ? { qualityWarnings: result.qualityWarnings } : {}),
           ...(result.writeScopeVersion !== undefined ? { writeScopeVersion: result.writeScopeVersion } : {}),
         };
       },
@@ -1077,11 +1162,13 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
             current,
           );
         const result = opts?.runScopedWrite ? await opts.runScopedWrite(apply) : await apply();
+        if (result.success && !result.preview) noteFileWrites(gitSafetyKey, fileTracker.writtenPaths());
         return {
           success: result.success,
           output: truncateOutput(result.output ?? ""),
           diff: result.diff,
           lspDiagnostics: result.lspDiagnostics,
+          ...(result.qualityWarnings?.length ? { qualityWarnings: result.qualityWarnings } : {}),
           ...(result.preview ? { preview: true } : {}),
           ...(result.writeScopeVersion !== undefined ? { writeScopeVersion: result.writeScopeVersion } : {}),
         };
@@ -2430,6 +2517,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       onViolation: opts?.onGateViolation,
     });
 
+  recordGateEvidence(tools, gitSafetyKey, bash.getCwd());
   installArgGuards(tools, gitSafetyKey);
 
   return opts?.writeScope !== undefined ? filterScopedWorkerTools(tools, tools) : tools;

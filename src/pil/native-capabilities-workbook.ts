@@ -107,11 +107,11 @@ The CLI does not merely execute you as a generic model. It re-instantiates you e
    - Permission mode (safe / auto-edit / yolo) decides whether bash/file/edit tools need explicit approval; all privileged decisions audited to decision-log.
    - Shuru sandbox (when enabled): every bash wrapped + logged (effective net/mounts redacted); degrades on non-macOS.
    - Model constraints: unsupported params (e.g. maxOutputTokens for some OAuth) dropped via shouldDropParam; no hard-coded model IDs (Zero Hardcode Rule — all from catalog.json + settings + detectProviderForModel).
-   - No Silent Catch: every try/catch must log err + context (HTTP: status + body).
+   - No Silent Catch: host-checked — write_file/edit_file return a warning for an added empty catch / \`.catch(() => {})\` / \`except: pass\` (tools/empty-catch-scan.ts).
 
 5. VERIFICATION & TELEMETRY:
    - self-verify (Tier 1-3) + harness (agent-harness-*) for TUI surfaces: drives real TUI via semantic + sidechannel (named pipes on Win, fd3/4 on POSIX).
-   - Pre-push gate: full vitest + harness must pass before git push.
+   - Git gates (tools/git-safety.ts): \`git push\` is refused until the verify recipe's test gate passes after the last file edit; hook bypass (\`--no-verify\`) and broad staging of paths the session did not write are refused.
    - usage forensics, pil budget log, ee-timeout/ee-error events for cost attribution.
    - FLOW workflow (layer4 + skills in .agents/skills/): discuss/plan/execute/verify phases with UAT, audits, etc.
 

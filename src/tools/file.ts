@@ -4,6 +4,7 @@ import { dirname, isAbsolute, resolve } from "path";
 import { LSP_DETAIL_MAX_ACK } from "../lsp/manager";
 import { describeDiagnostics, syncFileWithLsp } from "../lsp/runtime";
 import type { LspDiagnosticFile } from "../lsp/types";
+import { formatQualityWarnings, type QualityWarning, scanAddedSilentCatches } from "./empty-catch-scan.js";
 import type { FileTracker } from "./file-tracker.js";
 import type { WorkerWriteScope } from "./worker-write-scope.js";
 import { blockWriteIfOutOfScope, normalizeMsysDrivePath } from "./write-scope.js";
@@ -23,6 +24,8 @@ export interface FileResult {
   diff?: FileDiff;
   lspDiagnostics?: LspDiagnosticFile[];
   preview?: boolean;
+  /** Host code-quality warnings on the lines this write added (not a block). */
+  qualityWarnings?: QualityWarning[];
 }
 
 /**
@@ -203,11 +206,13 @@ export async function writeFile(
     // (/ideal run muc2joffe506) STARTED at an edit ack that said only
     // "6 LSP issues · 6 errors". Errors sort first, warnings are labelled.
     const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
+    const qualityWarnings = scanAddedSilentCatches(filePath, before, content);
     return {
       success: true,
-      output: `${verb} ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,
+      output: `${verb} ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}${formatQualityWarnings(filePath, qualityWarnings)}`,
       diff,
       lspDiagnostics,
+      ...(qualityWarnings.length ? { qualityWarnings } : {}),
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -301,11 +306,13 @@ export async function editFile(
       ? []
       : await syncFileWithLsp(cwd, full, after, true, true).catch(() => [] as LspDiagnosticFile[]);
     const lspSummary = describeDiagnostics(lspDiagnostics, { cwd, max: LSP_DETAIL_MAX_ACK });
+    const qualityWarnings = scanAddedSilentCatches(filePath, before, after);
     return {
       success: true,
-      output: `Edited ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}`,
+      output: `Edited ${filePath} (+${diff.additions} -${diff.removals})${lspSummary ? `\n${lspSummary}` : ""}${formatQualityWarnings(filePath, qualityWarnings)}`,
       diff,
       lspDiagnostics,
+      ...(qualityWarnings.length ? { qualityWarnings } : {}),
     };
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
