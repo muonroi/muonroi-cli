@@ -27,6 +27,7 @@ import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import { isApprovalAllowed, toggleApprovalSelection, useLiveState } from "./live-state.js";
 import os from "os";
 import { recordInternalExperience } from "./utils/internal-activity.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -947,6 +948,7 @@ export function useAppLogic(props: AppLogicProps) {
     setModelPickerFocus,
     providerChipIndex,
     setProviderChipIndex,
+    providerChipIndexRef,
     reasoningEffortByModel,
     setReasoningEffortByModel,
   } = useModelPicker(agent.getModel());
@@ -955,6 +957,7 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSessionPicker,
     sessionPickerIndex,
     setSessionPickerIndex,
+    sessionPickerIndexRef,
     sessions: sessionPickerList,
     setSessions: setSessionPickerList,
   } = useSessionPicker();
@@ -1080,18 +1083,19 @@ export function useAppLogic(props: AppLogicProps) {
   const [mode, setModeState] = useState<AgentMode>(agent.getMode());
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
   const [sandboxSettings, setSandboxSettingsState] = useState<SandboxSettings>(() => agent.getSandboxSettings());
-  const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex] = useState(0);
+  // Live (see live-state.ts): Enter/←/→ change the row the cursor is on.
+  const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex, sandboxSettingsFocusIndexRef] = useLiveState(0);
   const [sandboxSettingsEditing, setSandboxSettingsEditing] = useState<string | null>(null);
   const [sandboxSettingsEditBuffer, setSandboxSettingsEditBuffer] = useState("");
   const [showWalletPicker, setShowWalletPicker] = useState(false);
   const [walletSettings, setWalletSettings] = useState<Record<string, unknown>>({});
-  const [walletFocusIndex, setWalletFocusIndex] = useState(0);
+  const [walletFocusIndex, setWalletFocusIndex, walletFocusIndexRef] = useLiveState(0);
   const [walletDisplayInfo, setWalletDisplayInfo] = useState<WalletDisplayInfo>({
     address: null,
     ethBalance: null,
     usdcBalance: null,
   });
-  const [pendingPaymentApproval, setPendingPaymentApproval] = useState<{
+  type PaymentApprovalCard = {
     url: string;
     description: string;
     security: string;
@@ -1104,7 +1108,13 @@ export function useAppLogic(props: AppLogicProps) {
     toolApproval?: ToolApprovalAskInfo;
     workerApproval?: import("../orchestrator/worker-approval.js").WorkerApprovalView;
     selected: number;
-  } | null>(null);
+  };
+  // Live mirror read by handleKey: the approve/deny decision must follow the
+  // row the user moved to, never the last render (Down+Enter in one stdin
+  // chunk approved before this — see live-state.ts). Every writer goes through
+  // the live setter, so the ref is never behind React state.
+  const [pendingPaymentApproval, setPendingPaymentApproval, pendingPaymentApprovalRef] =
+    useLiveState<PaymentApprovalCard | null>(null);
   // Main-agent tool approvals awaiting a decision, FIFO. The card shows the head;
   // each entry's resolve() unblocks the tool's execute inside the live turn.
   const toolApprovalQueueRef = useRef<
@@ -1334,11 +1344,15 @@ export function useAppLogic(props: AppLogicProps) {
   const { store: storeQuote, getPartnerLast } = usePairQuoteBuffer();
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
-  const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  // Live: Enter on the halt card must run the option the cursor is on (the list
+  // includes destructive Abort) even when ↑/↓ and Enter share a stdin chunk.
+  const [haltSelectedIndex, setHaltSelectedIndex, haltSelectedIndexRef] = useLiveState(0);
   // A — most recent sprint number seen on a product_status_card, used to title
   // the recovery card ("Sprint N failed") when an /ideal run throws mid-run.
   const lastProductSprintNRef = useRef<number | null>(null);
-  const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
+  // Live: handleKey reads initNewFormRef so a ↑/↓+Enter burst scaffolds the stack/
+  // template the cursor is on, not the one from the last render (live-state.ts).
+  const [initNewForm, setInitNewForm, initNewFormRef] = useLiveState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
 
   // E2 — start/clear post-answer heartbeat. Renders "⏳ Waiting for next phase...
@@ -1436,10 +1450,13 @@ export function useAppLogic(props: AppLogicProps) {
    * `setHaltSelectedIndex(0)`, and on the CB-3 card index 0 is "Init new
    * project" — a scaffold, pre-selected on a tree that already exists.
    */
-  const openHaltCard = useCallback((halt: HaltChunk) => {
-    setActiveHaltCard(halt);
-    setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
-  }, []);
+  const openHaltCard = useCallback(
+    (halt: HaltChunk) => {
+      setActiveHaltCard(halt);
+      setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
+    },
+    [setHaltSelectedIndex],
+  );
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
@@ -1563,7 +1580,11 @@ export function useAppLogic(props: AppLogicProps) {
   const [copyFlashId, setCopyFlashId] = useState(0);
   const [expandedMessages, setExpandedMessages] = useState<Set<number>>(() => new Set());
   const [activeSubagent, setActiveSubagent] = useState<SubagentStatus | null>(null);
-  const [pqs, setPqs] = useState<PlanQuestionsState>(initialPlanQuestionsState());
+  // Live: handleKey and submitPlanAnswers read pqsRef. A single-question plan
+  // sets the answer and submits in the SAME handler call, so a closure read
+  // submitted the plan without the answer just picked; a Tab/Down+Enter burst
+  // acted on the previous tab/row (see live-state.ts).
+  const [pqs, setPqs, pqsRef] = useLiveState<PlanQuestionsState>(initialPlanQuestionsState());
   const pasteCounterRef = useRef(0);
   const pasteBlocksRef = useRef<PasteBlock[]>([]);
   const apiKeyInputRef = useRef<TextareaRenderable>(null);
@@ -2226,7 +2247,7 @@ export function useAppLogic(props: AppLogicProps) {
     setSandboxSettingsEditing(null);
     setSandboxSettingsEditBuffer("");
     setShowSandboxPicker(true);
-  }, []);
+  }, [setSandboxSettingsFocusIndex]);
 
   const openWalletPicker = useCallback(() => {
     setWalletFocusIndex(0);
@@ -2234,7 +2255,7 @@ export function useAppLogic(props: AppLogicProps) {
     setShowWalletPicker(true);
     // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
-  }, []);
+  }, [setWalletFocusIndex]);
 
   const toggleProviderEnabled = useCallback(
     (provider: ProviderId) => {
@@ -2630,7 +2651,7 @@ export function useAppLogic(props: AppLogicProps) {
           error: err instanceof Error ? err.message : String(err),
         });
       });
-  }, [agent]);
+  }, [agent, setPendingPaymentApproval]);
   const agentActivities = useMemo(
     () => collectAgentActivities(messages, activeToolCalls, backgroundSnapshot),
     [messages, activeToolCalls, backgroundSnapshot],
@@ -3246,7 +3267,7 @@ export function useAppLogic(props: AppLogicProps) {
       setActiveToolCalls([]);
       setTimeout(scrollToBottom, 10);
     },
-    [scrollToBottom],
+    [scrollToBottom, setPqs],
   );
 
   const syncTelegramTurnEntries = useCallback((activeTurn: ActiveTurnState) => {
@@ -3433,7 +3454,7 @@ export function useAppLogic(props: AppLogicProps) {
       const next = queue[0];
       setPendingPaymentApproval(next ? toolApprovalCard(next.info) : null);
     },
-    [toolApprovalCard],
+    [toolApprovalCard, setPendingPaymentApproval],
   );
   useEffect(() => {
     const queue = toolApprovalQueueRef.current;
@@ -3461,7 +3482,7 @@ export function useAppLogic(props: AppLogicProps) {
       for (const entry of queue.splice(0)) entry.resolve("deny");
       setPendingPaymentApproval((current) => (current?.toolApproval ? null : current));
     };
-  }, [agent, toolApprovalCard, settleToolApproval]);
+  }, [agent, toolApprovalCard, settleToolApproval, setPendingPaymentApproval]);
 
   const finalizeActiveTurn = useCallback(
     ({ wasInterrupted = false, hadError = false }: { wasInterrupted?: boolean; hadError?: boolean } = {}) => {
@@ -4223,7 +4244,7 @@ export function useAppLogic(props: AppLogicProps) {
     replacePasteBlocks([]);
     queuedMessagesRef.current = [];
     setQueuedMessages([]);
-  }, [agent, clearLiveTurnUi, replacePasteBlocks]);
+  }, [agent, clearLiveTurnUi, replacePasteBlocks, setPqs]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array — adding them would cause unnecessary re-creation of processMessage on every render
   const processMessage = useCallback(
@@ -4860,7 +4881,7 @@ export function useAppLogic(props: AppLogicProps) {
         );
       }
     },
-    [agent],
+    [agent, setInitNewForm],
   );
   useEffect(
     () =>
@@ -5318,14 +5339,16 @@ export function useAppLogic(props: AppLogicProps) {
                 payload.subcommand === "start"
                   ? `/ideal "${payload.idea ?? ""}"`
                   : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
+              // status/abort are answered locally and at once; announcing a
+              // "Product loop starting…" for them described something that never ran.
+              const startsLoop = payload.subcommand !== "status" && payload.subcommand !== "abort";
+              const startingLine = startsLoop
+                ? "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n"
+                : "";
               setMessages((prev) => [
                 ...prev,
                 buildUserEntry(heading),
-                buildAssistantEntry(
-                  warningPrefix
-                    ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
-                    : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
-                ),
+                buildAssistantEntry(warningPrefix ? `${warningPrefix}\n${startingLine}` : startingLine),
               ]);
               // Fresh product-loop run — clear any persisted council UI (phases,
               // statuses, AND leftover debate arrays from a prior /council or
@@ -6355,24 +6378,24 @@ export function useAppLogic(props: AppLogicProps) {
   const dismissPlan = useCallback(() => {
     setActivePlan(null);
     setPqs(initialPlanQuestionsState());
-  }, []);
+  }, [setPqs]);
 
   const submitPlanAnswers = useCallback(() => {
     if (!activePlan?.questions?.length) return;
-    const text = formatPlanAnswers(activePlan.questions, pqs.answers);
+    const text = formatPlanAnswers(activePlan.questions, pqsRef.current.answers);
     setActivePlan(null);
     setPqs(initialPlanQuestionsState());
     processMessage(text);
-  }, [activePlan, pqs.answers, processMessage]);
+  }, [activePlan, processMessage, pqsRef, setPqs]);
 
   const handlePlanSelect = useCallback(
     (q: PlanQuestion, idx: number, options: { id: string; label: string }[], showCustom: boolean) => {
       const isCustom = showCustom && idx === options.length;
       if (isCustom) {
         if (q.type === "multiselect") {
-          const customVal = pqs.customInputs[q.id] ?? "";
+          const customVal = pqsRef.current.customInputs[q.id] ?? "";
           if (customVal) {
-            const existing = (pqs.answers[q.id] as string[] | undefined) ?? [];
+            const existing = (pqsRef.current.answers[q.id] as string[] | undefined) ?? [];
             if (existing.includes(customVal)) {
               setPqs((s) => ({ ...s, answers: { ...s.answers, [q.id]: existing.filter((x) => x !== customVal) } }));
             } else {
@@ -6404,7 +6427,7 @@ export function useAppLogic(props: AppLogicProps) {
         setPqs((s) => ({ ...s, tab: s.tab + 1, selected: 0 }));
       }
     },
-    [pqs, isSinglePlan, submitPlanAnswers],
+    [pqsRef, setPqs, isSinglePlan, submitPlanAnswers],
   );
 
   const dismissBtw = useCallback(() => {
@@ -6417,6 +6440,11 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor/useModelPicker hooks are stable useState setters (stable identity across renders)
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // The approval card is read from its live ref, never the closure: an
+      // approve/deny must follow the row the user is on (see live-state.ts).
+      const approvalCardNow = pendingPaymentApprovalRef.current;
+      // Same for the init-new form: its pickers' Enter reads the live step/index.
+      const initNewFormNow = initNewFormRef.current;
       // Ctrl+G — mark the most-recent surfaced experience hints as noise.
       // Sends IRRELEVANT verdict with reason='wrong_task' for every match
       // in the last intercept batch. Default to wrong_task because we can't
@@ -6597,7 +6625,7 @@ export function useAppLogic(props: AppLogicProps) {
       // when the prompt input is empty, so End/PageUp/PageDown still edit text
       // while composing. End re-pins to the live tail; PageUp/PageDown page the
       // transcript by one viewport without disturbing the composer.
-      if (!pendingPaymentApproval?.workerApproval && isScrollLockEnabled() && !key.ctrl && !key.meta) {
+      if (!approvalCardNow?.workerApproval && isScrollLockEnabled() && !key.ctrl && !key.meta) {
         const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
         if (composerEmpty && (key.name === "pageup" || key.name === "pagedown" || key.name === "end")) {
           const sb = scrollRef.current;
@@ -6644,9 +6672,9 @@ export function useAppLogic(props: AppLogicProps) {
         // the same identifier (not a re-derivation from `activePlan`) keeps the
         // guard and the branch condition literally the same expression.
         planQuestions: showPlanPanel,
-        paymentApproval: pendingPaymentApproval !== null,
+        paymentApproval: approvalCardNow !== null,
         haltCard: activeHaltCard !== null,
-        initNewForm: initNewForm !== null,
+        initNewForm: initNewFormNow !== null,
         pointToExistingForm: pointToExistingForm !== null,
         askcard: pendingCouncilQuestionRef.current !== null,
         preflight: pendingCouncilPreflight !== null,
@@ -6673,7 +6701,7 @@ export function useAppLogic(props: AppLogicProps) {
       reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
       const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
       if (
-        pendingPaymentApproval?.workerApproval &&
+        approvalCardNow?.workerApproval &&
         modalOwnsKeyboard(modalOwnerNow, "payment-approval") &&
         !key.ctrl &&
         !key.meta &&
@@ -6794,14 +6822,14 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Init-new form intercepts all input while open.
-      if (initNewForm && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
-        if (initNewForm.step === "name") {
+      if (initNewFormNow && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
+        if (initNewFormNow.step === "name") {
           if (isEscapeKey(key)) {
             setInitNewForm(null);
             return;
           }
           if (key.name === "return") {
-            const name = initNewForm.nameInput.trim();
+            const name = initNewFormNow.nameInput.trim();
             if (!name) {
               setInitNewForm((s) => (s ? { ...s, nameError: "Project name cannot be empty." } : s));
               return;
@@ -6823,7 +6851,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        if (initNewForm.step === "fe-stack") {
+        if (initNewFormNow.step === "fe-stack") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "name" } : s));
             return;
@@ -6840,13 +6868,13 @@ export function useAppLogic(props: AppLogicProps) {
           }
           if (key.name === "return") {
             // Plan 23-02 — when /ideal intent is captured, route through EE design.
-            if (initNewForm.intent.trim().length > 0) {
+            if (initNewFormNow.intent.trim().length > 0) {
               setInitNewForm((s) => (s ? { ...s, step: "designing", designError: null } : s));
               (async () => {
                 try {
                   const { designBBPackages } = await import("../ee/bb-design.js");
-                  const result = await designBBPackages(initNewForm.intent, {
-                    allowCommercial: initNewForm.allowCommercial,
+                  const result = await designBBPackages(initNewFormNow.intent, {
+                    allowCommercial: initNewFormNow.allowCommercial,
                   });
                   setInitNewForm((s) => {
                     if (!s) return s;
@@ -6875,7 +6903,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Plan 23-02 — EE designing step. Esc skips to manual menu; ignore other keys.
-        if (initNewForm.step === "designing") {
+        if (initNewFormNow.step === "designing") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
             return;
@@ -6883,7 +6911,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Plan 23-02 — EE design-preview step: navigate / toggle / confirm.
-        if (initNewForm.step === "design-preview") {
+        if (initNewFormNow.step === "design-preview") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
             return;
@@ -6914,7 +6942,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           if (key.sequence === "c" || key.sequence === "C") {
             // Toggle commercial flag + re-run design.
-            const nextAllowCommercial = !initNewForm.allowCommercial;
+            const nextAllowCommercial = !initNewFormNow.allowCommercial;
             setInitNewForm((s) =>
               s
                 ? {
@@ -6928,7 +6956,7 @@ export function useAppLogic(props: AppLogicProps) {
             (async () => {
               try {
                 const { designBBPackages } = await import("../ee/bb-design.js");
-                const result = await designBBPackages(initNewForm.intent, {
+                const result = await designBBPackages(initNewFormNow.intent, {
                   allowCommercial: nextAllowCommercial,
                 });
                 setInitNewForm((s) => {
@@ -6952,12 +6980,12 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           if (key.name === "return") {
-            const design = initNewForm.bbDesign;
+            const design = initNewFormNow.bbDesign;
             if (!design) return;
-            const selectedPackages = design.packageIds.filter((_, i) => initNewForm.packageToggles[i] ?? true);
-            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
-            const projectName = initNewForm.nameInput.trim();
-            const commercial = initNewForm.allowCommercial;
+            const selectedPackages = design.packageIds.filter((_, i) => initNewFormNow.packageToggles[i] ?? true);
+            const feStack = FE_STACK_OPTIONS[initNewFormNow.feStackIndex]?.value ?? "react";
+            const projectName = initNewFormNow.nameInput.trim();
+            const commercial = initNewFormNow.allowCommercial;
             const replayInputs = {
               projectName,
               feStack,
@@ -6971,7 +6999,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Task 6.2a — BB template picker step
-        if (initNewForm.step === "bb-template") {
+        if (initNewFormNow.step === "bb-template") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "fe-stack" } : s));
             return;
@@ -6987,9 +7015,9 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           if (key.name === "return") {
-            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
-            const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
-            const projectName = initNewForm.nameInput.trim();
+            const feStack = FE_STACK_OPTIONS[initNewFormNow.feStackIndex]?.value ?? "react";
+            const bbTemplate = BB_TEMPLATE_OPTIONS[initNewFormNow.bbTemplateIndex]?.info;
+            const projectName = initNewFormNow.nameInput.trim();
             const replayInputs = { projectName, feStack, bbTemplate };
             void runScaffoldAttempt(replayInputs);
             return;
@@ -6998,19 +7026,19 @@ export function useAppLogic(props: AppLogicProps) {
         }
         // Error step — R retries with stored inputs (no debate re-run); any
         // other key dismisses. running ignores keys; done dismisses too.
-        if (initNewForm.step === "error") {
+        if (initNewFormNow.step === "error") {
           if (
-            initNewForm.errorRetryable &&
-            initNewForm.replayInputs &&
+            initNewFormNow.errorRetryable &&
+            initNewFormNow.replayInputs &&
             (key.name === "r" || key.sequence === "r" || key.sequence === "R")
           ) {
-            void runScaffoldAttempt(initNewForm.replayInputs);
+            void runScaffoldAttempt(initNewFormNow.replayInputs);
             return;
           }
           setInitNewForm(null);
           return;
         }
-        if (initNewForm.step === "done") {
+        if (initNewFormNow.step === "done") {
           setInitNewForm(null);
           return;
         }
@@ -7035,12 +7063,13 @@ export function useAppLogic(props: AppLogicProps) {
           // `deriveHaltRecommendation` returns -1 when every offered option is
           // destructive: nothing is pre-selected, so Enter must not stand in for
           // a choice the user never made. ↑/↓ moves onto the list first.
-          if (haltSelectedIndex < 0) return;
-          const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
+          const haltIndexNow = haltSelectedIndexRef.current;
+          if (haltIndexNow < 0) return;
+          const chosen = activeHaltCard.recovery_options[haltIndexNow];
           if (chosen) {
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "halt_card_answered",
-              data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltSelectedIndex },
+              data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltIndexNow },
             });
             if (chosen.id === "init_new") {
               // Abort any in-flight LLM stream so its text reply doesn't bleed
@@ -7398,7 +7427,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
       }
       if (showPlanPanel && modalOwnsKeyboard(modalOwnerNow, "plan-questions")) {
-        const q = planQuestions[pqs.tab];
+        // Live reads (see pqsRef): a Tab/Down in the same stdin chunk has already
+        // moved the ref even though this closure still holds the last render.
+        const pqsNow = pqsRef.current;
+        const isPlanConfirmTabNow = !isSinglePlan && pqsNow.tab === planQuestions.length;
+        const q = planQuestions[pqsNow.tab];
 
         // Escape always dismisses
         if (isEscapeKey(key)) {
@@ -7407,14 +7440,14 @@ export function useAppLogic(props: AppLogicProps) {
         }
 
         // When editing custom text input
-        if (pqs.editing && !isPlanConfirmTab) {
+        if (pqsNow.editing && !isPlanConfirmTabNow) {
           if (key.name === "return") {
             const qId = q?.id;
             if (qId) {
-              const text = (pqs.customInputs[qId] ?? "").trim();
+              const text = (pqsNow.customInputs[qId] ?? "").trim();
               if (text) {
                 if (q.type === "multiselect") {
-                  const existing = (pqs.answers[qId] as string[] | undefined) ?? [];
+                  const existing = (pqsNow.answers[qId] as string[] | undefined) ?? [];
                   const next = existing.includes(text) ? existing : [...existing, text];
                   setPqs((s) => ({ ...s, editing: false, answers: { ...s.answers, [qId]: next } }));
                 } else if (q.type === "text") {
@@ -7475,7 +7508,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
 
         // Confirm tab
-        if (isPlanConfirmTab) {
+        if (isPlanConfirmTabNow) {
           if (key.name === "return") {
             submitPlanAnswers();
             return;
@@ -7516,7 +7549,7 @@ export function useAppLogic(props: AppLogicProps) {
 
         // Enter — select current option
         if (key.name === "return") {
-          handlePlanSelect(q, pqs.selected, options, showCustom);
+          handlePlanSelect(q, pqsNow.selected, options, showCustom);
           return;
         }
 
@@ -8118,7 +8151,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
-          const picked = sessionPickerList[sessionPickerIndex];
+          const picked = sessionPickerList[sessionPickerIndexRef.current];
           if (!picked) {
             setShowSessionPicker(false);
             return;
@@ -8216,22 +8249,22 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "k") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p) setApiKeyPrompt({ provider: p, value: "", error: null });
           return;
         }
         if (key.name === "o") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p && oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         if (key.name === "space" || key.sequence === " ") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p && providersWithKey.has(p)) toggleProviderEnabled(p);
           return;
         }
         if (key.name === "d" || key.name === "return") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (!p) return;
           // Enter means "use this provider". With credentials that means making
           // it the default; with none it means signing in, which is the only
@@ -8245,13 +8278,8 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (pendingPaymentApproval && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
-        if (
-          pendingPaymentApproval.workerApproval &&
-          !key.ctrl &&
-          !key.meta &&
-          ["a", "y"].includes(key.name.toLowerCase())
-        ) {
+      if (approvalCardNow && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
+        if (approvalCardNow.workerApproval && !key.ctrl && !key.meta && ["a", "y"].includes(key.name.toLowerCase())) {
           const mode = key.name.toLowerCase() === "a" ? "auto" : "yolo";
           void Promise.resolve(
             handlePermissionsSlash([mode], {
@@ -8274,10 +8302,10 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (isEscapeKey(key)) {
-          const request = pendingPaymentApproval.workerApproval;
+          const request = approvalCardNow.workerApproval;
           setPendingPaymentApproval(null);
-          if (pendingPaymentApproval.toolApproval) {
-            settleToolApproval(pendingPaymentApproval.toolApproval, "deny");
+          if (approvalCardNow.toolApproval) {
+            settleToolApproval(approvalCardNow.toolApproval, "deny");
           } else if (request) {
             workerApprovalDecisionsRef.current.add(request.id);
             void agent
@@ -8297,13 +8325,15 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "up" || key.name === "down") {
-          setPendingPaymentApproval((p) => (p ? { ...p, selected: p.selected === 0 ? 1 : 0 } : p));
+          setPendingPaymentApproval((p) => (p ? { ...p, selected: toggleApprovalSelection(p.selected) } : p));
           return;
         }
         if (key.name === "return") {
-          const approved = pendingPaymentApproval.selected === 0;
-          const toolApproval = pendingPaymentApproval.toolApproval;
-          const request = pendingPaymentApproval.workerApproval;
+          // Live ref, not the closure: a Down in the same stdin chunk has
+          // already moved the ref to Deny even though React has not re-rendered.
+          const approved = isApprovalAllowed(approvalCardNow.selected);
+          const toolApproval = approvalCardNow.toolApproval;
+          const request = approvalCardNow.workerApproval;
           setPendingPaymentApproval(null);
           if (request) {
             workerApprovalDecisionsRef.current.add(request.id);
@@ -8396,7 +8426,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        const focusedWalletRow = WALLET_ROWS[walletFocusIndex];
+        const focusedWalletRow = WALLET_ROWS[walletFocusIndexRef.current];
         if (!focusedWalletRow || focusedWalletRow.type === "readonly") return;
 
         if (key.name === "left" || key.name === "right") {
@@ -8469,7 +8499,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        const focusedRow = visibleRows[sandboxSettingsFocusIndex];
+        const focusedRow = visibleRows[sandboxSettingsFocusIndexRef.current];
         if (!focusedRow) return;
 
         if (focusedRow.type === "toggle" && (key.name === "left" || key.name === "right")) {

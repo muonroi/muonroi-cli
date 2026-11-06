@@ -19,6 +19,8 @@ export type HarnessContext = {
   proc: ChildProcess;
   driver: Driver;
   cleanup: () => void;
+  /** Send every key in ONE transport write (one stdin chunk in the child). */
+  pressBurst: (keys: string[]) => void;
 };
 
 export type SpawnHarnessOptions = {
@@ -155,7 +157,16 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
     }
   };
 
-  return { proc, driver, cleanup };
+  // One write for every key: the child's line splitter then dispatches all of
+  // them synchronously from a single data chunk, before React can commit the
+  // render the first key scheduled. `driver.press_sequence` writes one line per
+  // key, which a named pipe usually delivers as separate chunks — React commits
+  // between them and the stale-closure class of bug never shows.
+  const pressBurst = (keys: string[]) => {
+    inWrite.write(keys.map((k) => `${JSON.stringify({ op: "press", key: k })}\n`).join(""));
+  };
+
+  return { proc, driver, cleanup, pressBurst };
 }
 
 /**

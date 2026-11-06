@@ -25,6 +25,14 @@ export const opentuiSpawn: HarnessSpawn = async (req): Promise<HarnessSpawnResul
     },
   });
 
+  // stdout is drained by spawnAgentTui (an unread pipe blocks the child's
+  // native frame write — see drainRenderOutput). stderr needs a reader too, for
+  // the same reason; nobody else reads it on the MCP path, so relay it to this
+  // server's stderr (MCP owns stdout, stderr is the diagnostics channel).
+  proc.stderr?.on("data", (chunk: Buffer | string) => {
+    process.stderr.write(`[tui-child] ${typeof chunk === "string" ? chunk : chunk.toString("utf8")}`);
+  });
+
   // onLine: subscribe to raw newline-separated output from the child.
   // createLineSplitter in mcp-server handles the Buffer→line splitting;
   // here we emit whole string lines from the readable stream.

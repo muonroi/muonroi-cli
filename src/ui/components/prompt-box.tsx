@@ -1,5 +1,6 @@
 import type { KeyBinding, PasteEvent, TextareaRenderable } from "@opentui/core";
-import { useEffect, useState } from "react";
+import { useSemanticMirrorActive } from "@muonroi/agent-harness-opentui";
+import { useEffect, useReducer, useState } from "react";
 import type { getModelInfo } from "../../models/registry.js";
 import type { MODES } from "../../types/index.js";
 import { PROMPT_LOADING_FRAMES } from "../constants.js";
@@ -71,7 +72,24 @@ export function PromptModeLabel({
   return <PromptLoadingBoxes t={t} color={modeInfo.color} />;
 }
 
-export function PromptBox({
+export type PromptBoxProps = Parameters<typeof PromptBoxView>[0];
+
+/**
+ * The composer's semantic `value` is read off the textarea at RENDER time, but
+ * typing changes the textarea natively without a React render. Before the first
+ * turn a periodic re-render happened to refresh it; after a turn ends nothing
+ * re-rendered PromptBox, so the mirror sat at "" while the textarea held the
+ * typed text (measured: tests/harness/input-races.spec.ts). This wrapper owns the
+ * re-render on content change — only in agent mode, where the mirror is observed.
+ * The view below stays hook-free so it can be invoked as a plain function.
+ */
+export function PromptBox(props: Omit<PromptBoxProps, "onComposerContentChange">) {
+  const mirrorActive = useSemanticMirrorActive();
+  const [, bumpComposerMirror] = useReducer((n: number) => n + 1, 0);
+  return <PromptBoxView {...props} onComposerContentChange={mirrorActive ? bumpComposerMirror : undefined} />;
+}
+
+export function PromptBoxView({
   t,
   inputRef,
   isProcessing,
@@ -100,6 +118,7 @@ export function PromptBox({
   slashSelectedIndex,
   slashInputIsMatched,
   composerValue,
+  onComposerContentChange,
 }: {
   t: Theme;
   inputRef: React.RefObject<TextareaRenderable | null>;
@@ -149,6 +168,8 @@ export function PromptBox({
   slashSelectedIndex?: number;
   slashInputIsMatched?: boolean;
   composerValue?: string;
+  /** Re-render trigger for the semantic composer mirror (see PromptBox). */
+  onComposerContentChange?: () => void;
 }) {
   const hasQueue = (queuedMessages?.length ?? 0) > 0;
   const showSuggestions = typeahead?.visible ?? false;
@@ -259,6 +280,7 @@ export function PromptBox({
                 keyBindings={TEXTAREA_KEYBINDINGS}
                 onSubmit={onSubmit as unknown as () => void}
                 onPaste={onPaste as unknown as (event: PasteEvent) => void}
+                onContentChange={onComposerContentChange}
               />
             </TextBox>
           </box>
