@@ -23,13 +23,17 @@ it.skipIf(process.platform !== "win32")(
 it("foreground commands receive EOF instead of waiting indefinitely for inaccessible stdin", async () => {
   const bash = new BashTool(os.tmpdir());
   try {
+    // The bound only needs to separate "EOF arrived" from "stdin never closes"
+    // (which waits forever). 1500ms also had to cover spawning node, and on a
+    // loaded machine that alone exceeded it (sharded full run on ci/matrix-fix:
+    // "expected false to be true" at the success check; 3/3 green in isolation).
     const result = await bash.execute(
       "node -e \"process.stdin.resume();process.stdin.on('end',()=>console.log('STDIN_EOF'))\"",
-      1500,
+      8000,
     );
     expect(result.success).toBe(true);
     expect(result.output).toContain("STDIN_EOF");
   } finally {
     await bash.cleanup();
   }
-}, 10000);
+}, 20000);
