@@ -81,7 +81,7 @@ describe("council intent gate + plan card — user-facing main (orchestrator rol
   let cliHome: string;
 
   beforeAll(async () => {
-    // Greenfield cwd — per CLAUDE.md caveat 2, spawning a council spec in the
+    // Greenfield cwd — per docs/agent-harness/HARNESS-GUIDE.md caveat 2, spawning a council spec in the
     // repo root makes the conversationContext snapshot scan muonroi-cli itself
     // (28s..>40s, highly variable). A fresh temp cwd makes that snapshot instant.
     greenfield = mkdtempSync(join(tmpdir(), "council-plan-gate-"));

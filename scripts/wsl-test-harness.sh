@@ -7,7 +7,7 @@
 # Or from inside WSL:
 #   bash ~/muonroi-cli/scripts/wsl-test-harness.sh
 #
-# Assumes one-time setup from CLAUDE.md "WSL setup" is done.
+# Assumes one-time setup from docs/agent-harness/HARNESS-GUIDE.md "WSL setup" is done.
 
 set -euo pipefail
 
@@ -15,7 +15,7 @@ WSL_REPO="${HOME}/muonroi-cli"
 TARGET="${1:-tests/harness/}"
 
 if [ ! -d "${WSL_REPO}" ]; then
-  echo "FATAL: ${WSL_REPO} not found — run one-time setup from CLAUDE.md first" >&2
+  echo "FATAL: ${WSL_REPO} not found — run one-time setup from docs/agent-harness/HARNESS-GUIDE.md first" >&2
   exit 1
 fi
 

@@ -63,7 +63,7 @@ describe("cost-leak TUI smoke — fixture + dump path works end-to-end", () => {
     dumpPath = join(workDir, "calls.json");
 
     // Pass an explicit -k + -m so the API-key modal does not grab focus on a
-    // fresh clone (see CLAUDE.md "Known caveats" + composer.spec.ts).
+    // fresh clone (see docs/agent-harness/HARNESS-GUIDE.md "Known caveats" + composer.spec.ts).
     // Override --mock-llm to our temp fixture dir (NOT the default fixtures
     // path picked by spawnHarness).
     const ctx = await spawnHarness({
