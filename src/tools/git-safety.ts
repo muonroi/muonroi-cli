@@ -113,6 +113,36 @@ export function normalizeSafetyPath(p: string, base?: string): string {
 }
 
 /**
+ * normalizeSafetyPath on the path's REAL spelling. Paths reach the broad-staging
+ * guard in two spellings of one directory: written paths come from the tool's
+ * cwd (a symlinked macOS tmp under /var, or a Windows 8.3 TEMP like
+ * C:\Users\RUNNER~1), while dirty paths are joined onto `git rev-parse
+ * --show-toplevel`, which git prints canonical (/private/var, the long name).
+ * Compared lexically, every own file looked foreign (ci-matrix on d7363a46,
+ * mac + win; reproduced locally with TEMP at a junction and at an 8.3 alias).
+ * A path that no longer exists (deleted file) resolves through its parent.
+ */
+export function canonicalSafetyPath(p: string, base?: string): string {
+  const abs = normalizeSafetyPath(p, base);
+  try {
+    return normalizeSafetyPath(fs.realpathSync.native(abs));
+  } catch (err) {
+    try {
+      return normalizeSafetyPath(path.join(fs.realpathSync.native(path.dirname(abs)), path.basename(abs)));
+    } catch (parentErr) {
+      // Expected for a path whose parent is gone too: fall back to the lexical key.
+      logger.file("debug", "orchestrator", "[git-safety] canonical path unresolved; using lexical key", {
+        operation: "canonicalSafetyPath",
+        path: abs,
+        error: err instanceof Error ? err.message : String(err),
+        parentError: parentErr instanceof Error ? parentErr.message : String(parentErr),
+      });
+      return abs;
+    }
+  }
+}
+
+/**
  * Record successful native file writes (write_file / edit_file). Invalidates
  * every earlier test pass for the push gate and feeds the broad-staging guard.
  */
@@ -802,13 +832,13 @@ export function checkForeignStaging(sessionKey: string, cwd: string, shape: GitC
   if (!root) return none;
   const dirty = listDirtyPaths(root);
   if (!dirty) return none; // logged; fail open — the commit LSP gate + sensitive check still apply
-  const written = new Set(sessionWrittenPaths(sessionKey));
-  const cwdKey = normalizeSafetyPath(cwd);
+  const written = new Set(sessionWrittenPaths(sessionKey).map((p) => canonicalSafetyPath(p)));
+  const cwdKey = canonicalSafetyPath(cwd);
   const foreign: string[] = [];
   const own: string[] = [];
   for (const d of dirty) {
     if (shape.broadStageScope === "tracked" && d.untracked) continue;
-    const abs = normalizeSafetyPath(d.rel, root);
+    const abs = canonicalSafetyPath(d.rel, root);
     if (shape.broadStageScope === "cwd" && abs !== cwdKey && !abs.startsWith(`${cwdKey}${path.sep}`)) continue;
     // --untracked-files=all lists files, never collapsed directories, so an
     // exact path match is complete.
