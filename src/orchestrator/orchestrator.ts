@@ -245,6 +245,8 @@ import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 import { hasTurnProgressSince } from "./turn-progress.js";
+import { authFanoutRefusal } from "./worker-failure-recovery.js";
+import { surfaceWorkerGrounding } from "./worker-grounding.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -1690,6 +1692,9 @@ export class Agent {
       const notifications = [...delegationNotices, ...processNotices];
       for (const notification of notifications) {
         if (!("id" in notification)) persistNotification(notification);
+        // A worker result the host flagged (unsupported test/build claim, ungrounded
+        // count / file:line) is shown to the user, not only to the orchestrator.
+        surfaceWorkerGrounding(notification.message);
 
         const notifInput: NotificationHookInput = {
           hook_event_name: "Notification",
@@ -2109,6 +2114,8 @@ export class Agent {
         logger.file("warn", "orchestrator", "Worker dispatch refused", { error: message });
         return { success: false, output: message };
       }
+      const authRefusal = await this.workerAuthFanoutRefusal(request.modelId);
+      if (authRefusal) return { success: false, output: authRefusal };
     }
     if (this.executionRole === "orchestrator" || request.background || request.reviewOf) {
       const started = await this.runDelegation(request, abortSignal, true);
@@ -2274,6 +2281,26 @@ export class Agent {
     return result;
   }
 
+  /**
+   * Refusal when a worker on this provider already failed authentication in this
+   * session (typed `auth-failure` observation on its job record). Fail-open on an
+   * unreadable delegation registry: the dispatch itself then reports any 401.
+   */
+  private async workerAuthFanoutRefusal(modelId: string | undefined): Promise<string | null> {
+    if (!modelId) return null;
+    const provider = getModelInfo(modelId)?.provider;
+    if (!provider) return null;
+    try {
+      const refusal = authFanoutRefusal(await this.delegations.list(), provider);
+      if (refusal)
+        logger.file("warn", "orchestrator", "Worker dispatch refused after provider auth failure", { provider });
+      return refusal;
+    } catch (err) {
+      logger.warn("orchestrator", "worker auth fan-out check skipped", { error: String(err) });
+      return null;
+    }
+  }
+
   /** Refusal text when starting one more background agent would exceed the parallel limit. */
   private async parallelDelegationRefusal(): Promise<string | null> {
     const info = getModelInfo(this.modelId);
@@ -2318,13 +2345,15 @@ export class Agent {
           artifact.offset,
           artifact.maxChars,
         );
-      return await this.delegations.readResult(
+      const read = await this.delegations.readResult(
         id,
         !this._helperParentSessionId || this.session?.id === this._helperParentSessionId,
         artifact && (artifact.offset !== undefined || artifact.maxChars !== undefined)
           ? { offset: artifact.offset, maxChars: artifact.maxChars }
           : undefined,
       );
+      surfaceWorkerGrounding(read.output, id);
+      return read;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.warn("orchestrator", "Failed to read delegation result", { id, error: msg });
@@ -2338,6 +2367,7 @@ export class Agent {
   private async waitForDelegation(id: string, signal?: AbortSignal): Promise<ToolResult> {
     const result = await this.delegations.waitResult(id, signal);
     if (result.success && result.output?.includes("status=running")) await this.consumeBackgroundNotifications();
+    surfaceWorkerGrounding(result.output, id);
     return result;
   }
 

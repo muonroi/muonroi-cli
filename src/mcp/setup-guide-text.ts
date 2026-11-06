@@ -58,7 +58,7 @@ Add to your MCP client config:
 
 The CLI's OWN inner agent exposes these as NATIVE in-process tools (no MCP self-spawn):
 - setup_guide (this document)
-- ee_query / ee_health / ee_feedback / ee_write — Experience Engine semantic recall + compaction checkpoints + feedback for learning
+- ee_query (action="health" for status) / ee_feedback / ee_write — Experience Engine semantic recall + compaction checkpoints + feedback for learning
 - usage_forensics <id-prefix> — per-session cost/token forensics (peak input, cache hits, anomalies)
 - lsp_query — goToDefinition, findReferences, hover, symbols, call hierarchy etc.
 - selfverify_* — Tier-1 heuristic + Tier-2 agentic self-QA harness runs (start/poll/result/cancel/list)

@@ -232,11 +232,22 @@ export interface IntentDetectionTrace {
   complexitySizeScore?: number;
 }
 
+export interface BrainPoint {
+  text: string;
+  score: number;
+  id?: string;
+  collection?: string;
+  projectSlug?: string | null;
+  scope?: import("../ee/types.js").EEHintStoredScope | null;
+}
+
 export interface BrainData {
   // id/collection present when PIL schema_version >= 1.1 (server attributes the
   // point), enabling layer3's unified path to record it as rateable recall debt.
-  t0_principles: Array<{ text: string; score: number; id?: string; collection?: string }>;
+  // projectSlug/scope: the point's stored scope when the server forwards it, so a
+  // passive hint rated noise can get a host-derived wrong_repo/wrong_language.
+  t0_principles: Array<BrainPoint>;
   t1_rules: string[];
-  t2_patterns: Array<{ text: string; score: number; id?: string; collection?: string }>;
+  t2_patterns: Array<BrainPoint>;
   retrieval_skipped_reason: string | null;
 }

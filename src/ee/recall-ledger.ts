@@ -11,13 +11,16 @@
  * deliberately excluded from the implicit-precision reconcile path.
  */
 
-import type { EERecallEntry } from "./types.js";
+import type { EEHintStoredScope, EERecallEntry } from "./types.js";
 
 export interface PendingRecall {
   id: string;
   collection: string | null;
   query: string;
   ts: number;
+  /** Hint's stored project/scope when the recall/injection response carried it. */
+  projectSlug?: string | null;
+  scope?: EEHintStoredScope | null;
 }
 
 export interface RecallLedger {
@@ -38,6 +41,8 @@ export interface RecallLedger {
   isPending(id: string): boolean;
   /** Oldest-first list of still-unrated recalls. */
   pending(): PendingRecall[];
+  /** Pending entry for an id (exact, or a unique prefix as ee_feedback accepts), optionally in one collection. */
+  find(id: string, collection?: string): PendingRecall | undefined;
   pendingCount(): number;
   reset(): void;
 }
@@ -61,6 +66,8 @@ export function createRecallLedger(): RecallLedger {
             collection: e.collection ?? null,
             query: String(query || "").slice(0, 120),
             ts: now,
+            ...(e.projectSlug !== undefined ? { projectSlug: e.projectSlug } : {}),
+            ...(e.scope !== undefined ? { scope: e.scope } : {}),
           });
         }
       }
@@ -79,6 +86,16 @@ export function createRecallLedger(): RecallLedger {
     },
     pending() {
       return [...map.values()].sort((a, b) => a.ts - b.ts);
+    },
+    find(id, collection) {
+      const nid = String(id ?? "").trim();
+      if (!nid) return undefined;
+      const exact = map.get(nid);
+      if (exact && (!collection || exact.collection === collection)) return exact;
+      const matches = [...map.values()].filter(
+        (p) => p.id.startsWith(nid) && (!collection || p.collection === collection),
+      );
+      return matches.length === 1 ? matches[0] : undefined;
     },
     pendingCount() {
       return map.size;

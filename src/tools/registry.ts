@@ -1608,49 +1608,44 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   // its loop (session d95113d3be09: the anti-mù rehydrate path was a dead
   // reference). Exact artifact recovery is local only; semantic remote recall
   // cannot prove that a lesson is the requested tool result.
+  // Routing (tool-artifact lookup vs /api/recall) and scope (task/shell cwd,
+  // strict proof) are host-resolved, so the description names inputs only.
   tools.ee_query = dynamicTool({
     description:
-      "Active recall over the Experience Engine brain (learned warnings/recipes + task checkpoints + " +
-      "compaction-elided tool outputs for this codebase). General queries run the recallMode pipeline " +
-      "(/api/recall — same path as exp-recall.js) and return a formatted index whose entries carry " +
-      '`[id col]` handles. Anti-mù rehydration: query="tool-artifact id=<id from a [... elided ...] stub>" ' +
-      'or "full tool result id=<id>" does an exact local lookup. Worker evidence uses delegation_read with its host jobId/toolCallId/resultVersion. Semantic lessons never substitute for missing exact output. Also: query="recent compaction checkpoint ' +
-      'Progress DONE" to confirm finished work after a compaction. Returns hits, or an ee_unavailable note ' +
-      "when EE is down/unconfigured. Native scope defaults to shell cwd. For another repository pass cwd (absolute path) or project once; strict success remembers it for this task. action=scope inspects, projects lists known slugs without HTTP/auth chores, reset clears the task binding. Query text never sets scope; HTTP rejections are distinct from downtime.",
+      "Recall learned lessons, warnings and task checkpoints from the Experience Engine; hits carry `[id col]` handles " +
+      "for ee_feedback. Scope defaults to this task's repository; pass cwd or project once for another repo. " +
+      "action=projects lists slugs, scope/reset inspect or clear the binding, health probes reachability. " +
+      "Lessons are not evidence and never replace a tool result.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
-        action: {
-          type: "string",
-          enum: ["recall", "scope", "projects", "reset"],
-          description: "Default recall; scope/projects/reset need no query",
-        },
-        query: { type: "string", description: "Natural-language recall query (or 'tool-artifact id=<id>')" },
-        project: {
-          type: "string",
-          description: "Explicit concrete project slug for general recall; remembered only after strict verification",
-        },
-        cwd: {
-          type: "string",
-          description:
-            "Absolute target repository path (or ~/path); no slug needed when the server resolves it. Does not change the shell cwd.",
-        },
-        offset: { type: "integer", minimum: 0, description: "Project directory page offset; 50 slugs per page" },
-        collections: {
-          type: "array",
-          items: { type: "string" },
-          description: "Optional EE collections to scope an artifact lookup (e.g. ['experience-behavioral'])",
-        },
-        limit: { type: "number", description: "Max hits for an artifact lookup (1-50, default server-side)" },
-        maxChars: {
-          type: "number",
-          description: "Max chars of the recall index to return (500-20000, default 6000; general queries only)",
-        },
+        action: { type: "string", enum: ["recall", "scope", "projects", "reset", "health"] },
+        query: { type: "string" },
+        project: { type: "string", description: "Concrete EE project slug" },
+        cwd: { type: "string", description: "Absolute repository path" },
+        offset: { type: "integer", minimum: 0, description: "projects page offset" },
+        maxChars: { type: "number", description: "500-20000, default 6000" },
       },
     }),
     execute: async (input: any) => {
       taskContext.alignCwd(bash.getCwd());
       const action = input?.action ?? "recall";
+      if (action === "health") {
+        // Former standalone ee_health (25 calls lifetime, none after 2026-10-19):
+        // on demand here instead of a tool schema sent on every step.
+        try {
+          const { healthEE } = await import("../ee/search.js");
+          return JSON.stringify({
+            ...(await healthEE()),
+            scope: taskContext.ee.scope(),
+            lastRecall: taskContext.ee.lastRecall,
+            note: "Health 200 proves reachability only, not recall readiness.",
+          });
+        } catch (e) {
+          logger.file("warn", "ee", "Native EE health failed", { error: e instanceof Error ? e.message : String(e) });
+          return `ERROR ee_unavailable: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }
       if (action === "scope")
         return JSON.stringify({ scope: taskContext.ee.scope(), lastRecall: taskContext.ee.lastRecall });
       if (action === "reset") {
@@ -1661,7 +1656,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
         const { listEEProjects } = await import("../ee/search.js");
         return JSON.stringify(await listEEProjects(input?.offset));
       }
-      if (action !== "recall") return "ERROR: action must be recall, scope, projects or reset";
+      if (action !== "recall") return "ERROR: action must be recall, scope, projects, reset or health";
       const query = typeof input?.query === "string" ? input.query.trim() : "";
       if (!query) {
         return 'ERROR: ee_query requires a non-empty "query" string (e.g. {"query":"tool-artifact id=abc123"}).';

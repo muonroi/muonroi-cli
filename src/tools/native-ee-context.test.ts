@@ -423,12 +423,37 @@ describe("native EE owns the task scope", () => {
     });
   });
   it("separates reachability from the last measured recall state", async () => {
-    const before = JSON.parse(await call("ee_health", {}));
+    // Health is on demand via ee_query (no standalone ee_health schema on every step).
+    expect(tools().ee_health).toBeUndefined();
+    const before = JSON.parse(await call("ee_query", { action: "health" }));
     expect(before.recallReady).toBe("not_checked");
     expect(before.lastRecall.state).toBe("not_checked");
     await call("ee_query", { query: "lesson", cwd: repoA });
-    const after = JSON.parse(await call("ee_health", {}));
+    const after = JSON.parse(await call("ee_query", { action: "health" }));
     expect(after.lastRecall).toMatchObject({ state: "ok", project: "repo-a" });
     expect(after.lastRecall.checkedAt).toEqual(expect.any(String));
+  });
+});
+
+describe("ee_feedback noise reason is host-derived", () => {
+  it("sends wrong_repo when the hint's stored project differs from the task's project", async () => {
+    // The recall response carried the hint's stored scope (forwarded by the server).
+    sessionRecallLedger.record([{ ...entry, projectSlug: "storyflow", scope: { lang: "csharp" } }], "q");
+    // Strict recall binds this task to repo-a (server-proven project).
+    await call("ee_query", { query: "lesson", cwd: repoA });
+    const out = JSON.parse(await call("ee_feedback", { ...entry, verdict: "noise" }));
+    expect(out).toMatchObject({ ok: true, reasonSource: "host" });
+    expect(requests.find((r) => r.endpoint === "/api/feedback")?.body).toMatchObject({
+      verdict: "IRRELEVANT",
+      reason: "wrong_repo",
+    });
+  });
+
+  it("asks for a reason only when no scope fact explains the noise", async () => {
+    sessionRecallLedger.record([entry], "q");
+    expect(await call("ee_feedback", { ...entry, verdict: "noise" })).toMatch(/reason_required/);
+    expect(requests.some((r) => r.endpoint === "/api/feedback")).toBe(false);
+    await call("ee_feedback", { ...entry, verdict: "noise", reason: "stale_rule" });
+    expect(requests.find((r) => r.endpoint === "/api/feedback")?.body).toMatchObject({ reason: "stale_rule" });
   });
 });

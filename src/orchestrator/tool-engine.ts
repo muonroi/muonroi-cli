@@ -187,6 +187,7 @@ import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.j
 import { relaxCompactionSettings } from "./compaction";
 import { evaluateCompactionConsult } from "./compaction-consult.js";
 import { takeProposerStallNotice } from "./compaction-stall-notice.js";
+import { buildCompletionFooter, checkCompletionClaim, latestOpenTodos } from "./completion-check.js";
 import { completionScopeGuidance, ownedCompletionScope } from "./completion-scope.js";
 import { readContextPreservation } from "./context-preservation.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
@@ -293,6 +294,12 @@ import {
   recordToolError as recordToolRepetitionError,
   recordToolSuccess as recordToolRepetitionSuccess,
 } from "./tool-repetition-detector.js";
+import {
+  buildVerificationFootnote,
+  checkVerificationClaims,
+  outcomesFromMessages,
+  recordVerifications,
+} from "./verification-claims.js";
 
 /**
  * Resolve the per-turn `maxOutputTokens` budget.
@@ -1343,7 +1350,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             // by default — see auto-setup.ts.)
             for (const key of Object.keys(rawToolSet)) {
               const twin = key.match(/^mcp_muonroi-tools__(.+)$/);
-              if (twin && rawToolSet[twin[1]!]) delete rawToolSet[key];
+              // ee_health folded into native ee_query(action="health").
+              if (twin && (rawToolSet[twin[1]!] || (twin[1] === "ee_health" && rawToolSet.ee_query)))
+                delete rawToolSet[key];
             }
             if (_droppedFsMcp.length > 0 && deps.session) {
               try {
@@ -4586,6 +4595,91 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               }
             }
 
+            // Host checks on the final answer (never rewrite it; footers are
+            // appended, shown, persisted and logged):
+            //  - test/build claims vs the session's RECORDED runs (bash,
+            //    verification_run, run_gate, worker [host-verification] records);
+            //  - orchestrator "the task is done" vs the pinned root goal's
+            //    open_items, the latest todo list and FLOW implementation
+            //    verification — without requiring a context_load call.
+            const _hostFooters: string[] = [];
+            if (
+              process.env.MUONROI_DISABLE_GROUNDING_CHECK !== "1" &&
+              !isChitchat &&
+              _outputLimitAction !== "continue" &&
+              assistantText.trim().length > 0
+            ) {
+              try {
+                const _history = [...(deps.messages as unknown[]), ...(scrubbed as unknown[])];
+                const _recorded = recordVerifications(deps.session?.id ?? "_anon", outcomesFromMessages(_history));
+                const _vClaims = checkVerificationClaims(assistantText, _recorded);
+                const _completion =
+                  deps.executionRole === "orchestrator"
+                    ? checkCompletionClaim(
+                        assistantText,
+                        taskContext.working.snapshot(),
+                        taskContext.completionFacts?.() ?? null,
+                        latestOpenTodos(_history),
+                      )
+                    : null;
+                const _har = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
+                  | { emitEvent: (e: unknown) => void }
+                  | undefined;
+                if (_vClaims.length > 0) {
+                  const _footer = buildVerificationFootnote(_vClaims);
+                  _hostFooters.push(_footer);
+                  assistantText += _footer;
+                  yield { type: "content", content: _footer };
+                  const _texts = _vClaims.map((c) => `"${c.text}" (${c.reason})`);
+                  _har?.emitEvent({
+                    t: "event",
+                    kind: "grounding-flag",
+                    claims: _texts,
+                    count: _texts.length,
+                    ts: Date.now(),
+                  });
+                  _har?.emitEvent({
+                    t: "event",
+                    kind: "toast",
+                    level: "warn",
+                    text: `grounding: ${_texts.length} test/build claim(s) without a recorded run — ${_texts.join("; ")}`,
+                  });
+                  if (deps.session)
+                    logInteraction(deps.session.id, "verification_claim_flag", {
+                      data: { claims: _vClaims, recordedRuns: _recorded.length },
+                    });
+                }
+                if (_completion) {
+                  const _footer = buildCompletionFooter(_completion);
+                  _hostFooters.push(_footer);
+                  assistantText += _footer;
+                  yield { type: "content", content: _footer };
+                  _har?.emitEvent({
+                    t: "event",
+                    kind: "toast",
+                    level: "warn",
+                    text: `completion: answer says done but ${_completion.openItems.length + _completion.openTodos.length} item(s) remain open${_completion.implementationVerification ? ` and FLOW verification is ${_completion.implementationVerification}` : ""}`,
+                  });
+                  if (deps.session)
+                    logInteraction(deps.session.id, "completion_check", {
+                      data: {
+                        status: "incomplete",
+                        claim: _completion.claim,
+                        rootGoal: _completion.rootGoal,
+                        openItems: _completion.openItems,
+                        openTodos: _completion.openTodos,
+                        implementationVerification: _completion.implementationVerification,
+                      },
+                    });
+                }
+              } catch (err) {
+                logger.warn("orchestrator", "Final-answer host checks failed; answer delivered unchecked", {
+                  error: err instanceof Error ? err.message : String(err),
+                  stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+                });
+              }
+            }
+
             const _finalMessages = sanitizeModelMessages(scrubbed) as ModelMessage[];
             if (_f6SynthesisText !== null) {
               _finalMessages.push({
@@ -4593,6 +4687,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 content: _f6SynthesisText,
               } as ModelMessage);
             }
+            for (const _footer of _hostFooters) appendNoticeToFinalMessages(_finalMessages, _footer);
             // Out of continuations (or disabled): never let a cut reply pass
             // as finished. The notice goes into the persisted messages too —
             // the TUI re-renders the transcript from them when the turn ends.
