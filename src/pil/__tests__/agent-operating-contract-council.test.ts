@@ -1,37 +1,35 @@
 /**
- * The agent-operating-contract council line (Task 5) — front-loaded, non-binding
- * agent-intent nudge for the convene_council flow. It must NOT hardcode a
- * post-council option set or a forced branch (user directive): the agent decides.
+ * The agent operating contract used to carry a council line ("call
+ * convene_council for high-stakes calls … you MAY confirm via ask_user").
+ * Every reader of this contract is a non-orchestrator role — the main
+ * orchestrator receives ORCHESTRATOR_CONTRACT instead (prompts.ts) — and
+ * those roles are refused convene_council at the tool boundary
+ * (orchestration-policy.ts WORKER_FORBIDDEN). The line therefore named a tool
+ * its reader can never call; it is gone, and these tests pin both halves.
  */
 import { describe, expect, it } from "vitest";
+import { filterExecutionTools } from "../../orchestrator/orchestration-policy.js";
 import { AGENT_OPERATING_CONTRACT, buildContractSection } from "../agent-operating-contract.js";
 
-describe("agent-operating-contract — council line", () => {
-  it("mentions convene_council and frames the post-council choice as the agent's own", () => {
-    expect(AGENT_OPERATING_CONTRACT).toContain("convene_council");
-    // Non-binding: the agent decides. Assert the "you decide" framing is present.
-    expect(AGENT_OPERATING_CONTRACT.toLowerCase()).toMatch(/you decide|your call|decide/);
+describe("agent-operating-contract — no council line", () => {
+  it("does not name convene_council", () => {
+    expect(AGENT_OPERATING_CONTRACT).not.toContain("convene_council");
+    expect(buildContractSection()).not.toContain("convene_council");
   });
 
-  it("points the agent at ask_user for a human go/no-go, framed as optional (MAY)", () => {
-    expect(AGENT_OPERATING_CONTRACT).toContain("ask_user");
-    // Optional, agent-driven — never a forced CLI branch.
-    expect(AGENT_OPERATING_CONTRACT).toMatch(/MAY/);
+  it("matches the tool boundary: worker and infrastructure roles never receive convene_council", () => {
+    const native = { convene_council: { execute: async () => "" }, read_file: { execute: async () => "" } };
+    for (const role of ["worker", "infrastructure"] as const) {
+      const granted = filterExecutionTools(native, native, role);
+      expect(Object.keys(granted)).toEqual(["read_file"]);
+    }
   });
 
   it("stays within the front-loaded primacy budget (<2000 chars)", () => {
     expect(AGENT_OPERATING_CONTRACT.length).toBeLessThan(2000);
   });
 
-  it("does NOT hardcode a post-council option set or a forced continue/implement branch", () => {
-    const line = AGENT_OPERATING_CONTRACT.split("\n").find((l) => l.includes("convene_council")) ?? "";
-    // No enumerated CLI option set (e.g. "1) save 2) implement 3) refine").
-    expect(line).not.toMatch(/\bsave_exit\b|\bgenerate_plan\b|\brefine\b|option 1|choose one of/i);
-  });
-
   it("is emitted at the front of the contract section (primacy)", () => {
-    const section = buildContractSection();
-    expect(section).toContain("convene_council");
-    expect(section.startsWith("[AGENT OPERATING CONTRACT")).toBe(true);
+    expect(buildContractSection().startsWith("[AGENT OPERATING CONTRACT")).toBe(true);
   });
 });

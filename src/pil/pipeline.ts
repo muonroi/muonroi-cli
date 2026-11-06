@@ -24,6 +24,7 @@ import { layer3EeInjection, surfaceCompactionArtifacts } from "./layer3-ee-injec
 import { layer4Flow } from "./layer4-flow.js";
 import { layer5Context } from "./layer5-context.js";
 import { isMetaAnalysisPrompt, isPlanExecution, layer6Output } from "./layer6-output.js";
+import { applyReplyLanguageNudge } from "./reply-language.js";
 import { getRepoStructureHints } from "./repo-structure-hints.js";
 import { PipelineContextSchema } from "./schema.js";
 import { injectSessionExperience, isSelfExperiencePrompt } from "./session-experience-injection.js";
@@ -300,6 +301,9 @@ async function runLayers(ctx: PipelineContext, options?: PipelineOptions): Promi
   }
 
   await timed("layer6-output", layer6Output);
+  // Every turn, whichever layers ran: the reply-language nudge is host-owned
+  // (reply-language.ts), not static contract text.
+  ctx = applyReplyLanguageNudge(ctx);
 
   const suffixCharsMatch = ctx.layers.find((l) => l.name === "output-optimization")?.delta?.match(/chars=(\d+)/);
   const suffixChars = suffixCharsMatch ? parseInt(suffixCharsMatch[1], 10) : 0;

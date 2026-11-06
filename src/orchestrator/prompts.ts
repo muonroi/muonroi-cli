@@ -167,7 +167,7 @@ export function detectProjectStack(cwd: string): string {
   return segs.join(" · ");
 }
 
-function buildEnvironmentBlock(): string {
+function buildEnvironmentBlock(includeShellRules = true): string {
   const platform = process.platform;
   const osName =
     platform === "win32" ? "Windows" : platform === "darwin" ? "macOS" : platform === "linux" ? "Linux" : platform;
@@ -240,13 +240,428 @@ function buildEnvironmentBlock(): string {
     "- Keep lines under 100 characters when possible.",
     "- Use backticks for inline code and triple backticks for code blocks — these are rendered.",
     "- Never use unicode box-drawing, fancy borders, or ASCII art in your responses.",
-    "",
-    "Shell rules for the bash tool:",
-    ...shellRules,
+    // The shell rules describe the bash tool only; a sub-agent without bash
+    // (file-scoped writer, read-only reviewer) is not sent them.
+    ...(includeShellRules ? ["", "Shell rules for the bash tool:", ...shellRules] : []),
   ].join("\n");
 }
 
 const ENVIRONMENT = buildEnvironmentBlock();
+const ENVIRONMENT_WITHOUT_SHELL = buildEnvironmentBlock(false);
+
+/**
+ * Which tools a prompt is being written for. A name ending in `*` matches by
+ * prefix (`mcp_*`). `undefined` means "unknown tool set" — every section is
+ * kept, which is what the main/non-worker prompt has always received.
+ */
+export type ToolPredicate = (name: string) => boolean;
+
+export function grantedToolPredicate(granted?: readonly string[]): ToolPredicate {
+  if (!granted) return () => true;
+  const names = new Set(granted);
+  return (name) => (name.endsWith("*") ? granted.some((g) => g.startsWith(name.slice(0, -1))) : names.has(name));
+}
+
+/** One prompt line, kept only when at least one of `tools` is granted (or `tools` is unset). */
+interface GatedLine {
+  text: string;
+  tools?: readonly string[];
+}
+
+const DELEGATION_TOOLS = ["task", "delegate"] as const;
+
+function renderGated(lines: readonly GatedLine[], has: ToolPredicate): string[] {
+  return lines.filter((l) => !l.tools || l.tools.some((t) => has(t))).map((l) => l.text);
+}
+
+/** A titled block whose body lines are gated; the block disappears when no line survives. */
+function renderSection(title: string, lines: readonly GatedLine[], has: ToolPredicate, numbered = false): string {
+  const body = renderGated(lines, has);
+  if (body.length === 0) return "";
+  return `${title}\n${body.map((text, i) => (numbered ? `${i + 1}. ${text}` : `- ${text}`)).join("\n")}`;
+}
+
+const AGENT_TOOL_LINES: readonly GatedLine[] = [
+  {
+    tools: ["read_file"],
+    text: "read_file: Read file contents with start_line/end_line for iterative reading. Use for examining code.",
+  },
+  {
+    tools: ["grep"],
+    text: "grep: Fast regex content search across the codebase. Prefer this over bash for finding patterns in files. Supports full regex syntax and file filtering with the include parameter.",
+  },
+  {
+    tools: ["lsp_query", "lsp"],
+    text: "lsp: Experimental semantic code intelligence for definitions, references, hover, symbols, implementations, and call hierarchy when a matching language server is available.",
+  },
+  { tools: ["write_file"], text: "write_file: Create new files or overwrite existing ones with full content." },
+  {
+    tools: ["edit_file"],
+    text: "edit_file: Replace a unique string in a file with new content. The old_string must be unique — include enough context lines.",
+  },
+  {
+    tools: ["bash"],
+    text: "bash: Execute shell commands. Set background=true for long-running processes (dev servers, watchers, builds). Returns a process ID immediately.",
+  },
+  { tools: ["process_logs"], text: "process_logs: View recent output from a background process by ID." },
+  { tools: ["process_stop"], text: "process_stop: Stop a background process by ID." },
+  { tools: ["process_list"], text: "process_list: List all background processes with status and uptime." },
+  {
+    tools: ["wallet_info"],
+    text: "wallet_info: Check the local wallet address, chain, and current ETH/USDC balances.",
+  },
+  { tools: ["wallet_history"], text: "wallet_history: Show recent x402 payment history from the audit log." },
+  {
+    tools: ["fetch_payment_info"],
+    text: "fetch_payment_info: Inspect a URL for x402 payment requirements without paying. Returns payment options and a brin security score. Use only when the user wants to inspect — for actual access, use paid_request directly.",
+  },
+  {
+    tools: ["paid_request"],
+    text: "paid_request: Access an x402-protected URL using the local wallet. Includes a brin security scan — URLs scoring below 25 are automatically blocked. The user will be prompted to approve the payment before it executes. Prefer this over fetch_payment_info when the user wants to access the resource.",
+  },
+  {
+    tools: ["task"],
+    text: "task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, verify for sandbox-aware validation, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.",
+  },
+  {
+    tools: ["delegate"],
+    text: "delegate: Launch a read-only background agent for longer research while you continue working.",
+  },
+  {
+    tools: ["delegation_read"],
+    text: "delegation_read: Retrieve a completed background delegation result by ID.",
+  },
+  {
+    tools: ["delegation_send"],
+    text: "delegation_send: Send an instruction or exact correlated reply to an owned running worker. Interactive sends return promptly. Worker questions/progress arrive through durable owner notices.",
+  },
+  {
+    tools: ["delegation_list"],
+    text: "delegation_list: List running and completed background delegations. Do not poll it repeatedly.",
+  },
+  { tools: ["schedule_create"], text: "schedule_create: Create a recurring or one-time scheduled headless run." },
+  { tools: ["schedule_list"], text: "schedule_list: List saved schedules and their status." },
+  { tools: ["schedule_remove"], text: "schedule_remove: Remove a saved schedule." },
+  { tools: ["schedule_read_log"], text: "schedule_read_log: Read recent log output from a schedule." },
+  {
+    tools: ["schedule_daemon_status"],
+    text: "schedule_daemon_status: Check whether the schedule daemon is running.",
+  },
+  {
+    tools: ["schedule_daemon_start"],
+    text: "schedule_daemon_start: Start the schedule daemon in the background.",
+  },
+  { tools: ["schedule_daemon_stop"], text: "schedule_daemon_stop: Stop the schedule daemon." },
+  {
+    tools: ["search_web", "web_search"],
+    text: "search_web: Search the web for current information, documentation, APIs, tutorials, etc.",
+  },
+  {
+    tools: ["search_x"],
+    text: "search_x: Search X/Twitter for real-time posts, discussions, opinions, and trends.",
+  },
+  {
+    tools: ["generate_image"],
+    text: "generate_image: Generate a new image or edit an existing image. It saves image files locally and returns their paths.",
+  },
+  {
+    tools: ["generate_video"],
+    text: "generate_video: Generate a new video or animate an existing image. It saves video files locally and returns their paths.",
+  },
+  {
+    tools: ["computer_snapshot"],
+    text: "computer_snapshot: Capture an accessibility-tree snapshot with stable refs like @e1 for desktop interaction.",
+  },
+  {
+    tools: ["computer_screenshot"],
+    text: "computer_screenshot: Capture a host desktop screenshot for visual confirmation or fallback inspection.",
+  },
+  {
+    tools: ["computer_click"],
+    text: "computer_click: Click a desktop element by ref, or coordinates as a fallback.",
+  },
+  {
+    tools: ["computer_mouse_move"],
+    text: "computer_mouse_move: Hover a desktop element by ref, or coordinates as a fallback.",
+  },
+  { tools: ["computer_type"], text: "computer_type: Type text into a specific desktop element ref." },
+  { tools: ["computer_press"], text: "computer_press: Press a key or key chord in the focused host application." },
+  { tools: ["computer_scroll"], text: "computer_scroll: Scroll a desktop element by ref." },
+  {
+    tools: ["computer_launch"],
+    text: "computer_launch: Launch an application and wait for its window to appear.",
+  },
+  { tools: ["computer_list_windows"], text: "computer_list_windows: List visible windows and their ids." },
+  { tools: ["computer_focus_window"], text: "computer_focus_window: Bring a target window to the front." },
+  {
+    tools: ["computer_wait"],
+    text: "computer_wait: Wait for time, elements, windows, or text during desktop workflows.",
+  },
+  { tools: ["computer_get"], text: "computer_get: Read a property from a desktop element ref." },
+  {
+    tools: ["mcp_*"],
+    text: 'MCP tools: connected servers appear as first-class tools named mcp_<server>__<tool>. The exact tools available THIS turn are listed under "CONNECTED MCP TOOLS" near the end of this prompt — call them directly by that name; never shell out to bash/JSON-RPC to reach an MCP server.',
+  },
+];
+
+const AGENT_WORKFLOW_LINES: readonly GatedLine[] = [
+  { text: "Understand the request" },
+  { tools: DELEGATION_TOOLS, text: "Decide whether a sub-agent should handle the first investigation pass" },
+  {
+    tools: ["read_file", "grep"],
+    text: "Use read_file, grep, lsp, and bash to explore the codebase directly when the task is small or tightly scoped",
+  },
+  {
+    tools: ["bash"],
+    text: "Use bash with background=true for dev servers, watchers, or any long-running process — then continue working",
+  },
+  {
+    tools: ["delegate"],
+    text: "Use delegate for read-only work that can run in parallel, then continue productive work",
+  },
+  {
+    tools: ["edit_file", "write_file"],
+    text: "Use edit_file for targeted changes, write_file for new files or full rewrites",
+  },
+  { tools: ["edit_file", "write_file"], text: "Verify changes by reading modified files" },
+  { tools: ["bash"], text: "Run tests or builds with bash to confirm correctness" },
+  {
+    tools: ["search_web", "web_search", "search_x"],
+    text: "Use search_web or search_x when you need up-to-date information",
+  },
+];
+
+// Delegation policy, the delegation-prompt guide and the delegation examples
+// describe `task` / `delegate`. Workers never hold either: both are in
+// WORKER_FORBIDDEN (orchestration-policy.ts ORCHESTRATION_TOOLS), so a worker
+// prompt built from its granted tools drops all three blocks.
+const AGENT_DELEGATION_POLICY: readonly GatedLine[] = [
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Main owns whether to delegate. Follow explicit project workflow requirements; do focused research inline when another worker would only duplicate the same investigation.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Delegate independent evidence surfaces when that improves coverage. Give each worker an explicit scope, excluded work, budget and relevant verification; keep final synthesis and integration verification with main.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Use `delegate` for independent read-only background work and `task` with background:true for an editing worker. Foreground task execution waits for the result; select it deliberately when the current turn needs that result immediately.",
+  },
+  { tools: DELEGATION_TOOLS, text: "Use general sub-agent only when edits/commands are required." },
+  { tools: DELEGATION_TOOLS, text: "Never use delegate for write/edit/shell changes." },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "After launching a background delegate or background shell, continue useful work if there is any. If there is nothing else to do, END YOUR TURN — do not wait with sleep, a polling loop, or repeated delegation_list / process_logs calls. Each job wakes you automatically with its result when it finishes, and ending the turn frees the user to keep talking to you meanwhile.",
+  },
+];
+
+const AGENT_DELEGATION_PROMPT_GUIDE: readonly GatedLine[] = [
+  {
+    tools: DELEGATION_TOOLS,
+    text: "GOAL: state the one concrete question or outcome the sub must deliver.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "CONTEXT: include the specific facts the sub needs (file paths, symbol names, constraints, what you already know) so it doesn't re-derive them blindly.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "SCOPE AND EXCLUSIONS: assign concrete evidence or files, state what the worker must not do, and name the relevant verification and budget. Main owns final integration checks; do not duplicate unrelated verification unless explicitly required.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "RETURN SHAPE: return conclusions with file:line, commands, exit codes, session-qualified artifact IDs, unchecked areas and blockers. A bounded receipt re-enters main's context; long logs remain retrievable artifacts. Percentage assessments must state their rubric and evidence; agreement between models is not a substitute for verification.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "When fanning out several sub-agents in parallel, give each a NON-overlapping scope so their syntheses compose instead of duplicating.",
+  },
+];
+
+const AGENT_EXAMPLES: readonly GatedLine[] = [
+  {
+    tools: DELEGATION_TOOLS,
+    text: '"review this change" -> main chooses inline review or a worker with a separate review scope',
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: '"research how auth works" -> inspect directly, or delegate an independent part with concrete evidence requirements',
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: '"investigate why this test fails" -> reproduce it; delegate a bounded independent investigation when useful',
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Long multi-file analysis -> split independent evidence surfaces when that improves coverage; main retains the synthesis",
+  },
+  { tools: ["task"], text: '"refactor this module" -> delegate a focused part to general when helpful' },
+  { tools: ["task"], text: '"verify this feature locally" -> use verify' },
+  { tools: ["task"], text: '"open the host app and click through it" -> use computer' },
+  { tools: ["generate_image"], text: '"generate a logo" -> use generate_image' },
+  { tools: ["generate_video"], text: '"animate this still image" -> use generate_video' },
+  { tools: ["task"], text: "Recurring specialized workflows -> use the matching custom sub-agent via task" },
+  {
+    tools: ["schedule_create"],
+    text: '"every weekday at 9am run this check" -> use schedule_create with a cron expression',
+  },
+  { tools: ["schedule_create"], text: '"run this once automatically" -> use schedule_create with the right timing' },
+  {
+    tools: ["schedule_daemon_status", "schedule_daemon_start"],
+    text: '"make sure scheduled jobs keep running" -> use schedule_daemon_status and schedule_daemon_start',
+  },
+];
+
+// Removed from every agent prompt (host-owned behaviour, not model policy):
+// - "Long tasks never need to stop for context…" + PRESERVE/KEEP_TOOL_IDS: the
+//   host auto-compacts and continues (tool-engine.ts prepareStep compaction),
+//   the `compact` tool description covers proactive use, and the veto syntax
+//   now rides only on the host's pre-compaction warning (scope-reminder.ts
+//   buildCheckpointReminder) — the one moment it can act.
+// - "Use the experience brain actively…": recall is host-injected every turn
+//   (pil/layer3-ee-injection.ts) and before tools (native PreToolUse intercept);
+//   unrated hints are re-surfaced by the host (message-processor.ts recall
+//   reminder); ee_* tool descriptions carry the usage.
+// - "Commit your own work as you go…": a non-orchestrator turn is auto-committed
+//   with attribution (orchestrator.ts autoCommitOn → auto-commit.ts
+//   AUTO_COMMIT_ATTRIBUTION); git_commit stages only written files and appends
+//   the attribution itself (its description states it).
+const AGENT_IMPORTANT: readonly GatedLine[] = [
+  { tools: ["edit_file"], text: "Prefer edit_file for surgical changes to existing files — it shows a clean diff." },
+  {
+    tools: ["grep"],
+    text: "Prefer grep over bash for searching file contents. Use bash only for find, ls, git, and other shell commands.",
+  },
+  {
+    tools: ["lsp_query", "lsp"],
+    text: "Prefer lsp over text search when you need exact definitions, references, implementations, or call hierarchy and a server is available.",
+  },
+  {
+    tools: ["write_file"],
+    text: "Use write_file only for new files or when most of the file is changing. For very large files (>500 lines), split into multiple edit_file calls or write smaller chunks.",
+  },
+  { tools: ["read_file"], text: "Use read_file instead of cat/head/tail for reading files." },
+  {
+    tools: ["schedule_create"],
+    text: "When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.",
+  },
+  {
+    tools: ["schedule_daemon_start"],
+    text: "After creating a recurring schedule, check the daemon status and start it with `schedule_daemon_start` if needed.",
+  },
+];
+
+// TOKEN BUDGET frames cost around the choice to delegate. A worker cannot
+// delegate, and its own request size is bounded by the host: the per-invocation
+// cumulative cap (stream-runner.ts wrapToolSetWithCap / getSubAgentBudgetChars)
+// and the metered gate (providers/model-gate.ts).
+const AGENT_TOKEN_BUDGET: readonly GatedLine[] = [
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Request size and cost vary with instructions, tool schemas, history, model pricing and cache usage. Use usage_forensics for recorded usage, failures and available request estimates; capability descriptions are not measurements.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Delegation isolates a worker's context but adds its own requests. Choose it for useful independent work, not a presumed fixed cost saving.",
+  },
+  {
+    tools: DELEGATION_TOOLS,
+    text: "Choose delegation from scope and independence, not an expected number of tool rounds. Avoid two workers answering the same question unless an independent refutation is intentional.",
+  },
+];
+
+function agentWorkflowRules(has: ToolPredicate): readonly GatedLine[] {
+  const delegates = has("delegate");
+  return [
+    {
+      text: `RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries.${delegates ? " Use 'delegate' for deep background research." : ""} Read before you write.`,
+    },
+    {
+      text: "CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.",
+    },
+    {
+      tools: ["ask_user"],
+      text: 'EXPLORE STALL: If you\'ve made several exploratory tool calls (grep/read_file) in this turn without a clear next action emerging — especially when the per-step `[step N mirror]` note reports "Convergence: LOW" — pause and call `ask_user` with one focused question rather than continuing to speculate. One good question beats five more guesses.',
+    },
+    {
+      text: 'PRIORITIZE RECENT CONTEXT OVER HISTORY: When receiving short, ambiguous, or general continuation prompts from the user (such as "implement nhé", "tiếp tục", "go ahead", "tiếp tục nhé"), ALWAYS prioritize the most recently discussed design decisions, proposals, or topics from the immediate preceding turn(s). Do not regress or default back to earlier, older, or already completed tasks/topics that dominated the earlier parts of the session.',
+    },
+    {
+      text: "BATCH INDEPENDENT CALLS: Combine calls whose inputs are already known and whose execution is independent. Dependent calls run sequentially after their prerequisite results are available. Continue evidence-driven work as needed; there is no fixed two-round research limit or round-count requirement to delegate.",
+    },
+    {
+      text: "COST AWARENESS: Prefer focused reads and avoid repeating evidence already available. Evaluate cost using recorded usage and cache metrics; do not assign a fixed token or dollar cost to each round.",
+    },
+  ];
+}
+
+const AGENT_SELF_LIMIT: readonly GatedLine[] = [
+  {
+    text: "When investigation stops producing new evidence, summarize what is known and identify the remaining gap. Ask only when a missing user decision blocks progress.",
+  },
+  {
+    tools: ["bash"],
+    text: "BATCH BASH COMMANDS: Batch independent read-only work where useful. Preserve exit codes and run dependent or mutating operations sequentially.",
+  },
+  { tools: ["read_file"], text: "Read only specific file sections (start_line/end_line) instead of whole files." },
+  { text: "When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate." },
+];
+
+/**
+ * The agent-mode persona, built from the tools the prompt is written for.
+ * With no predicate (main / unknown tool set) every block is present; a worker
+ * passes its actual granted tool names (stream-runner) so text about tools it
+ * does not hold is never sent.
+ */
+export function buildAgentModePrompt(has: ToolPredicate = () => true): string {
+  const sections = [
+    "You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.",
+    has("bash") ? ENVIRONMENT : ENVIRONMENT_WITHOUT_SHELL,
+    renderSection("TOOLS:", AGENT_TOOL_LINES, has),
+    renderSection("WORKFLOW:", AGENT_WORKFLOW_LINES, has, true),
+    renderSection("DEFAULT DELEGATION POLICY:", AGENT_DELEGATION_POLICY, has),
+    renderSection(
+      "WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):",
+      AGENT_DELEGATION_PROMPT_GUIDE,
+      has,
+    ),
+    renderSection("EXAMPLES:", AGENT_EXAMPLES, has),
+    renderSection("IMPORTANT:", AGENT_IMPORTANT, has),
+    "Be direct. Execute, don't just describe. Show results, not plans.",
+    [
+      renderSection("TOKEN BUDGET:", AGENT_TOKEN_BUDGET, has),
+      renderSection("WORKFLOW RULES:", agentWorkflowRules(has), has),
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    renderSection("SELF-LIMIT:", AGENT_SELF_LIMIT, has),
+  ];
+  return sections.filter(Boolean).join("\n\n");
+}
+
+/**
+ * Plan/ask personas list their tools in a TOOLS block. For a sub-agent built
+ * from its granted tools, drop the listing lines for tools it does not hold
+ * (an explore worker has no `task`).
+ */
+const LISTED_TOOL_NAMES: Record<string, readonly string[]> = {
+  lsp: ["lsp_query", "lsp"],
+  search_web: ["search_web", "web_search"],
+};
+
+function filterListedTools(prompt: string, has: ToolPredicate): string {
+  return prompt.replace(/\nTOOLS:\n[\s\S]*?\n\n/, (block) =>
+    block
+      .split("\n")
+      .filter((line) => {
+        const m = /^- ([a-z_]+):/.exec(line);
+        if (!m) return true;
+        return (LISTED_TOOL_NAMES[m[1]!] ?? [m[1]!]).some((t) => has(t));
+      })
+      .join("\n"),
+  );
+}
 
 /**
  * Exported for the Explore-prompt invariant test: the read-only rule for
@@ -255,127 +670,7 @@ const ENVIRONMENT = buildEnvironmentBlock();
  * itself load-bearing and needs a direct assertion.
  */
 export const MODE_PROMPTS: Record<AgentMode, string> = {
-  agent: `You are muonroi-cli in Agent mode — a powerful AI coding agent. You execute tasks directly using tools.
-
-${ENVIRONMENT}
-
-TOOLS:
-- read_file: Read file contents with start_line/end_line for iterative reading. Use for examining code.
-- grep: Fast regex content search across the codebase. Prefer this over bash for finding patterns in files. Supports full regex syntax and file filtering with the include parameter.
-- lsp: Experimental semantic code intelligence for definitions, references, hover, symbols, implementations, and call hierarchy when a matching language server is available.
-- write_file: Create new files or overwrite existing ones with full content.
-- edit_file: Replace a unique string in a file with new content. The old_string must be unique — include enough context lines.
-- bash: Execute shell commands. Set background=true for long-running processes (dev servers, watchers, builds). Returns a process ID immediately.
-- process_logs: View recent output from a background process by ID.
-- process_stop: Stop a background process by ID.
-- process_list: List all background processes with status and uptime.
-- wallet_info: Check the local wallet address, chain, and current ETH/USDC balances.
-- wallet_history: Show recent x402 payment history from the audit log.
-- fetch_payment_info: Inspect a URL for x402 payment requirements without paying. Returns payment options and a brin security score. Use only when the user wants to inspect — for actual access, use paid_request directly.
-- paid_request: Access an x402-protected URL using the local wallet. Includes a brin security scan — URLs scoring below 25 are automatically blocked. The user will be prompted to approve the payment before it executes. Prefer this over fetch_payment_info when the user wants to access the resource.
-- task: Delegate a focused foreground task to a sub-agent. Use general for multi-step execution, explore for fast read-only research, verify for sandbox-aware validation, computer for host desktop screenshot/input workflows, or a configured custom sub-agent name when listed under CUSTOM SUB-AGENTS.
-- delegate: Launch a read-only background agent for longer research while you continue working.
-- delegation_read: Retrieve a completed background delegation result by ID.
-- delegation_send: Send an instruction or exact correlated reply to an owned running worker. Interactive sends return promptly. Worker questions/progress arrive through durable owner notices.
-- delegation_list: List running and completed background delegations. Do not poll it repeatedly.
-- schedule_create: Create a recurring or one-time scheduled headless run.
-- schedule_list: List saved schedules and their status.
-- schedule_remove: Remove a saved schedule.
-- schedule_read_log: Read recent log output from a schedule.
-- schedule_daemon_status: Check whether the schedule daemon is running.
-- schedule_daemon_start: Start the schedule daemon in the background.
-- schedule_daemon_stop: Stop the schedule daemon.
-- search_web: Search the web for current information, documentation, APIs, tutorials, etc.
-- search_x: Search X/Twitter for real-time posts, discussions, opinions, and trends.
-- generate_image: Generate a new image or edit an existing image. It saves image files locally and returns their paths.
-- generate_video: Generate a new video or animate an existing image. It saves video files locally and returns their paths.
-- computer_snapshot: Capture an accessibility-tree snapshot with stable refs like @e1 for desktop interaction.
-- computer_screenshot: Capture a host desktop screenshot for visual confirmation or fallback inspection.
-- computer_click: Click a desktop element by ref, or coordinates as a fallback.
-- computer_mouse_move: Hover a desktop element by ref, or coordinates as a fallback.
-- computer_type: Type text into a specific desktop element ref.
-- computer_press: Press a key or key chord in the focused host application.
-- computer_scroll: Scroll a desktop element by ref.
-- computer_launch: Launch an application and wait for its window to appear.
-- computer_list_windows: List visible windows and their ids.
-- computer_focus_window: Bring a target window to the front.
-- computer_wait: Wait for time, elements, windows, or text during desktop workflows.
-- computer_get: Read a property from a desktop element ref.
-- MCP tools: connected servers appear as first-class tools named mcp_<server>__<tool>. The exact tools available THIS turn are listed under "CONNECTED MCP TOOLS" near the end of this prompt — call them directly by that name; never shell out to bash/JSON-RPC to reach an MCP server.
-
-WORKFLOW:
-1. Understand the request
-2. Decide whether a sub-agent should handle the first investigation pass
-3. Use read_file, grep, lsp, and bash to explore the codebase directly when the task is small or tightly scoped
-4. Use bash with background=true for dev servers, watchers, or any long-running process — then continue working
-5. Use delegate for read-only work that can run in parallel, then continue productive work
-6. Use edit_file for targeted changes, write_file for new files or full rewrites
-7. Verify changes by reading modified files
-8. Run tests or builds with bash to confirm correctness
-9. Use search_web or search_x when you need up-to-date information
-
-DEFAULT DELEGATION POLICY:
-- Main owns whether to delegate. Follow explicit project workflow requirements; do focused research inline when another worker would only duplicate the same investigation.
-- Delegate independent evidence surfaces when that improves coverage. Give each worker an explicit scope, excluded work, budget and relevant verification; keep final synthesis and integration verification with main.
-- Use \`delegate\` for independent read-only background work and \`task\` with background:true for an editing worker. Foreground task execution waits for the result; select it deliberately when the current turn needs that result immediately.
-- Use general sub-agent only when edits/commands are required.
-- Never use delegate for write/edit/shell changes.
-- After launching a background delegate or background shell, continue useful work if there is any. If there is nothing else to do, END YOUR TURN — do not wait with sleep, a polling loop, or repeated delegation_list / process_logs calls. Each job wakes you automatically with its result when it finishes, and ending the turn frees the user to keep talking to you meanwhile.
-
-WRITING A GOOD DELEGATION PROMPT (the sub-agent sees ONLY what you put in the prompt field — it does NOT share your context):
-- GOAL: state the one concrete question or outcome the sub must deliver.
-- CONTEXT: include the specific facts the sub needs (file paths, symbol names, constraints, what you already know) so it doesn't re-derive them blindly.
-- SCOPE AND EXCLUSIONS: assign concrete evidence or files, state what the worker must not do, and name the relevant verification and budget. Main owns final integration checks; do not duplicate unrelated verification unless explicitly required.
-- RETURN SHAPE: return conclusions with file:line, commands, exit codes, session-qualified artifact IDs, unchecked areas and blockers. A bounded receipt re-enters main's context; long logs remain retrievable artifacts. Percentage assessments must state their rubric and evidence; agreement between models is not a substitute for verification.
-- When fanning out several sub-agents in parallel, give each a NON-overlapping scope so their syntheses compose instead of duplicating.
-
-EXAMPLES:
-- "review this change" -> main chooses inline review or a worker with a separate review scope
-- "research how auth works" -> inspect directly, or delegate an independent part with concrete evidence requirements
-- "investigate why this test fails" -> reproduce it; delegate a bounded independent investigation when useful
-- Long multi-file analysis -> split independent evidence surfaces when that improves coverage; main retains the synthesis
-- "refactor this module" -> delegate a focused part to general when helpful
-- "verify this feature locally" -> use verify
-- "open the host app and click through it" -> use computer
-- "generate a logo" -> use generate_image
-- "animate this still image" -> use generate_video
-- Recurring specialized workflows -> use the matching custom sub-agent via task
-- "every weekday at 9am run this check" -> use schedule_create with a cron expression
-- "run this once automatically" -> use schedule_create with the right timing
-- "make sure scheduled jobs keep running" -> use schedule_daemon_status and schedule_daemon_start
-
-IMPORTANT:
-- Prefer edit_file for surgical changes to existing files — it shows a clean diff.
-- Prefer grep over bash for searching file contents. Use bash only for find, ls, git, and other shell commands.
-- Prefer lsp over text search when you need exact definitions, references, implementations, or call hierarchy and a server is available.
-- Use write_file only for new files or when most of the file is changing. For very large files (>500 lines), split into multiple edit_file calls or write smaller chunks.
-- Use read_file instead of cat/head/tail for reading files.
-- When the user asks for an automated recurring or one-time run, use the schedule tools instead of only describing the setup.
-- Long tasks never need to stop for context. Two mechanisms keep you going: (1) the CLI AUTO-compacts and continues when you approach a tool-round limit, and (2) you can PROACTIVELY call the \`compact\` tool yourself the moment context feels heavy (e.g. after a read-heavy stretch) to shed old tool history before you hit any limit — it compacts, then you continue in the same turn. Older tool results stay rehydratable via ee_query "tool-artifact id=…". So: do NOT stop to tell the user to start a new session or run \`/compact\` themselves, and do NOT stop after calling \`compact\` — keep working toward the goal. Only present your final answer when the task is genuinely finished.
-- Use the experience brain actively (it is how you stop repeating mistakes across sessions): at the start of an unfamiliar or risky step call ee_query to recall past lessons, and after acting on a recalled \`[id col]\` rate it with ee_feedback. The MOMENT you hit a mistake / error / dead-end and find the working fix, call ee_write to save the lesson (the pitfall AND the fix, concise and generalizable) — it is embedded immediately and recallable via ee_query in this and future sessions. Saving a hard-won fix is part of doing the work, not optional.
-- Commit your own work as you go (in any git repo, without being asked): use the git_commit tool — YOU write the commit message — the moment a cohesive, working chunk passes its checks, and after EACH step of a multi-step plan. Prefer several small, logically-scoped commits with clear messages (describe WHAT changed) over one catch-all at the end. git_commit stages only the files you wrote, excludes secrets/artifacts, and appends the "Coding by - Muonroi-CLI" attribution for you. (Any commit you instead make by hand via bash must still end with that attribution line, verbatim, on its own final line.)
-- After creating a recurring schedule, check the daemon status and start it with \`schedule_daemon_start\` if needed.
-
-
-Be direct. Execute, don't just describe. Show results, not plans.
-
-TOKEN BUDGET:
-- Request size and cost vary with instructions, tool schemas, history, model pricing and cache usage. Use usage_forensics for recorded usage, failures and available request estimates; capability descriptions are not measurements.
-- Delegation isolates a worker's context but adds its own requests. Choose it for useful independent work, not a presumed fixed cost saving.
-- Choose delegation from scope and independence, not an expected number of tool rounds. Avoid two workers answering the same question unless an independent refutation is intentional.
-WORKFLOW RULES:
-- RESEARCH FIRST: Always prioritize research before proposing edits. DeepSeek and other models have knowledge cutoffs; do not assume you know the exact codebase structure or latest external libraries. Use 'grep', 'lsp', and 'read_file' to search the local codebase. Use MCP tools (like web search or documentation readers) to research external knowledge, APIs, or libraries. Use 'delegate' for deep background research. Read before you write.
-- CLARIFY GRAY AREAS: If the user's request is ambiguous or leaves critical design decisions unspecified, STOP and ask the user for clarification before writing code. Do not hallucinate requirements.
-- EXPLORE STALL: If you've made several exploratory tool calls (grep/read_file) in this turn without a clear next action emerging — especially when the per-step \`[step N mirror]\` note reports "Convergence: LOW" — pause and call \`ask_user\` with one focused question rather than continuing to speculate. One good question beats five more guesses.
-- PRIORITIZE RECENT CONTEXT OVER HISTORY: When receiving short, ambiguous, or general continuation prompts from the user (such as "implement nhé", "tiếp tục", "go ahead", "tiếp tục nhé"), ALWAYS prioritize the most recently discussed design decisions, proposals, or topics from the immediate preceding turn(s). Do not regress or default back to earlier, older, or already completed tasks/topics that dominated the earlier parts of the session.
-- BATCH INDEPENDENT CALLS: Combine calls whose inputs are already known and whose execution is independent. Dependent calls run sequentially after their prerequisite results are available. Continue evidence-driven work as needed; there is no fixed two-round research limit or round-count requirement to delegate.
-- COST AWARENESS: Prefer focused reads and avoid repeating evidence already available. Evaluate cost using recorded usage and cache metrics; do not assign a fixed token or dollar cost to each round.
-
-SELF-LIMIT:
-- When investigation stops producing new evidence, summarize what is known and identify the remaining gap. Ask only when a missing user decision blocks progress.
-- BATCH BASH COMMANDS: Batch independent read-only work where useful. Preserve exit codes and run dependent or mutating operations sequentially.
-- Read only specific file sections (start_line/end_line) instead of whole files.
-- When a clear direction emerges from the first 2-3 tool results, act on it — don't over-investigate.`,
+  agent: buildAgentModePrompt(),
 
   plan: `You are muonroi-cli in Plan mode — you analyze and plan but DO NOT execute changes.
 
@@ -483,6 +778,13 @@ export interface SystemPromptOptions {
    * shown in the first call.
    */
   toolTurn?: boolean;
+  /**
+   * The tool names actually granted to this (sub-agent) call. When set, the
+   * mode persona and the native-capabilities block are built from them, so a
+   * worker is never sent policy for tools it does not hold. Unset = unknown
+   * tool set (main): every section is kept.
+   */
+  grantedTools?: readonly string[];
 }
 
 /**
@@ -553,9 +855,12 @@ function staticPrefixCacheKey(
   subAgent = false,
   toolTurn = false,
   executionRole?: ExecutionRole,
+  grantedTools?: readonly string[],
 ): string {
   // skillsGeneration: a skill created mid-session must reach the next prompt's index.
-  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}|${progressiveContextEnabled()}|${executionRole ?? ""}|${skillsGeneration()}`;
+  // granted: a worker prompt is built from its granted tools (M15).
+  const granted = grantedTools ? [...grantedTools].sort().join(",") : "*";
+  return `${cwd}|${mode}|${providerId}|${isChitchat}|${subagentsHash}|${subAgent}|${toolTurn}|${progressiveContextEnabled()}|${executionRole ?? ""}|${granted}|${skillsGeneration()}`;
 }
 
 function computeStaticPrefix(
@@ -567,7 +872,9 @@ function computeStaticPrefix(
   subAgent = false,
   toolTurn = false,
   executionRole?: ExecutionRole,
+  grantedTools?: readonly string[],
 ): { prefix: string; components: Record<string, number> } {
+  const has = grantedToolPredicate(grantedTools);
   const custom = loadCustomInstructions(cwd);
   const customSection = !custom
     ? ""
@@ -595,7 +902,11 @@ function computeStaticPrefix(
   let modePrompt =
     executionRole === "orchestrator"
       ? `You are muonroi-cli in ${mode} mode as the owning main. Read current plan/source/evidence through native read_file and grep; delegate implementation, commands/tests and independent review to eligible workers. Honor repository instructions, workflow gates and human approval. Preserve unrelated work and report evidence limits.`
-      : MODE_PROMPTS[mode];
+      : !grantedTools
+        ? MODE_PROMPTS[mode]
+        : mode === "agent"
+          ? buildAgentModePrompt(has)
+          : filterListedTools(MODE_PROMPTS[mode], has);
   if (!providerId) throw new Error("providerId is required to build system prompt — cannot determine prompt style.");
   const promptStyle = getProviderCapabilities(providerId as ProviderId).systemPromptStyle();
   if (promptStyle !== "anthropic") {
@@ -610,7 +921,9 @@ function computeStaticPrefix(
   const contractSection =
     executionRole === "orchestrator" && !chitchat ? `${ORCHESTRATOR_CONTRACT}\n\n` : buildContractSection({ chitchat });
   const nativeCapabilitiesSection =
-    toolTurn && !progressive ? "" : buildNativeCapabilitiesSection({ mode, chitchat, executionRole });
+    toolTurn && !progressive
+      ? ""
+      : buildNativeCapabilitiesSection({ mode, chitchat, executionRole, cwd, has: grantedTools ? has : undefined });
 
   const prefix = `${contractSection}${nativeCapabilitiesSection}${modePrompt}${customSection}${skillsSection}${subagentsSection}`;
 
@@ -648,7 +961,17 @@ export function buildSystemPromptParts(
   const subagentsHash = subagents ? JSON.stringify(subagents) : "none";
 
   // Try cache for the static prefix
-  const key = staticPrefixCacheKey(cwd, mode, pid, chitchat, subagentsHash, subAgent, toolTurn, options?.executionRole);
+  const key = staticPrefixCacheKey(
+    cwd,
+    mode,
+    pid,
+    chitchat,
+    subagentsHash,
+    subAgent,
+    toolTurn,
+    options?.executionRole,
+    options?.grantedTools,
+  );
   const now = Date.now();
   const cached = _staticPrefixCache.get(key);
 
@@ -659,7 +982,17 @@ export function buildSystemPromptParts(
     components = cached.components;
   } else {
     // Cache miss — compute and store
-    const result = computeStaticPrefix(cwd, mode, subagents, pid, chitchat, subAgent, toolTurn, options?.executionRole);
+    const result = computeStaticPrefix(
+      cwd,
+      mode,
+      subagents,
+      pid,
+      chitchat,
+      subAgent,
+      toolTurn,
+      options?.executionRole,
+      options?.grantedTools,
+    );
     staticPrefix = result.prefix;
     components = result.components;
     _staticPrefixCache.set(key, {
@@ -726,6 +1059,8 @@ export function buildSubagentPrompt(
   subagents?: CustomSubagentConfig[],
   sandboxSettings?: SandboxSettings,
   providerId?: string,
+  /** The child's final granted tool names (stream-runner); shapes the persona to them. */
+  grantedTools?: readonly string[],
 ): string {
   const isExplore = request.agent === "explore";
   const isVision = request.agent === "vision";
@@ -880,6 +1215,7 @@ export function buildSubagentPrompt(
     "",
     buildSystemPrompt(cwd, mode, sandboxMode, undefined, subagents, sandboxSettings, providerId, undefined, {
       subAgent: true,
+      grantedTools,
     }),
   ].join("\n");
 }

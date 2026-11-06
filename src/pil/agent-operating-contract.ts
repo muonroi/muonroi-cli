@@ -30,6 +30,16 @@
  * insurance against primacy loss; see cheap-model-workbooks.ts.
  *
  * Escape hatch: MUONROI_DISABLE_AGENT_CONTRACT=1.
+ *
+ * Former items moved to the host (2026-11, "what the CLI can block or
+ * orchestrate, the CLI does"): reply LANGUAGE → the per-turn nudge
+ * (pil/reply-language.ts); ANTI-MÙ/COMPACTION vetoes → the host's
+ * pre-compaction warning (scope-reminder.ts buildCheckpointReminder);
+ * selfverify VERIFICATION → registered only where a Semantic harness exists
+ * (utils/semantic-harness.ts) and routed by the native-capabilities block;
+ * COUNCIL/ASK named convene_council, which no reader of this contract holds —
+ * the orchestrator gets ORCHESTRATOR_CONTRACT instead (prompts.ts) and
+ * workers are refused it (orchestration-policy.ts WORKER_FORBIDDEN).
  */
 
 /**
@@ -46,15 +56,7 @@ export const AGENT_OPERATING_CONTRACT = `[AGENT OPERATING CONTRACT — read firs
 4. WHEN UNSURE: verify and cross-check BEFORE concluding. Reading code is not proof — reproduce the bug.
 5. REPORTING: answer ONLY what was asked. Every fact or file:line MUST come from this turn; else label "unverified"; do not guess. Don't dump verbatim tool outputs — cite concise file:line. Never claim a build/test ran, or edits you did not actually do this turn; if a check can't run, fix it or say so.
 
-6. LANGUAGE: reply in the user's detected language; internal reasoning, tools, and code stay English.
-
-7. ANTI-MÙ/COMPACTION: on compaction emit PRESERVE_FULL_CONTEXT (veto) or KEEP_TOOL_IDS (from stub id=) to protect results; re-hydrate via ee_query "tool-artifact id=XXX". Use 'compact' near limits.
-
 8. GIT: push, broad staging and hook bypass are host-gated; a refusal names what to run.
-
-9. VERIFICATION: run focused checks for changed logic; add \`selfverify_*\` for UI/harness/workflow changes. Pure discussion needs no harness. Use VERIFICATION ROUTING in native capabilities and honor repository-required checks.
-
-10. COUNCIL/ASK: call \`convene_council\` for high-stakes/conflicting calls — its conclusion returns as the tool result; then YOU decide. In impl discussion you MAY confirm via \`ask_user\` before building, else keep going.
 
 [END CONTRACT — instructions follow]`;
 

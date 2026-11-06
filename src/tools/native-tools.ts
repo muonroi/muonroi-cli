@@ -29,6 +29,7 @@ import { beginBoundedWorkerWait, endBoundedWorkerWait } from "../orchestrator/in
 import { validateSelfVerifyRequest } from "../self-qa/validate-request.js";
 import { integrationHealth } from "../utils/integration-health.js";
 import { logger, redactSecrets } from "../utils/logger.js";
+import { hasSemanticHarness } from "../utils/semantic-harness.js";
 import { runVerificationTests, VERIFICATION_RUNNERS } from "./verification-run.js";
 
 /** Map a thrown error to the LspError tagged-union shape. */
@@ -429,6 +430,11 @@ export function registerNativeMuonroiTools(tools: ToolSet, opts: NativeToolOpts 
   });
 
   // ── Self-QA harness: selfverify_* (shared JobManager, in-process) ──────────
+  // Registered only where a Semantic harness exists (utils/semantic-harness.ts):
+  // self-verify drives this CLI's TUI over `<Semantic>` IDs found in the
+  // workspace, so elsewhere it can never produce a scenario and the five tools
+  // (plus the prompt routing that names them) would be dead weight per call.
+  if (!hasSemanticHarness(opts.getCwd?.() ?? opts.cwd ?? process.cwd())) return tools;
   tools.selfverify_start = dynamicTool({
     description:
       "Start a self-verify run (mode=tier1 heuristic, or mode=agentic LLM-driven). Returns {runId} immediately and runs in the background; " +
