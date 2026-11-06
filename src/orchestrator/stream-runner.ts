@@ -56,6 +56,7 @@ import {
   minimalReasoningProviderOptions,
 } from "../providers/capabilities.js";
 import { getVisionGuidanceForTextOnly } from "../providers/mcp-vision-bridge.js";
+import { analyzePrompt, armedThrowCeilingTokens } from "../providers/model-gate.js";
 import { captureToolSchemas } from "../providers/patch-zod-schema.js";
 import { getProviderErrorDetails } from "../providers/rate-limit-backoff.js";
 import {
@@ -139,7 +140,11 @@ import {
   TOOL_FAILURE_LOOP_ABORT_REASON,
 } from "./stall-watchdog.js";
 import { noteElidedForCap, type SubAgentCapState, wrapToolSetWithCap } from "./sub-agent-cap.js";
-import { applyAnthropicPromptCaching, compactSubAgentMessages } from "./subagent-compactor.js";
+import {
+  applyAnthropicPromptCaching,
+  compactSubAgentMessages,
+  fitSubAgentMessagesToCeiling,
+} from "./subagent-compactor.js";
 import { buildSubAgentStepData, isSubAgentStepMeterEnabled } from "./subagent-step-meter.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { projectTaskContext, TaskContext } from "./task-context.js";
@@ -371,6 +376,14 @@ export function writeSubagentDebug(enabled: boolean, line: string): void {
  * composition is directly unit-testable without mocking the whole streaming
  * call. Exported for the test.
  */
+/**
+ * Fraction of the gate's armed throw line at which a worker request is
+ * compacted to fit (fitSubAgentMessagesToCeiling). Measured in the gate's own
+ * units, so the margin only covers ModelMessage→provider-prompt conversion
+ * differences; it does not lower the line itself.
+ */
+export const GATE_FIT_RATIO = 0.9;
+
 export function prepareSubAgentPromptMessages(messages: readonly ModelMessage[], modelId: string): ModelMessage[] {
   return applyAnthropicPromptCaching(foldMidConversationSystemMessages(messages), modelId);
 }
@@ -1205,6 +1218,78 @@ export class StreamRunner {
         reservedOutputTokens,
       );
     };
+    // Elided tool results go to the local artifact cache (+ EE) so
+    // retrieve_tool_result / ee_query can rehydrate them after compaction.
+    const makePersistSubArtifact =
+      (stepNumber: number) =>
+      (toolCallId: string, toolName: string, fullContent: string, reason: string, summary?: string) => {
+        // Local-first durable cache so ee_query rehydrates even when EE is down.
+        recordArtifact(toolCallId, toolName, fullContent);
+        recordElision(toolCallId, toolName, fullContent.length, stepNumber, summary);
+        try {
+          getDefaultEEClient()
+            .extract(
+              {
+                transcript: fullContent.slice(0, 4000),
+                projectPath: process.cwd(),
+                meta: { source: "tool-artifact", toolCallId, toolName, reason, summary },
+              },
+              AbortSignal.timeout(600),
+            )
+            .catch((err: unknown) =>
+              // Fail-open: the local artifact cache above already holds the content.
+              logger.debug("orchestrator", "Sub-agent tool-artifact EE extract failed", {
+                toolCallId,
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+        } catch (err) {
+          logger.debug("orchestrator", "Sub-agent tool-artifact EE extract threw", {
+            toolCallId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      };
+    // Ceiling fit — the metered gate throws on a worker request above its armed
+    // input line (subagent/vision stages). The B3 pass below is a COST pass and
+    // keeps keep-verbatim results and tail reasoning at any size, so a long
+    // worker could reach the line and fail outright (gentle-violet-panda,
+    // session 4edc02516a92: est 105,939 > 100,000). Measure every request in the
+    // gate's own units and, above GATE_FIT_RATIO of the line, compact harder
+    // first. The gate is unchanged and still throws if nothing fits.
+    const gateThrowAt = armedThrowCeilingTokens(prepared.agentKey === "vision" ? "vision" : "subagent");
+    const gateFitBudget = gateThrowAt === null ? 0 : Math.floor(gateThrowAt * GATE_FIT_RATIO);
+    const measureGateTokens = (messages: ReadonlyArray<ModelMessage>): number =>
+      analyzePrompt([{ role: "system", content: childSystem }, ...messages]).estInputTokens;
+    const fitToGateCeiling = (messages: ModelMessage[], stepNumber: number): ModelMessage[] => {
+      if (gateFitBudget <= 0) return messages;
+      const fit = fitSubAgentMessagesToCeiling(messages, {
+        budgetTokens: gateFitBudget,
+        measureTokens: measureGateTokens,
+        compactor: {
+          keepLastTurns: compactKeepLast,
+          persistArtifact: makePersistSubArtifact(stepNumber),
+          onElide: (ids) => {
+            noteElidedForCap(prepared.subAgentCapState, ids);
+            this.deps.getCrossTurnDedup()?.noteElided(ids);
+          },
+        },
+      });
+      if (fit.level === 0) return messages;
+      recordCompaction(stepNumber);
+      logger.file(fit.fitted ? "info" : "warn", "orchestrator", "Worker prompt compacted to fit the input ceiling", {
+        callId: subCallId,
+        artifactJobPath: prepared.request.artifactJobPath,
+        stepNumber,
+        level: fit.level,
+        estBefore: fit.estBefore,
+        estAfter: fit.estAfter,
+        budget: gateFitBudget,
+        throwAt: gateThrowAt,
+        fitted: fit.fitted,
+      });
+      return fit.messages;
+    };
     checkChildContext(projectTaskContext(subMessagesForCall, taskContext));
     // Phase 4 Plan 04 (4B) — mirror top-level scope-ceiling integration.
     // Sub-agent ceiling resolves against ("general", "medium") because the
@@ -1378,7 +1463,7 @@ export class StreamRunner {
         if (taskContext.enabled) messages = taskContext.working.project(messages);
         if (stepNumber > 0) taskContext.observe(messages);
         if (stepNumber < 1) {
-          const projected = projectTaskContext(messages, taskContext);
+          const projected = fitToGateCeiling(projectTaskContext(messages, taskContext), stepNumber);
           checkChildContext(projected, stepNumber);
           lastStepView = { messages: projected, responseCount: responseCountAtStep };
           return { messages: projected };
@@ -1412,31 +1497,7 @@ export class StreamRunner {
           }
         }
 
-        const persistSubArtifact = (
-          toolCallId: string,
-          toolName: string,
-          fullContent: string,
-          reason: string,
-          summary?: string,
-        ) => {
-          // Local-first durable cache so ee_query rehydrates even when EE is down.
-          recordArtifact(toolCallId, toolName, fullContent);
-          recordElision(toolCallId, toolName, fullContent.length, stepNumber, summary);
-          try {
-            getDefaultEEClient()
-              .extract(
-                {
-                  transcript: fullContent.slice(0, 4000),
-                  projectPath: process.cwd(),
-                  meta: { source: "tool-artifact", toolCallId, toolName, reason, summary },
-                },
-                AbortSignal.timeout(600),
-              )
-              .catch(() => {});
-          } catch {
-            /* fail-open */
-          }
-        };
+        const persistSubArtifact = makePersistSubArtifact(stepNumber);
 
         // T1.1 + T1.2 — reasoning models (DeepSeek V4 Flash, R1) emit 2K-5K
         // CoT tokens per turn that accumulate across the multi-step loop.
@@ -1501,7 +1562,7 @@ export class StreamRunner {
         // Round 2 fix (G1-adjacent MEDIUM): see `prepareSubAgentPromptMessages`'s
         // doc comment above — folds for every provider now, not Claude-only.
         const preparedMessages = prepareSubAgentPromptMessages(finalMessagesWithMirror, childRuntime.modelId);
-        const projected = projectTaskContext(preparedMessages, taskContext);
+        const projected = fitToGateCeiling(projectTaskContext(preparedMessages, taskContext), stepNumber);
         checkChildContext(projected, stepNumber);
         lastStepView = { messages: projected, responseCount: responseCountAtStep };
         return { messages: projected };
@@ -1849,7 +1910,9 @@ export class StreamRunner {
       const base = lastStepView
         ? [...lastStepView.messages, ...priorMessages.slice(lastStepView.responseCount)]
         : [...childMessages, ...priorMessages];
-      return taskCaps.sanitizeHistory(base) as ModelMessage[];
+      // The final step's response is appended un-compacted; fit the whole view
+      // so a long run's synthesis request does not trip the gate either.
+      return fitToGateCeiling(taskCaps.sanitizeHistory(base) as ModelMessage[], subStepIndex);
     };
     const runFollowUp = async (
       messages: ModelMessage[],

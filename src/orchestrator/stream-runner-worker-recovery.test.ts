@@ -12,8 +12,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 
 import { createMockModel, type StreamChunks } from "../agent-harness/mock-model.js";
+import { analyzePrompt, wrapModelWithGate } from "../providers/model-gate.js";
 import type { TaskRequest } from "../types/index.js";
 import { type PreparedSubAgentCall, StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
+import { wrapToolSetWithCap } from "./sub-agent-cap.js";
 import { LENGTH_CONTINUATION_PROMPT, REASONING_OVERFLOW_PROMPT } from "./worker-stream-recovery.js";
 
 const USAGE = {
@@ -36,6 +38,23 @@ function textRound(text: string, finish: "stop" | "length" = "stop"): StreamChun
     { type: "text-delta", id: "t", delta: text },
     { type: "text-end", id: "t" },
     { type: "finish", finishReason: { unified: finish, raw: undefined }, usage: USAGE },
+  ];
+}
+
+function reasoningToolRound(
+  id: string,
+  toolName: string,
+  input: Record<string, unknown>,
+  reasoningChars: number,
+): StreamChunks {
+  const rid = `r-${id}`;
+  return [
+    { type: "stream-start", warnings: [] },
+    { type: "reasoning-start", id: rid },
+    { type: "reasoning-delta", id: rid, delta: `think-${id} ${"r".repeat(reasoningChars)}` },
+    { type: "reasoning-end", id: rid },
+    { type: "tool-call", toolCallId: id, toolName, input: JSON.stringify(input) },
+    { type: "finish", finishReason: { unified: "tool-calls", raw: undefined }, usage: USAGE },
   ];
 }
 
@@ -86,7 +105,7 @@ function makeDeps(): StreamRunnerDeps {
 const REQUEST: TaskRequest = { agent: "general", description: "worker", prompt: "go" };
 
 // biome-ignore lint/suspicious/noExplicitAny: provider-shaped mock model handle
-function prepare(model: any, tools: Record<string, unknown>) {
+function prepare(model: any, tools: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   const childBash = { getCwd: () => process.cwd() } satisfies Pick<PreparedSubAgentCall["childBash"], "getCwd">;
   const prepared = {
     request: REQUEST,
@@ -105,6 +124,7 @@ function prepare(model: any, tools: Record<string, unknown>) {
     lastActivity: "starting",
     maxSteps: 40,
     useBatchApi: false,
+    ...extra,
   } as unknown as PreparedSubAgentCall;
   const runner = new StreamRunner(makeDeps());
   (runner as unknown as { setup: () => Promise<unknown> }).setup = async () => ({ kind: "prepared", prepared });
@@ -248,6 +268,52 @@ describe("StreamRunner worker recovery", () => {
       expect(result.error).toMatch(/^worker_incomplete: provider stalled after 1 tool calls/);
       expect(result.output).toContain("edited a.ts; tests not run");
       expect(call).toBe(3);
+    });
+  }, 30_000);
+
+  it("compacts a long worker under the gate's input line instead of failing at it (gentle-violet-panda)", async () => {
+    // Throw line lowered so the run stays small; the gate itself is the real one.
+    await withEnv({ MUONROI_GATE_THROW_MAX_TOKENS: "20000", MUONROI_GATE_CEILING: "throw" }, async () => {
+      const STEPS = 12;
+      // Test-fixing worker: every grep mentions a failure, so the B3 cost pass
+      // keeps each 9k result verbatim (isHighValueToolResult) at any age.
+      const grepTool = tool({
+        description: "search",
+        inputSchema: z.object({ pattern: z.string() }),
+        execute: async ({ pattern }: { pattern: string }) =>
+          `ParserTests.cs: Assert failed for ${pattern}\n${"x".repeat(9_000)}`,
+      });
+      const rounds: StreamChunks[] = [];
+      for (let i = 0; i < STEPS; i++) rounds.push(reasoningToolRound(`c${i}`, "grep", { pattern: `p${i}` }, 6_000));
+      rounds.push(textRound("final report"));
+      const handle = createMockModel({ stream: rounds });
+      const gated = wrapModelWithGate(handle.model, { stage: "subagent", modelId: "mock-model" });
+      const result = await prepare(
+        gated,
+        { grep: grepTool },
+        {
+          childRuntime: {
+            model: gated,
+            modelId: "mock-model",
+            modelInfo: { id: "mock-model", provider: "deepseek", contextWindow: 1_000_000, reasoning: true },
+          },
+          subAgentCapState: wrapToolSetWithCap({}).state,
+        },
+      ).run(REQUEST);
+
+      expect(result.success).toBe(true);
+      expect(result.output).toBe("final report");
+      // Every request reached the provider: none was refused by the gate ...
+      expect(handle.calls).toHaveLength(STEPS + 1);
+      const ests = handle.calls.map((c) => analyzePrompt((c as { prompt?: unknown }).prompt).estInputTokens);
+      // ... and every one stayed under the line, while the raw transcript did not.
+      for (const est of ests) expect(est).toBeLessThanOrEqual(20_000);
+      const rawChars = STEPS * (9_000 + 6_000);
+      expect(rawChars / 4).toBeGreaterThan(20_000);
+      const last = promptText(handle.calls[STEPS]);
+      expect(last).toContain("elided by sub-agent compactor");
+      expect(last).toContain("think-c11 ");
+      expect(last).not.toContain("think-c10 ");
     });
   }, 30_000);
 });
