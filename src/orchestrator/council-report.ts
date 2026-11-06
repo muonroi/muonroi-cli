@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { lstatSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import type { CouncilMemoryRecord } from "../council/types.js";
+import { isLinkFreeBelow } from "../utils/link-free-path.js";
 import { verdictFindings } from "../workflow/review-findings.js";
 import { extractStructuredVerdict } from "../workflow/verdict-schema.js";
 import type { StoredDelegation } from "./delegations.js";
@@ -102,8 +103,9 @@ export function writeCouncilReport(
     if (total > 80 * 1024 * 1024) throw new Error("Council dossier exceeds 80MiB; no partial report accepted.");
     const file = join(directory, name);
     mkdirSync(dirname(file), { recursive: true });
-    if (realpathSync(directory) !== resolve(directory) || realpathSync(dirname(file)) !== resolve(dirname(file)))
-      throw new Error("Linked council dossier path refused.");
+    // Anchored at the job directory: a linked ANCESTOR (macOS /var, Windows 8.3
+    // temp) is not a redirection of the dossier; a link at/below .review is.
+    if (!isLinkFreeBelow(dirname(jobPath), dirname(file))) throw new Error("Linked council dossier path refused.");
     writeFileSync(file, body, { encoding: "utf8", flag: "wx" });
     manifest.files.push({ name, digest: hash(body), bytes });
   }
@@ -119,8 +121,7 @@ export function readCouncilReport(jobPath: string, record: StoredDelegation, nam
     throw new Error("No owned council dossier file with this selector.");
   const directory = councilReportDirectory(jobPath);
   const manifestPath = join(directory, "manifest.json");
-  if (lstatSync(directory).isSymbolicLink() || realpathSync(manifestPath) !== resolve(manifestPath))
-    throw new Error("Linked council dossier refused.");
+  if (!isLinkFreeBelow(dirname(jobPath), manifestPath)) throw new Error("Linked council dossier refused.");
   const body = readFileSync(manifestPath, "utf8");
   if (hash(body) !== reference.digest) throw new Error("Council dossier manifest digest mismatch.");
   const manifest = JSON.parse(body) as CouncilReportManifest;
@@ -132,8 +133,7 @@ export function readCouncilReport(jobPath: string, record: StoredDelegation, nam
   if (!entry || !/^(?:[a-zA-Z-]+\.(?:json|md)|evidence\/(?:manifest|[a-f0-9]{64}-[a-f0-9]{64})\.json)$/.test(name))
     throw new Error("Invalid council dossier selector.");
   const file = join(directory, name);
-  if (realpathSync(file) !== resolve(file) || realpathSync(dirname(file)) !== resolve(dirname(file)))
-    throw new Error("Linked council dossier file refused.");
+  if (!isLinkFreeBelow(dirname(jobPath), file)) throw new Error("Linked council dossier file refused.");
   const content = readFileSync(file, "utf8");
   if (hash(content) !== entry.digest || Buffer.byteLength(content) !== entry.bytes)
     throw new Error(`Council dossier file changed: ${name}`);

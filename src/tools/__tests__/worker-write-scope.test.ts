@@ -80,6 +80,29 @@ it("refuses symlink escapes and hardlink aliases without changing their destinat
   expect(fs.readFileSync(path.join(outside, "original.txt"), "utf8")).toBe("protected");
 });
 
+// CI run 42131417821: on macOS tmpdir() is /var/... and its realpath
+// /private/var/...; the scope bound the realpath and refused every in-scope
+// write named through the /var alias. A junction/symlink ancestor reproduces it.
+it("accepts in-scope writes through a linked workspace ancestor and keeps every refusal", async () => {
+  const real = path.join(root, "real");
+  fs.mkdirSync(path.join(real, "A"), { recursive: true });
+  fs.writeFileSync(path.join(real, "A", "original.txt"), "x");
+  fs.linkSync(path.join(real, "A", "original.txt"), path.join(real, "A", "hard.txt"));
+  fs.symlinkSync(real, path.join(root, "alias"), process.platform === "win32" ? "junction" : "dir");
+  const linked = path.join(root, "alias");
+  const scope = new WorkerWriteScope(linked, ["A/"]);
+  expect(scope.refusal("A/new.txt", linked)).toBeUndefined();
+  expect(scope.refusal(path.join(linked, "A", "new.txt"), linked)).toBeUndefined();
+  expect(scope.refusal("A/new.txt", real)).toBeUndefined();
+  expect(scope.refusal("C.txt", linked)).toContain("outside the current task writeScope");
+  expect(scope.refusal("A/.git/config", linked)).toContain("forbidden path segment");
+  expect(scope.refusal("A/hard.txt", linked)).toContain("hardlink");
+  const tools = createBuiltinTools(new BashTool(linked), "agent", { writeScope: ["A/"] });
+  const result = (await tools.write_file!.execute!({ file_path: "A/new.txt", content: "ok" }, {} as any)) as any;
+  expect(result.success).toBe(true);
+  expect(fs.readFileSync(path.join(real, "A", "new.txt"), "utf8")).toBe("ok");
+});
+
 it("pins the scope before a directory is retargeted, including existing files inside the workspace", () => {
   fs.mkdirSync(path.join(root, "A"));
   fs.mkdirSync(path.join(root, "C"));

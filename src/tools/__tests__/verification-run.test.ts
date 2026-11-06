@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -73,7 +73,9 @@ describe("bounded local verification runner", () => {
     const result = await runVerificationTests(cwd, ["fixture.test.ts"]);
     expect(result.success).toBe(true);
     expect(result.output).toContain('"run"');
-    expect(result.output).toContain(JSON.stringify(join(cwd, "fixture.test.ts")));
+    // The runner hands the CANONICAL path to argv (verification-run.ts realpaths
+    // root + targets); on macOS tmpdir() is /var/... but its realpath /private/var/...
+    expect(result.output).toContain(JSON.stringify(join(realpathSync(cwd), "fixture.test.ts")));
     expect(result.output).toContain('"--reporter=verbose"');
     expect(result.output).toContain("exit=0");
   });

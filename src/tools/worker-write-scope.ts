@@ -95,11 +95,29 @@ export class WorkerWriteScope {
       throw new Error("Scope workspace/entry was retargeted since the host decision.");
   }
 
+  /**
+   * The target as written, re-rooted onto the canonical workspace. `binding.root`
+   * is a realpath, but the tool cwd (and absolute paths built from it) may name
+   * the same directory through a linked ancestor — macOS `os.tmpdir()` is
+   * `/var/...` while its realpath is `/private/var/...` — which made every
+   * in-scope write look "outside the workspace". Only the known alias prefix is
+   * canonicalized; the written tail stays lexical so its segment checks
+   * (`.git`, `..`, special names) still see exactly what was asked for.
+   */
+  private lexicalTarget(file: string, cwd: string): string {
+    const absolute = path.resolve(cwd, normalizeMsysDrivePath(file));
+    if (inside(this.binding.root, absolute)) return absolute;
+    for (const alias of new Set([path.resolve(cwd), path.resolve(this.cwd)])) {
+      if (inside(alias, absolute)) return path.join(realpathSync(alias), path.relative(alias, absolute));
+    }
+    return absolute;
+  }
+
   refusal(file: string, cwd: string): string | undefined {
     try {
       if (typeof file !== "string" || !file.trim()) throw new Error("Missing file path.");
       if (realpathSync(this.cwd) !== this.binding.root) throw new Error("Workspace was retargeted.");
-      const absolute = path.resolve(cwd, normalizeMsysDrivePath(file));
+      const absolute = this.lexicalTarget(file, cwd);
       const relative = path.relative(this.binding.root, absolute);
       if (!inside(this.binding.root, absolute) || !safeSegments(relative))
         throw new Error("Target is outside the workspace or has a forbidden path segment.");
