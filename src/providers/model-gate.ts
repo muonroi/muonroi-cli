@@ -274,6 +274,17 @@ export function throwCeilingTokens(): number {
 }
 
 /**
+ * The throw line the gate would enforce for `stage` right now, or null when no
+ * throw is armed (non-eligible stage, `warn`/`off` mode, or an `/ideal` run).
+ * Read-only: callers use it to shape a request to fit BEFORE it reaches the
+ * gate; it never changes what `enforceCeiling` does.
+ */
+export function armedThrowCeilingTokens(stage: GateStage): number | null {
+  if (!THROW_ELIGIBLE.has(stage) || ceilingMode(stage) !== "throw") return null;
+  return throwCeilingTokens();
+}
+
+/**
  * Write one `call_accounting` row for a metered call. Fail-open: logging must
  * never break a turn (a call with no sessionId is skipped — nowhere to attribute).
  */
