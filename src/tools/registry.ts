@@ -74,6 +74,7 @@ import { executeGrep } from "./grep.js";
 import { registerNativeMuonroiTools } from "./native-tools.js";
 import { registerNativeResearchTools } from "./research.js";
 import { type GateCatalog, registerRunGateTool, requiredTestGates, resolveGateCatalog } from "./run-gate.js";
+import { registerSkillTools } from "./skill-tools.js";
 import { VISION_TOOL_NAMES } from "./vision-gate.js";
 import { workerProcessRefusal } from "./worker-process-boundary.js";
 import { filterScopedWorkerTools, WORKER_ISOLATION_CAPABILITIES, WorkerWriteScope } from "./worker-write-scope.js";
@@ -415,6 +416,12 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   }
   const taskContext = opts?.taskContext ?? new TaskContext(opts?.sessionId ?? crypto.randomUUID(), bash.getCwd());
   registerContextLoader(tools, taskContext, () => bash.getCwd(), opts?.executionRole);
+  // Agent Skills: skill_load for every role (workers too); skill_create only for
+  // a main that can write (agent mode or the orchestrator), never for workers.
+  registerSkillTools(tools, () => bash.getCwd(), {
+    allowCreate: opts?.executionRole !== "worker" && (mode === "agent" || opts?.executionRole === "orchestrator"),
+    askUser: opts?.askUser && !isUnattendedTurn() ? opts.askUser : undefined,
+  });
   // One tracker per tool registry instance — shared across read/write/edit
   // calls in this tool run. A rebuilt registry starts a fresh read/write ledger.
   const fileTracker = new FileTracker();

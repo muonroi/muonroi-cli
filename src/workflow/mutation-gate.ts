@@ -10,6 +10,7 @@ const NEVER_GATED_PREFIXES = ["flow_", "respond_"];
 // accidentally inherit workspace mutation authorization requirements.
 export const WORKFLOW_READ_ONLY_TOOLS = Object.freeze([
   "context_load",
+  "skill_load",
   "search_session_history",
   "retrieve_tool_result",
   "list_tools",

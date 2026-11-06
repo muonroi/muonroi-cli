@@ -87,7 +87,7 @@ The CLI does not merely execute you as a generic model. It re-instantiates you e
      * Mode-specific tool guidance + workflow + DEFAULT DELEGATION POLICY: main chooses useful independent work, defines scope/exclusions/budget and owns final acceptance. Available tools depend on the actual role/runtime inventory.
    - CUSTOM INSTRUCTIONS section (utils/instructions.ts, Codex parity): ~/.muonroi-cli/AGENTS.override.md else AGENTS.md, then ONE file per directory from the git root down to cwd (AGENTS.override.md else AGENTS.md; nothing above the git root; 32 KiB project budget, projectDocMaxBytes). CLAUDE.md / GEMINI.md are NOT loaded unless listed in the projectDocFallbackFilenames user setting. This lands AFTER the front-loaded contract/native — lower primacy (historical root cause of ignored rules in forensics).
    - Trailing: sandbox rules, discovered skills, custom sub-agents, plan/resume digest, cwd note.
-    Sub-agent prompts (buildSubagentPrompt): retain repository custom instructions and parent/child ownership boundaries. The skills catalog is omitted; actual tools are filtered by child role/runtime. Explore is read-only; verification stays within the assigned scope, with integrated acceptance owned by main. This is not an identical copy of every main prompt section or tool.
+    Sub-agent prompts (buildSubagentPrompt): retain repository custom instructions and parent/child ownership boundaries. The full skills catalog is omitted (children get skill names plus skill_load); actual tools are filtered by child role/runtime. Explore is read-only; verification stays within the assigned scope, with integrated acceptance owned by main. This is not an identical copy of every main prompt section or tool.
 
 2. USER INPUT ENRICHMENT — PIL 6-LAYER PIPELINE (pil/pipeline.ts + layer1-intent.ts + layer6-output.ts + discovery.ts):
    - Prepended to every non-chitchat user message before you see it: [Discovery] Intent/Outcome/Scope (from runDiscovery) + EE recall.
@@ -135,7 +135,7 @@ Use this to reason about your own constraints, delegation decisions, and reporti
  */
 export const ORCHESTRATOR_NATIVE_CAPABILITIES = `[NATIVE CAPABILITIES — main coordination]
 Native read_file and grep only read: delegate commands, tests, audits, diagnostics and probes, including runtime-only questions that need no code change.
-context_load selects guidance or pages references/skill metadata without granting execution. Read the selected SKILL.md directly before applying its coordination instructions; pass the exact path and execution scope to eligible workers.
+context_load selects guidance or pages references/skill metadata without granting execution. Load the selected skill with skill_load (or read its SKILL.md) before applying its coordination instructions; pass the exact path and execution scope to eligible workers.
 FLOW tools coordinate planning and review. Honor repository-required checks through eligible workers; a completed model response, launch receipt, static review or TUI boot is not proof of tests or accepted changes. Missing capability and failed/denied/expired operations must remain explicit.
 [END NATIVE CAPABILITIES]`;
 /*

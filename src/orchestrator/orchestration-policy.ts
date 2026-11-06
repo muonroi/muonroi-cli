@@ -232,6 +232,8 @@ const ORCHESTRATION_TOOLS = new Set([
   "retrieve_tool_result",
   "compact",
   "context_load",
+  "skill_load",
+  "skill_create",
   "read_pil_context",
   "flow_status",
   "flow_discuss",
@@ -261,6 +263,8 @@ for (const name of [
   "ee_health",
   "retrieve_tool_result",
   "context_load",
+  // Workers read skills the owner names; only main authors them (skill_create stays forbidden).
+  "skill_load",
   "compact",
   "todo_write",
   "ask_user",

@@ -1451,10 +1451,12 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // needsApproval: an SDK approval pauses the loop and this host cannot
           // resume it, so any SDK policy present is folded into the same gate.
           const sdkApprovalPolicy = tool.needsApproval;
+          // skill_create writes a file, so safe mode asks for it in every role
+          // that can see it (workers never receive it).
           const mainReadNeedsApproval =
-            deps.executionRole === "orchestrator" &&
-            (name === "read_file" || name === "grep") &&
-            deps.permissionMode === "safe";
+            deps.permissionMode === "safe" &&
+            ((deps.executionRole === "orchestrator" && (name === "read_file" || name === "grep")) ||
+              name === "skill_create");
           tool.needsApproval = false;
           const originalExecute = tool.execute;
           // Read-only tools skip the mutation gate and the write mutex, but ALL

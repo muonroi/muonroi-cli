@@ -45,7 +45,7 @@ describe("progressive prompt invariants", () => {
     expect(main.staticPrefix).toContain("native read_file and grep");
     expect(main.staticPrefix).not.toContain("RESEARCH FIRST: explore code");
     expect(main.staticPrefix).toContain("role-skill");
-    expect(main.staticPrefix).toContain("Read the selected SKILL.md before acting;");
+    expect(main.staticPrefix).toContain("call skill_load(name) and follow the returned instructions");
     expect(main.staticPrefix).not.toContain("Delegate reading the selected SKILL.md");
     expect(workerFirst.staticPrefix).toBe(workerAfter.staticPrefix);
     expect(workerAfter.staticPrefix).toContain("read_file / grep");

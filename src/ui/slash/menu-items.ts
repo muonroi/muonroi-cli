@@ -66,6 +66,13 @@ export const SLASH_MENU_ITEMS: SlashMenuItem[] = [
   { id: "new", label: "new session", description: "Start a new session", hidden: true },
   { id: "resume", label: "resume", description: "List recent sessions to resume" },
   { id: "jobs", label: "jobs", description: "Background jobs & delegations — status, results, stop" },
+  { id: "skills", label: "skills", description: "List Agent Skills (name, scope, SKILL.md path)" },
+  { id: "skill", label: "skill <name> [args]", description: "Run an Agent Skill in this turn", hidden: true },
+  {
+    id: "skill-create",
+    label: "skill-create",
+    description: "Create a new Agent Skill (asks name, description, scope)",
+  },
   { id: "commit-push", label: "commit & push", description: "Commit and push", hidden: true },
   { id: "commit-pr", label: "commit & pr", description: "Commit and open PR", hidden: true },
   { id: "review", label: "review", description: "Review recent changes", hidden: true },
