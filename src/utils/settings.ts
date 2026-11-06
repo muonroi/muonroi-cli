@@ -369,6 +369,23 @@ export interface UserSettings {
    */
   subAgentBudgetChars?: number;
   /**
+   * Opt-in extra instruction filenames, Codex `project_doc_fallback_filenames`
+   * parity. Default empty: only `AGENTS.override.md` / `AGENTS.md` are read
+   * (owner decision — one file, like Codex). Each project directory from the
+   * git root down to cwd contributes at most ONE file: the first that exists of
+   * `AGENTS.override.md`, `AGENTS.md`, then these names in order. Example:
+   * `["CLAUDE.md"]` makes a directory with no AGENTS.md fall back to its
+   * CLAUDE.md. Entries that are not a bare filename are ignored.
+   */
+  projectDocFallbackFilenames?: string[];
+  /**
+   * Total byte budget for PROJECT instruction files (git root → cwd), Codex
+   * `project_doc_max_bytes` parity. Default 32768. The file that crosses the
+   * budget is truncated and later files are dropped; `0` disables project
+   * instructions entirely. The global `~/.muonroi-cli/AGENTS.md` is not counted.
+   */
+  projectDocMaxBytes?: number;
+  /**
    * Cumulative tool-output budget for the TOP-LEVEL orchestrator tool loop
    * (the agentic streamText loop in runTurn, separate from sub-agents).
    * Same tiered compression as the sub-agent cap, but with a larger
@@ -438,13 +455,13 @@ export interface ProjectSettings {
    * Opt-in: give the FIRST turn of a session the full tool set even when
    * PIL classifies it as chitchat/direct-answer (which would otherwise give
    * it zero, or read-only-only, tools). For a project whose own
-   * AGENTS.md/CLAUDE.md requires a tool call unconditionally at session
+   * AGENTS.md requires a tool call unconditionally at session
    * start (e.g. a framework's "run this briefing script first"), a
    * tool-less first turn leaves the model unable to follow that instruction
    * — see `orchestrator/tool-engine.ts`'s `selectRawToolSet`.
    *
    * Explicit opt-in, not automatic on "this project has an instructions
-   * file": giving every project with an AGENTS.md/CLAUDE.md the full tool
+   * file": giving every project with an AGENTS.md the full tool
    * set on turn 1 is a real cost/latency change (more tool schemas in the
    * first prompt) for every user of this CLI, most of whom have no
    * session-start-script requirement at all. Default `false` — unset means
@@ -1173,6 +1190,23 @@ export function getAutoCompactAbsoluteFloorTokens(): number {
  * sub-agent. See orchestrator/sub-agent-cap.ts for the tiered compression
  * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
  */
+/** Codex `project_doc_max_bytes` default (32 KiB). */
+export const DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024;
+
+/** See `UserSettings.projectDocMaxBytes`. Invalid values fall back to the default. */
+export function getProjectDocMaxBytes(): number {
+  const val = loadUserSettings().projectDocMaxBytes;
+  if (typeof val === "number" && Number.isFinite(val) && val >= 0) return Math.floor(val);
+  return DEFAULT_PROJECT_DOC_MAX_BYTES;
+}
+
+/** See `UserSettings.projectDocFallbackFilenames`. Raw list; the loader validates each entry. */
+export function getProjectDocFallbackFilenames(): string[] {
+  const val = loadUserSettings().projectDocFallbackFilenames;
+  if (!Array.isArray(val)) return [];
+  return val.filter((v): v is string => typeof v === "string");
+}
+
 export function getSubAgentBudgetChars(): number {
   // No budget inside an `/ideal` run (user decision: no limits). `Infinity` makes
   // `wrapToolSetWithCap` pass every result through untouched (its tiers compare

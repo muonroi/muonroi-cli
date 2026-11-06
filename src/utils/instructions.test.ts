@@ -12,36 +12,49 @@ function writeFile(filePath: string, content: string): void {
   fs.writeFileSync(filePath, content);
 }
 
-async function importLoadCustomInstructions(mockedHome?: string) {
+/** Write the user settings the loader consults (`~/.muonroi-cli/user-settings.json`). */
+function writeUserSettings(home: string, settings: Record<string, unknown>): void {
+  writeFile(path.join(home, ".muonroi-cli", "user-settings.json"), JSON.stringify(settings));
+}
+
+async function importInstructions(mockedHome: string) {
   vi.resetModules();
   vi.doUnmock("os");
 
-  if (mockedHome) {
-    process.env.HOME = mockedHome;
-    // instructions.ts now resolves its home through the repo-wide
-    // `MUONROI_CLI_HOME ?? homedir() + "/.muonroi-cli"` convention, and
-    // vitest-setup.ts pins that var suite-wide — so mocking `os.homedir()`
-    // alone no longer redirects the loader. Point the var at the same temp
-    // home this test already builds; the homedir mock stays as belt-and-braces
-    // for anything else the module reads.
-    process.env.MUONROI_CLI_HOME = path.join(mockedHome, ".muonroi-cli");
-    vi.doMock("os", async () => {
-      const actual = await vi.importActual<typeof import("os")>("os");
-      return {
-        ...actual,
-        homedir: () => mockedHome,
-      };
-    });
-  }
+  process.env.HOME = mockedHome;
+  // instructions.ts resolves its global home through the repo-wide
+  // `MUONROI_CLI_HOME ?? homedir() + "/.muonroi-cli"` convention, and
+  // vitest-setup.ts pins that var suite-wide — so mocking `os.homedir()`
+  // alone does not redirect the loader. Point the var at the same temp home.
+  // The homedir mock redirects `loadUserSettings()` (user-settings.json),
+  // which the loader reads for projectDocFallbackFilenames / projectDocMaxBytes.
+  process.env.MUONROI_CLI_HOME = path.join(mockedHome, ".muonroi-cli");
+  vi.doMock("os", async () => {
+    const actual = await vi.importActual<typeof import("os")>("os");
+    return {
+      ...actual,
+      homedir: () => mockedHome,
+    };
+  });
 
-  const mod = await import("./instructions");
-  return mod.loadCustomInstructions;
+  return import("./instructions");
+}
+
+async function importLoadCustomInstructions(mockedHome: string) {
+  return (await importInstructions(mockedHome)).loadCustomInstructions;
+}
+
+/** A git repo NOT inside the temp home, so the home cannot contribute by accident. */
+function makeRepo(): string {
+  const repoRoot = makeTempDir("muonroi-repo-");
+  fs.mkdirSync(path.join(repoRoot, ".git"));
+  return repoRoot;
 }
 
 const originalHome = process.env.HOME;
 const originalCliHome = process.env.MUONROI_CLI_HOME;
 
-describe("loadCustomInstructions", () => {
+describe("loadCustomInstructions — AGENTS.md only (Codex parity)", () => {
   afterEach(() => {
     process.env.HOME = originalHome;
     if (originalCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
@@ -59,11 +72,10 @@ describe("loadCustomInstructions", () => {
     expect(loadCustomInstructions(cwd)).toBeNull();
   });
 
-  it("loads global plus repo-chain AGENTS files in order", async () => {
+  it("loads global plus repo-chain AGENTS files in root → cwd order", async () => {
     const home = makeTempDir("muonroi-home-");
-    const repoRoot = makeTempDir("muonroi-repo-");
+    const repoRoot = makeRepo();
     const cwd = path.join(repoRoot, "pkg", "feature");
-    fs.mkdirSync(path.join(repoRoot, ".git"));
     fs.mkdirSync(cwd, { recursive: true });
 
     writeFile(path.join(home, ".muonroi-cli", "AGENTS.md"), "global instructions");
@@ -77,183 +89,212 @@ describe("loadCustomInstructions", () => {
     );
   });
 
-  it("auto-loads CLAUDE/GEMINI/DEEPSEEK/COPILOT/CURSOR alongside AGENTS.md", async () => {
+  it("does NOT load CLAUDE/GEMINI/DEEPSEEK/COPILOT/CURSOR by default — AGENTS.md only", async () => {
     const home = makeTempDir("muonroi-home-");
-    const repoRoot = makeTempDir("muonroi-repo-");
-    const cwd = repoRoot;
-    fs.mkdirSync(path.join(repoRoot, ".git"));
-
+    const repoRoot = makeRepo();
+    const nested = path.join(repoRoot, "nested");
     writeFile(path.join(repoRoot, "AGENTS.md"), "agents body");
-    writeFile(path.join(repoRoot, "CLAUDE.md"), "claude body");
-    writeFile(path.join(repoRoot, "GEMINI.md"), "gemini body");
-    writeFile(path.join(repoRoot, "DEEPSEEK.md"), "deepseek body");
-
+    for (const name of ["CLAUDE.md", "GEMINI.md", "DEEPSEEK.md", "COPILOT.md", "CURSOR.md"]) {
+      writeFile(path.join(repoRoot, name), `${name} MARKER`);
+      writeFile(path.join(nested, name), `nested ${name} MARKER`);
+    }
+    writeFile(path.join(home, ".muonroi-cli", "CLAUDE.md"), "global CLAUDE MARKER");
     const loadCustomInstructions = await importLoadCustomInstructions(home);
-    const out = loadCustomInstructions(cwd);
-    expect(out).not.toBeNull();
-    // AGENTS.md first, others tagged with comment headers, in declared order
-    expect(out).toContain("agents body");
-    expect(out).toContain("<!-- CLAUDE.md -->\nclaude body");
-    expect(out).toContain("<!-- GEMINI.md -->\ngemini body");
-    expect(out).toContain("<!-- DEEPSEEK.md -->\ndeepseek body");
-    const idxAgents = out!.indexOf("agents body");
-    const idxClaude = out!.indexOf("claude body");
-    const idxGemini = out!.indexOf("gemini body");
-    const idxDeepseek = out!.indexOf("deepseek body");
-    expect(idxAgents).toBeLessThan(idxClaude);
-    expect(idxClaude).toBeLessThan(idxGemini);
-    expect(idxGemini).toBeLessThan(idxDeepseek);
+
+    expect(loadCustomInstructions(repoRoot)).toBe("agents body");
+    // A directory with only non-AGENTS files contributes nothing.
+    expect(loadCustomInstructions(nested)).toBe("agents body");
   });
 
-  it("prefers AGENTS.override.md over AGENTS.md in the same directory", async () => {
+  it("returns null for a repo that has only a CLAUDE.md", async () => {
     const home = makeTempDir("muonroi-home-");
-    const repoRoot = makeTempDir("muonroi-repo-");
-    const cwd = path.join(repoRoot, "nested");
-    fs.mkdirSync(path.join(repoRoot, ".git"));
-    fs.mkdirSync(cwd, { recursive: true });
-
-    writeFile(path.join(repoRoot, "AGENTS.md"), "root instructions");
-    writeFile(path.join(repoRoot, "nested", "AGENTS.md"), "nested base instructions");
-    writeFile(path.join(repoRoot, "nested", "AGENTS.override.md"), "nested override instructions");
+    const repoRoot = makeRepo();
+    writeFile(path.join(repoRoot, "CLAUDE.md"), "claude only");
     const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-    expect(loadCustomInstructions(cwd)).toBe(["root instructions", "nested override instructions"].join("\n\n"));
+    expect(loadCustomInstructions(repoRoot)).toBeNull();
   });
 
-  // Parity fix (G4): Claude Code also loads parent-directory CLAUDE.md files
-  // above the project's own root, up to $HOME. Measured (FINDINGS.md G4): a
-  // Vietnamese request got an all-English reply because "reply in the
-  // user's own language" lives in `~/Personal/Core/CLAUDE.md`, one directory
-  // above the git root `~/Personal/Core/shipd-challenges` — a file this
-  // loader never reached before.
-  describe("ancestor directories above the git root, up to $HOME (G4)", () => {
-    it("loads an ancestor directory's CLAUDE.md above the git root, ordered before the project's own", async () => {
+  describe("opt-in projectDocFallbackFilenames (Codex project_doc_fallback_filenames)", () => {
+    it("loads a listed fallback file in a directory that has no AGENTS.md, labelled with its name", async () => {
       const home = makeTempDir("muonroi-home-");
-      const repoRoot = path.join(home, "Personal", "Core", "shipd-challenges");
-      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
-      writeFile(path.join(home, "Personal", "Core", "CLAUDE.md"), "reply in the user's own language");
-      writeFile(path.join(repoRoot, "AGENTS.md"), "project instructions");
+      const repoRoot = makeRepo();
+      const nested = path.join(repoRoot, "nested");
+      writeFile(path.join(repoRoot, "AGENTS.md"), "root agents");
+      writeFile(path.join(repoRoot, "CLAUDE.md"), "root CLAUDE MARKER");
+      writeFile(path.join(nested, "CLAUDE.md"), "nested claude body");
+      writeFile(path.join(nested, "GEMINI.md"), "nested GEMINI MARKER");
+      writeUserSettings(home, { projectDocFallbackFilenames: ["CLAUDE.md"] });
       const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-      const out = loadCustomInstructions(repoRoot);
-      expect(out).not.toBeNull();
-      expect(out).toContain("reply in the user's own language");
-      expect(out).toContain("project instructions");
-      expect(out!.indexOf("reply in the user's own language")).toBeLessThan(out!.indexOf("project instructions"));
+      const out = loadCustomInstructions(nested);
+      // At most one file per directory: the root has AGENTS.md, so its CLAUDE.md is not read.
+      // The label is relative to cwd (here cwd IS `nested`).
+      expect(out).toBe(["root agents", "<!-- CLAUDE.md -->\nnested claude body"].join("\n\n"));
+      expect(out).not.toContain("root CLAUDE MARKER");
+      expect(out).not.toContain("GEMINI MARKER");
     });
 
-    it("loads $HOME's own CLAUDE.md when the git root sits directly inside $HOME", async () => {
+    it("honours fallback order, and the global home never uses fallbacks", async () => {
       const home = makeTempDir("muonroi-home-");
-      const repoRoot = path.join(home, "myrepo");
-      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
-      writeFile(path.join(home, "CLAUDE.md"), "home-level rule");
+      const repoRoot = makeRepo();
+      writeFile(path.join(repoRoot, "GEMINI.md"), "gemini body");
+      writeFile(path.join(repoRoot, "CLAUDE.md"), "claude body");
+      writeFile(path.join(home, ".muonroi-cli", "GEMINI.md"), "GLOBAL GEMINI MARKER");
+      writeUserSettings(home, { projectDocFallbackFilenames: ["GEMINI.md", "CLAUDE.md"] });
       const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-      expect(loadCustomInstructions(repoRoot)).toContain("home-level rule");
+      expect(loadCustomInstructions(repoRoot)).toBe("<!-- GEMINI.md -->\ngemini body");
     });
 
-    it("does not walk ancestors, and does not throw, when the git root is outside $HOME entirely", async () => {
+    it("ignores entries that are not a bare filename", async () => {
       const home = makeTempDir("muonroi-home-");
-      const repoRoot = makeTempDir("muonroi-repo-outside-"); // sibling tmp dir, NOT inside home
-      fs.mkdirSync(path.join(repoRoot, ".git"));
-      writeFile(path.join(repoRoot, "AGENTS.md"), "project instructions only");
-      const loadCustomInstructions = await importLoadCustomInstructions(home);
+      const repoRoot = makeRepo();
+      writeFile(path.join(repoRoot, "sub", "CLAUDE.md"), "SUBDIR MARKER");
+      writeFile(path.join(path.dirname(repoRoot), "ESCAPE.md"), "ESCAPE MARKER");
+      writeUserSettings(home, {
+        projectDocFallbackFilenames: ["sub/CLAUDE.md", "sub\\CLAUDE.md", "../ESCAPE.md", "..", ""],
+      });
+      const { loadCustomInstructions, projectCandidateFilenames } = await importInstructions(home);
 
-      expect(loadCustomInstructions(repoRoot)).toBe("project instructions only");
+      expect(loadCustomInstructions(repoRoot)).toBeNull();
+      expect(projectCandidateFilenames(["sub/CLAUDE.md", "..", "CLAUDE.md", "CLAUDE.md", "AGENTS.md"])).toEqual([
+        "AGENTS.override.md",
+        "AGENTS.md",
+        "CLAUDE.md",
+      ]);
     });
+  });
 
-    it("does not double-load the git root itself as one of its own ancestors", async () => {
+  describe("AGENTS.override.md precedence", () => {
+    it("prefers AGENTS.override.md over AGENTS.md in the same directory", async () => {
       const home = makeTempDir("muonroi-home-");
-      const repoRoot = path.join(home, "repo");
-      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      const repoRoot = makeRepo();
+      const cwd = path.join(repoRoot, "nested");
+      fs.mkdirSync(cwd, { recursive: true });
+
       writeFile(path.join(repoRoot, "AGENTS.md"), "root instructions");
+      writeFile(path.join(repoRoot, "nested", "AGENTS.md"), "nested base instructions");
+      writeFile(path.join(repoRoot, "nested", "AGENTS.override.md"), "nested override instructions");
       const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-      const out = loadCustomInstructions(repoRoot);
-      expect(out?.split("root instructions").length).toBe(2); // one match, i.e. appears exactly once
+      expect(loadCustomInstructions(cwd)).toBe(["root instructions", "nested override instructions"].join("\n\n"));
     });
 
-    it("caps ancestor bytes loaded — a deep chain cannot balloon the prompt past MAX_ANCESTOR_INSTRUCTIONS_BYTES, and admits CLOSEST-first (round 2, G4 HIGH)", async () => {
+    it("global: AGENTS.override.md wins; an EMPTY override falls back to AGENTS.md (first non-empty)", async () => {
       const home = makeTempDir("muonroi-home-");
-      const level1 = path.join(home, "level1");
-      const level2 = path.join(level1, "level2");
-      const repoRoot = path.join(level2, "repo");
-      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
+      const cwd = makeTempDir("muonroi-cwd-");
+      writeFile(path.join(home, ".muonroi-cli", "AGENTS.md"), "global base");
+      writeFile(path.join(home, ".muonroi-cli", "AGENTS.override.md"), "global override");
+      let loadCustomInstructions = await importLoadCustomInstructions(home);
+      expect(loadCustomInstructions(cwd)).toBe("global override");
 
-      const { MAX_ANCESTOR_INSTRUCTIONS_BYTES } = await import("./instructions");
-      // Each segment is ~CAP/2.5 bytes: any TWO fit comfortably under the
-      // cap together, but all THREE do not — unambiguous regardless of the
-      // small per-file header-overhead difference from each label's length.
-      const padded = (label: string) =>
-        `${label}:${"x".repeat(Math.floor(MAX_ANCESTOR_INSTRUCTIONS_BYTES / 2.5) - label.length - 1)}`;
-      writeFile(path.join(home, "CLAUDE.md"), padded("L0"));
-      writeFile(path.join(level1, "CLAUDE.md"), padded("L1"));
-      writeFile(path.join(level2, "CLAUDE.md"), padded("L2"));
-      const loadCustomInstructions = await importLoadCustomInstructions(home);
-
-      const out = loadCustomInstructions(repoRoot);
-      expect(out).not.toBeNull();
-      // Admission is CLOSEST-first (L2, nearest the project root, then L1),
-      // so those two survive and the FARTHEST one (L0 = $HOME) is the one
-      // dropped — the opposite of the pre-fix, break-on-first-oversized
-      // behaviour, which walked broadest-first and always favoured $HOME.
-      expect(out).toContain("L2:");
-      expect(out).toContain("L1:");
-      expect(out).not.toContain("L0:");
-      // Emission order is still broadest-first (general instructions read
-      // before more specific ones), even though admission was closest-first.
-      expect(out!.indexOf("L1:")).toBeLessThan(out!.indexOf("L2:"));
+      writeFile(path.join(home, ".muonroi-cli", "AGENTS.override.md"), "   \n");
+      loadCustomInstructions = await importLoadCustomInstructions(home);
+      expect(loadCustomInstructions(cwd)).toBe("global base");
     });
 
-    // Round 2 (G4 HIGH) — the exact repro handed to this fix: a single
-    // oversized file at $HOME (the farthest, most general point) must not
-    // starve out a tiny, nearer, more project-relevant file. Pre-fix, the
-    // ancestor loop walked broadest-first and `break`-ed on the very FIRST
-    // candidate once it alone exceeded the cap — so a 40KB $HOME/AGENTS.md
-    // dropped a real 44-byte ~/Personal/Core/CLAUDE.md entirely, and
-    // `loadCustomInstructions` returned `null` even though real, small,
-    // relevant instructions existed right next to the project.
-    it("G4 HIGH repro: a 40KB $HOME/AGENTS.md no longer drops a 44-byte nearer ancestor file (loadCustomInstructions must not return null)", async () => {
+    it("project: an EMPTY AGENTS.override.md is selected and skipped — the directory's AGENTS.md is not read", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = makeRepo();
+      writeFile(path.join(repoRoot, "AGENTS.override.md"), "\n");
+      writeFile(path.join(repoRoot, "AGENTS.md"), "SHADOWED MARKER");
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      expect(loadCustomInstructions(repoRoot)).toBeNull();
+    });
+  });
+
+  describe("nothing above the project root", () => {
+    it("does not load AGENTS.md / CLAUDE.md from directories above the git root, even inside $HOME", async () => {
       const home = makeTempDir("muonroi-home-");
       const core = path.join(home, "Personal", "Core");
       const repoRoot = path.join(core, "shipd-challenges");
       fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
-
-      const oversizedHomeAgents = "x".repeat(40 * 1024); // 40KB > MAX_ANCESTOR_INSTRUCTIONS_BYTES (32KB) alone
-      const nearFileContent = "reply in the user's own language"; // 33 bytes of real content — well under 44
-      writeFile(path.join(home, "AGENTS.md"), oversizedHomeAgents);
-      writeFile(path.join(core, "CLAUDE.md"), nearFileContent);
+      writeFile(path.join(home, "AGENTS.md"), "HOME AGENTS MARKER");
+      writeFile(path.join(home, "CLAUDE.md"), "HOME CLAUDE MARKER");
+      writeFile(path.join(core, "AGENTS.md"), "CORE AGENTS MARKER");
+      writeFile(path.join(core, "CLAUDE.md"), "CORE CLAUDE MARKER");
+      writeFile(path.join(repoRoot, "AGENTS.md"), "project instructions");
+      // Even an opt-in fallback must not widen the walk above the root.
+      writeUserSettings(home, { projectDocFallbackFilenames: ["CLAUDE.md"] });
       const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-      const out = loadCustomInstructions(repoRoot);
-      expect(out).not.toBeNull(); // was the exact repro'd bug: this returned null
-      expect(out).toContain(nearFileContent);
-      expect(out).not.toContain(oversizedHomeAgents);
+      expect(loadCustomInstructions(repoRoot)).toBe("project instructions");
     });
 
-    // CI regression (macOS + Windows red, Linux green): the loader realpath'd
-    // `cwd` (hence the git root) but compared it against the RAW
-    // `os.homedir()`. macOS's tmpdir is `/var/...` → realpath `/private/var/...`;
-    // a Windows runner's USERPROFILE is the 8.3 `C:\Users\RUNNER~1` → realpath
-    // the long name. Either way `path.relative(home, root)` began with `..`, the
-    // root looked "outside $HOME", and no ancestor file was ever read. Linux's
-    // tmpdir has no symlink, so this reproduces that mismatch explicitly: $HOME
-    // is reached THROUGH a symlink, exactly as `/var` is on macOS.
-    it("still walks ancestors when $HOME is spelled through a symlink (macOS /var → /private/var, Windows 8.3 names)", async () => {
-      const realHome = makeTempDir("muonroi-home-real-");
-      const linkParent = makeTempDir("muonroi-home-link-");
-      const home = path.join(linkParent, "home");
-      fs.symlinkSync(realHome, home, process.platform === "win32" ? "junction" : "dir");
-      expect(fs.realpathSync.native(home)).not.toBe(home); // the precondition the bug needs
-      const repoRoot = path.join(home, "Personal", "Core", "shipd-challenges");
-      fs.mkdirSync(path.join(repoRoot, ".git"), { recursive: true });
-      writeFile(path.join(home, "Personal", "Core", "CLAUDE.md"), "reply in the user's own language");
+    it("with no git root, only the cwd itself is checked", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const parent = makeTempDir("muonroi-nogit-");
+      const cwd = path.join(parent, "child");
+      writeFile(path.join(parent, "AGENTS.md"), "PARENT MARKER");
+      writeFile(path.join(cwd, "AGENTS.md"), "cwd instructions");
       const loadCustomInstructions = await importLoadCustomInstructions(home);
 
-      const out = loadCustomInstructions(repoRoot);
-      expect(out).toContain("reply in the user's own language");
-      // The label is relative to the CANONICAL home — still a `~`-relative path.
-      expect(out).toContain(`<!-- ${path.join("~", "Personal", "Core", "CLAUDE.md")} -->`);
+      expect(loadCustomInstructions(cwd)).toBe("cwd instructions");
     });
+  });
+
+  describe("project byte budget (Codex project_doc_max_bytes)", () => {
+    it("truncates the file that crosses the default 32 KiB budget and drops later files; global is not counted", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = makeRepo();
+      const a = path.join(repoRoot, "a");
+      const b = path.join(a, "b");
+      const { DEFAULT_PROJECT_DOC_MAX_BYTES } = await import("./settings");
+      expect(DEFAULT_PROJECT_DOC_MAX_BYTES).toBe(32 * 1024);
+      const rootBody = `R${"r".repeat(20 * 1024 - 1)}`;
+      const aBody = `A${"a".repeat(20 * 1024 - 1)}`;
+      const globalBody = `G${"g".repeat(40 * 1024 - 1)}`;
+      writeFile(path.join(repoRoot, "AGENTS.md"), rootBody);
+      writeFile(path.join(a, "AGENTS.md"), aBody);
+      writeFile(path.join(b, "AGENTS.md"), "DROPPED MARKER");
+      writeFile(path.join(home, ".muonroi-cli", "AGENTS.md"), globalBody);
+      const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+      const out = loadCustomInstructions(b)!;
+      const [global, root, aSeg, ...rest] = out.split("\n\n");
+      expect(global).toBe(globalBody); // a 40 KiB global file is NOT charged against the project budget
+      expect(root).toBe(rootBody);
+      expect(aSeg).toBe(aBody.slice(0, 32 * 1024 - 20 * 1024)); // truncated to the remaining 12 KiB
+      expect(rest).toEqual([]);
+      expect(out).not.toContain("DROPPED MARKER");
+    });
+
+    it("projectDocMaxBytes overrides the budget; 0 disables project instructions but keeps the global file", async () => {
+      const home = makeTempDir("muonroi-home-");
+      const repoRoot = makeRepo();
+      writeFile(path.join(repoRoot, "AGENTS.md"), "0123456789");
+      writeFile(path.join(home, ".muonroi-cli", "AGENTS.md"), "global");
+      writeUserSettings(home, { projectDocMaxBytes: 4 });
+      let loadCustomInstructions = await importLoadCustomInstructions(home);
+      expect(loadCustomInstructions(repoRoot)).toBe(["global", "0123"].join("\n\n"));
+
+      writeUserSettings(home, { projectDocMaxBytes: 0 });
+      loadCustomInstructions = await importLoadCustomInstructions(home);
+      expect(loadCustomInstructions(repoRoot)).toBe("global");
+    });
+  });
+
+  // CI regression (macOS + Windows red, Linux green): comparing a raw path
+  // against a realpath'd one made `path.relative` start with `..` whenever the
+  // two spellings of one directory differed — macOS `/var` → `/private/var`,
+  // Windows 8.3 short names. The loader canonicalises cwd and finds the git
+  // root by walking up from THAT, so root and cwd share one spelling. This
+  // reaches the repo THROUGH a symlink/junction, exactly as `/var` is on macOS.
+  it("loads the root → cwd chain when cwd is spelled through a symlink (macOS /var → /private/var, Windows 8.3 names)", async () => {
+    const home = makeTempDir("muonroi-home-");
+    const realRepo = makeRepo();
+    const linkParent = makeTempDir("muonroi-repo-link-");
+    const linkedRepo = path.join(linkParent, "repo");
+    fs.symlinkSync(realRepo, linkedRepo, process.platform === "win32" ? "junction" : "dir");
+    expect(fs.realpathSync.native(linkedRepo)).not.toBe(linkedRepo); // the precondition the bug needs
+    writeFile(path.join(realRepo, "AGENTS.md"), "root instructions");
+    writeFile(path.join(realRepo, "pkg", "AGENTS.md"), "pkg instructions");
+    const loadCustomInstructions = await importLoadCustomInstructions(home);
+
+    expect(loadCustomInstructions(path.join(linkedRepo, "pkg"))).toBe(
+      ["root instructions", "pkg instructions"].join("\n\n"),
+    );
   });
 });
