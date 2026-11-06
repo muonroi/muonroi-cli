@@ -56,7 +56,7 @@ describe("orchestrator contract content", () => {
   const has = (re: RegExp) => expect(ORCHESTRATOR_CONTRACT).toMatch(re);
 
   it("stays compact", () => {
-    expect(ORCHESTRATOR_CONTRACT.length).toBeLessThanOrEqual(5_200);
+    expect(ORCHESTRATOR_CONTRACT.length).toBeLessThanOrEqual(4_200);
   });
 
   it("states role, reading vs delegation and independent acceptance", () => {
@@ -67,22 +67,39 @@ describe("orchestrator contract content", () => {
     has(/Only the tools supplied in this call exist/);
   });
 
-  it("points at host-enforced worker boundaries instead of restating them", () => {
-    has(/worker_models[^.]*call it once/);
-    has(/writeScope/);
-    has(/run_gate/);
+  it("keeps the worker judgment lines the host cannot check", () => {
     has(/never describe either as sandboxed/);
-    has(/delegation_send writeScope/);
+    has(/sharedExecution is not isolated/);
+    has(/Inspect a running worker's current effects before changing its scope/);
     has(/never claim rollback/);
+    has(/Decide ambiguity or out-of-scope requests/);
+    has(/When only background jobs remain, end the turn; each result wakes you/);
   });
 
-  it("describes inline completion delivery, ACK and no polling", () => {
-    has(/completion notice carries the saved result inline/i);
-    has(/delegation_read only for that remainder/);
-    has(/delegation_ack[^.]*jobId and resultVersion/);
-    has(/ACK records handling, not acceptance/);
-    has(/never poll or sleep/);
-    has(/without replyTo/);
+  /**
+   * Removed because the host now enforces them — each assertion pins that the
+   * prose stays gone, and names the enforcing code:
+   * - modelId choice: task/delegate `modelId` enum from the live inventory
+   *   (orchestration-policy.ts liveWorkerModelIds/workerModelIdSchema, tool-engine.ts).
+   * - seven-field worker prompt: `brief` schema + host assembly (worker-brief.ts).
+   * - writeScope for edit tasks: workerWriteScopeRequiredError (orchestration-policy.ts).
+   * - run_gate / delegation_send scope / replyTo correlation: task schema text,
+   *   injectOwnerMessages and appendMessage (delegation-mailbox.ts).
+   * - inline notice + delegation_read remainder: the completion notice states it
+   *   (delegations.ts formatNotification); running reads are refused (runningRefusal).
+   * - delegation_ack: host ACK after a processed turn (DelegationManager.acknowledgeProcessed).
+   * - ID kinds / never ask the user for IDs: retrieve_tool_result id_kind_mismatch
+   *   and ask_user_refused (internal-ids.ts, registry.ts).
+   */
+  it("no longer restates rules the host enforces", () => {
+    const not = (re: RegExp) => expect(ORCHESTRATOR_CONTRACT).not.toMatch(re);
+    not(/worker_models/);
+    not(/role, scope\/workspace, input, question/);
+    not(/delegation_ack|ACK records handling/);
+    not(/delegation_read only for that remainder/);
+    not(/distinct opaque IDs/);
+    not(/never ask the user for internal IDs/);
+    not(/without replyTo/);
   });
 
   it("keeps whole-goal completion honesty, which the host cannot gate in free text", () => {
@@ -95,9 +112,9 @@ describe("orchestrator contract content", () => {
   it("keeps evidence, council and failure-diagnosis judgment rules", () => {
     has(/static review is not executed tests/);
     has(/reviewOf/);
-    has(/distinct opaque IDs/);
-    has(/retrieve_tool_result/);
-    has(/never ask the user for internal IDs/);
+    has(/Copy opaque IDs exactly/);
+    has(/narration is not proof/);
+    has(/EE lessons are guidance, never evidence/);
     has(/verdicts are advice/);
     has(/never accept a blocker only because several roles agree/);
     has(/reset the council allowance/);

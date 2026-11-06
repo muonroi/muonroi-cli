@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../types/index.js";
-import { filterExecutionTools, filterReviewTools, selectOrchestratorModel } from "./orchestration-policy.js";
+import {
+  filterExecutionTools,
+  filterReviewTools,
+  selectOrchestratorModel,
+  validateWorkerSelection,
+  workerModelIdSchema,
+  workerWriteScopeRequiredError,
+} from "./orchestration-policy.js";
 
 const model = (id: string, fields: Partial<ModelInfo> = {}): ModelInfo => ({
   id,
@@ -87,4 +94,37 @@ it("independent reviewers only get exact native read/test tools after MCP and al
     Object.keys(filterReviewTools({ ...native, mcp_tests__verification_run: {}, renamed: native.read_file }, native)),
   ).toEqual(["read_file", "grep", "lsp_query", "verification_run"]);
   expect(filterReviewTools({ read_file: {} }, native)).toEqual({});
+});
+
+describe("worker write-scope decision (M9)", () => {
+  const base = { description: "work", prompt: "do the work" };
+  it("refuses an edit-capable dispatch that omits both writeScope and sharedExecution", () => {
+    for (const agent of ["general", "computer", "my-custom-agent"]) {
+      const error = workerWriteScopeRequiredError({ ...base, agent });
+      expect(error).toMatch(/^worker_write_scope_required: agent=/);
+      expect(error).toContain("No worker was started");
+      expect(error).toContain("sharedExecution:true");
+    }
+  });
+  it("admits an explicit scope, an explicit shared-execution choice, and non-editing roles", () => {
+    expect(workerWriteScopeRequiredError({ ...base, agent: "general", writeScope: ["src/a.ts"] })).toBeUndefined();
+    expect(workerWriteScopeRequiredError({ ...base, agent: "general", writeScope: [] })).toBeUndefined();
+    expect(workerWriteScopeRequiredError({ ...base, agent: "general", sharedExecution: true })).toBeUndefined();
+    expect(
+      workerWriteScopeRequiredError({ ...base, agent: "verify", reviewOf: { jobId: "j", resultVersion: "v" } }),
+    ).toBeUndefined();
+    for (const agent of ["explore", "verify-detect", "verify", "verify-manifest", "vision"])
+      expect(workerWriteScopeRequiredError({ ...base, agent })).toBeUndefined();
+  });
+  it("is enforced at dispatch validation before model checks", async () => {
+    await expect(validateWorkerSelection({ ...base, agent: "general" })).rejects.toThrow("worker_write_scope_required");
+  });
+});
+
+describe("worker modelId schema (M18)", () => {
+  it("is an enum of the live inventory when known, a free string otherwise", () => {
+    expect(workerModelIdSchema(["m-1", "m-2"])).toMatchObject({ type: "string", enum: ["m-1", "m-2"] });
+    expect(workerModelIdSchema(undefined)).not.toHaveProperty("enum");
+    expect(workerModelIdSchema([])).not.toHaveProperty("enum");
+  });
 });

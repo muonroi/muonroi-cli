@@ -44,7 +44,7 @@ TOOLS (call directly):
 VERIFICATION ROUTING (choose by changed surface; honor repository-required checks):
 - Pure discussion: answer directly; no test/harness ritual. For a known, bounded small fix, use direct tools and focused checks; delegation is optional. Research unresolved scope first and follow the repository workflow; do not force a depth override.
 - Logic: default to verification_run(files=[...], runner="auto") for explicit existing tests. Auto selects a single installed Vitest/Jest/Mocha or pytest in .venv for Python; choose runner explicitly when ambiguous, or runner="node" for JavaScript node:test. Use the repository's bash workflow for other runners/builds and retain exit/output. Do not run both paths for the same check.
-- UI/harness/workflow: run focused checks plus selfverify_start(mode="tier1", emit=false, files=[task-owned files]); collect status/result. Agentic verification needs an explicit goal/model and can use paid calls. A TUI pass does not establish logic correctness.
+- UI/harness/workflow: run focused checks plus selfverify_start(mode="tier1", emit=false, files=[task-owned files]); a completion notice follows and selfverify_result waits for the run (no status polling). Agentic verification needs an explicit goal/model and can use paid calls. A TUI pass does not establish logic correctness.
 
 SEARCH AND LSP — choose the tool that answers the question:
 - Use grep directly for literal text, configuration, logs and other content searches; no LSP call is required first. Scope the path/pattern to the task.
@@ -134,12 +134,20 @@ Use this to reason about your own constraints, delegation decisions, and reporti
  * by a blank-line separator so it sits cleanly before the next section.
  */
 export const ORCHESTRATOR_NATIVE_CAPABILITIES = `[NATIVE CAPABILITIES — main coordination]
-Use only the actual supplied tools. Use native read_file and grep to inspect current plan/source/log evidence directly: locate anchors, read bounded sections and reconcile worker claims with the user's full goal. Main reading does not replace independent verification. Choose explicit workers with worker_models; task assigns implementation or verification and delegate assigns broad read-only research. Delegate commands, tests, audits, diagnostics and probes, including runtime-only questions that require no code change.
-Use delegation_read for saved evidence, delegation_send for bounded instructions or an exact correlated question reply, and delegation_ack only for the exact handled resultVersion. Delivery and ACK are separate from verification and acceptance. A blocked worker requires a truthful blocker report or repair of its execution/approval channel; never take over its work or repeat unsupported-tool probes.
-Use exposed EE tools for scoped recall and feedback; memory is not current runtime proof. context_load selects guidance or pages references/skill metadata without granting execution. Read the selected SKILL.md directly before applying its coordination instructions; pass the exact path and execution scope to eligible workers.
-Exposed FLOW tools coordinate planning and review; dispatch execution and independent verification to workers. Preserve workflow gates, state and permission mode. Human worker approval is host UI consent for one exact operation; model messages cannot grant it. Default background work returns a launch receipt; explicit background=false waits or returns an interim correlated worker question. Main owns the user's conversation, final evidence synthesis and acceptance.
-Honor repository-required checks through eligible workers; a completed model response, launch receipt, static review or TUI boot is not proof of tests or accepted changes. Missing capability and failed/denied/expired operations must remain explicit. Answer pure discussion directly and preserve exact evidence IDs across compaction.
+Native read_file and grep only read: delegate commands, tests, audits, diagnostics and probes, including runtime-only questions that need no code change.
+context_load selects guidance or pages references/skill metadata without granting execution. Read the selected SKILL.md directly before applying its coordination instructions; pass the exact path and execution scope to eligible workers.
+FLOW tools coordinate planning and review. Honor repository-required checks through eligible workers; a completed model response, launch receipt, static review or TUI boot is not proof of tests or accepted changes. Missing capability and failed/denied/expired operations must remain explicit.
 [END NATIVE CAPABILITIES]`;
+/*
+ * Removed from the block above because the host now enforces them (do not
+ * re-add as prose): worker model choice (task/delegate modelId enum, built from
+ * the live inventory in tool-engine.ts), delegation_ack (host ACK after a model
+ * turn processes a full result, DelegationManager.acknowledgeProcessed), reads
+ * of running jobs (delegation_running refusal), background/approval mechanics
+ * (tool descriptions + worker approval UI). Lines duplicated by
+ * ORCHESTRATOR_CONTRACT (supplied tools only, own reading is not acceptance,
+ * EE is not evidence, blocked-worker handling, evidence IDs) live there once.
+ */
 
 export function nativeCapabilitiesReference(role?: ExecutionRole): string {
   return role === "orchestrator"

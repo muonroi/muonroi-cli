@@ -15,7 +15,7 @@ describe("buildNativeCapabilitiesSection", () => {
     const root = buildNativeCapabilitiesSection({ mode: "agent", executionRole: "orchestrator" });
     expect(root).toContain("main coordination");
     expect(root).toContain("runtime-only");
-    expect(root).toContain("native read_file and grep");
+    expect(root).toContain("Native read_file and grep only read");
     expect(root).toContain("Read the selected SKILL.md directly");
     for (const executionRole of ["worker", "infrastructure", undefined] as const)
       expect(buildNativeCapabilitiesSection({ mode: "agent", executionRole })).toContain("read_file");

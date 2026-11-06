@@ -180,7 +180,7 @@ describe("subscription/API HTTP adapter and host handoff", () => {
       return { success: true, output: "captured" };
     });
     await (agent as any).runDelegation(
-      { agent: "general", modelId, description: "fixture", prompt: "No tools", background: true },
+      { agent: "general", modelId, description: "fixture", prompt: "No tools", background: true, writeScope: [] },
       undefined,
       true,
     );

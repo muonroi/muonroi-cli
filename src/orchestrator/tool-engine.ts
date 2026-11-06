@@ -199,7 +199,7 @@ import { buildGroundingFootnote, findUnverifiedClaims } from "./grounding-check.
 import { isInteractivePaused } from "./interactive-pause.js";
 import { buildInterruptedTurnNote } from "./interrupted-turn.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
-import { filterExecutionTools, withOrchestratorContract } from "./orchestration-policy.js";
+import { filterExecutionTools, liveWorkerModelIds, withOrchestratorContract } from "./orchestration-policy.js";
 import {
   appendNoticeToFinalMessages,
   buildOutputLimitContinuationPrompt,
@@ -1109,17 +1109,21 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
             | "heavy"
             | undefined) ??
           "standard";
+        // task/delegate modelId enum = the live worker inventory (stable within a
+        // session, so the tool schema stays cache-stable across steps).
+        const workerModelIds =
+          deps.executionRole === "orchestrator" ? await liveWorkerModelIds(deps.providerId) : undefined;
         const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
           planReviewBudget,
           executionRole: deps.executionRole,
           credentialedProvider: deps.providerId,
+          workerModelIds,
           taskContext,
           runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
           runDelegation: (request, abortSignal) =>
             deps.runDelegation(request, combineAbortSignals(signal, abortSignal)),
           readDelegation: (id, artifact) => deps.readDelegation(id, artifact),
           sendDelegation: deps.sendDelegation,
-          acknowledgeDelegation: deps.acknowledgeDelegation,
           acceptDelegation: deps.acceptDelegation,
           startCouncil: deps.startCouncil,
           startPlanReview: deps.startPlanReview,

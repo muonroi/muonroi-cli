@@ -93,7 +93,6 @@ export interface TurnRunnerDepsBase {
     signal?: AbortSignal,
     writeScope?: string[],
   ): Promise<ToolResult>;
-  acknowledgeDelegation?(id: string, resultVersion: string): Promise<ToolResult>;
   acceptDelegation?(input: import("../types/index.js").DelegationAcceptanceInput): Promise<ToolResult>;
   startCouncil?(input: { topic: string; reason: string; context: string; outputContract: string }): Promise<ToolResult>;
   startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];

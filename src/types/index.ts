@@ -58,6 +58,12 @@ export interface TaskRequest {
   allowedMcpTools?: string[];
   /** Workspace-relative file names, or recursive directories ending in '/'; [] is read-only. */
   writeScope?: string[];
+  /**
+   * Explicit choice of unscoped (shared, non-isolated) execution for an
+   * edit-capable worker that must run shell commands. Required instead of
+   * writeScope; omitting both is refused (workerWriteScopeRequiredError).
+   */
+  sharedExecution?: boolean;
   /** Return a durable background-worker receipt instead of waiting for completion. */
   background?: boolean;
 }

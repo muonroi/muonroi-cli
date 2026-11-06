@@ -97,3 +97,48 @@ describe("JobManager", () => {
     expect(jm.cancel("nonexistent")).toBe(false);
   });
 });
+
+describe("JobManager completion delivery (no polling)", () => {
+  it("waitFor resolves when the run finishes, and on timeout while it still runs", async () => {
+    const d = deferred<unknown>();
+    const jm = new JobManager(makeRunner({ tier1: () => d.promise }));
+    const runId = jm.start({ kind: "tier1" });
+    expect((await jm.waitFor(runId, undefined, 5))?.status).toBe("running");
+    const waiting = jm.waitFor(runId);
+    d.resolve({ summary: { passed: 3 } });
+    expect((await waiting)?.status).toBe("done");
+    expect(await jm.waitFor("unknown")).toBeUndefined();
+  });
+
+  it("waitFor returns on abort without cancelling the run", async () => {
+    const jm = new JobManager(makeRunner({ tier1: () => deferred<unknown>().promise }));
+    const runId = jm.start({ kind: "tier1" });
+    const ctrl = new AbortController();
+    const waiting = jm.waitFor(runId, ctrl.signal);
+    ctrl.abort();
+    expect((await waiting)?.status).toBe("running");
+  });
+
+  it("emits one completion notice per finished run, none for a reported or cancelled run", async () => {
+    const d1 = deferred<unknown>();
+    const d2 = deferred<unknown>();
+    const runs = [d1, d2, deferred<unknown>()];
+    let i = 0;
+    const jm = new JobManager(makeRunner({ tier1: () => runs[i++]!.promise }));
+    const first = jm.start({ kind: "tier1" });
+    const second = jm.start({ kind: "tier1" });
+    const third = jm.start({ kind: "tier1" });
+    expect(jm.consumeCompletionNotices()).toEqual([]);
+    d1.resolve({ summary: { passed: 1 } });
+    d2.resolve({ summary: { passed: 2 } });
+    await jm.waitFor(first);
+    await jm.waitFor(second);
+    jm.markReported(second);
+    jm.cancel(third);
+    const notices = jm.consumeCompletionNotices();
+    expect(notices).toHaveLength(1);
+    expect(notices[0]).toContain(`runId=${first}`);
+    expect(notices[0]).toContain(`selfverify_result({runId:"${first}"})`);
+    expect(jm.consumeCompletionNotices()).toEqual([]);
+  });
+});

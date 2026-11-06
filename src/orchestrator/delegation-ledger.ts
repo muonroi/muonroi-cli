@@ -85,7 +85,9 @@ export function formatDelegationLedger(
     ...(shownRunning.length > 0 ? shownRunning.map(runningLine) : ["- none"]),
   ];
   if (shownUnacked.length > 0) {
-    lines.push(`Finished, not yet acknowledged (${unacked.length}) — read with delegation_read, then delegation_ack:`);
+    lines.push(
+      `Finished, not yet processed (${unacked.length}) — read with delegation_read; the host acknowledges it after your turn:`,
+    );
     lines.push(...shownUnacked.map(unackedLine));
   }
   if (omitted > 0) lines.push(`… ${omitted} more — call delegation_list.`);

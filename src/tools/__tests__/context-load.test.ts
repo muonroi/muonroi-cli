@@ -36,7 +36,7 @@ describe("context_load discoverability and isolation", () => {
       expect(reference.content).toContain("runtime-only");
       expect(reference.content).not.toContain("TOOLS (call directly)");
       expect(reference.content).not.toContain("flow_execute");
-      expect(reference.content).toContain("native read_file and grep");
+      expect(reference.content).toContain("Native read_file and grep only read");
       expect(skills.note).toContain("Read the original");
       expect(skills.note).not.toContain("Delegate reading");
     } else {
