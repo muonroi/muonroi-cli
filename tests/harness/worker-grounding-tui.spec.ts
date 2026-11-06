@@ -81,6 +81,8 @@ describe("worker grounding TUI: an unsupported 'all tests pass' reaches the orch
             prompt: "implement the parser and report",
             modelId: "deepseek-v4-flash",
             background: false,
+            // An edit task must carry a writeScope or the host refuses the dispatch (M9).
+            writeScope: ["src/"],
           }),
           textRound("Noted the worker result."),
         ],
