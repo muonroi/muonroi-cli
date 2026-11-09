@@ -94,6 +94,7 @@ import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
 import {
   type BackgroundJobSnapshot,
+  isBackgroundAutoWakeEnabled,
   maxParallelBackgroundAgents,
   parallelLimitRefusal,
   providerCapacityNote,
@@ -214,6 +215,9 @@ import {
 import { DelegationManager, withoutInlineResults } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
+import { type AutopilotDecision, resolveAutopilotConfig } from "./ideal-autopilot.js";
+import { IdealAutopilotHost, type TurnEnd } from "./ideal-autopilot-host.js";
+import { collectSignals, spentSince } from "./ideal-autopilot-signals.js";
 import {
   formatIdealAbort,
   formatIdealStatus,
@@ -555,6 +559,7 @@ export class Agent {
   private unsavedIdealRun: IdealCoordinationRun | null = null;
   /** Workers stopped by /ideal abort: their cancellation notice is recorded, never a wake. */
   private readonly abortedIdealJobIds = new Set<string>();
+  private _idealAutopilot: IdealAutopilotHost | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -1244,6 +1249,8 @@ export class Agent {
   }
 
   abort(): void {
+    // Esc / Ctrl+C are the only callers: the user interrupted, so the /ideal autopilot yields.
+    this.yieldIdealAutopilot("user_interrupt");
     this.abortController?.abort();
     this.emitSubagentStatus(null);
   }
@@ -1859,6 +1866,90 @@ export class Agent {
     }
   }
 
+  /**
+   * Host autopilot of the open `/ideal` run: after a turn ends with the root goal
+   * still open, the UI asks `idealAutopilotAfterTurn` what to do and starts the
+   * next turn itself (ideal-autopilot.ts has the stop conditions).
+   */
+  private get idealAutopilot(): IdealAutopilotHost {
+    this._idealAutopilot ??= new IdealAutopilotHost({
+      cwd: () => this.bash.getCwd(),
+      sessionId: () => this.session?.id,
+      readRun: () => this.readIdealRun(),
+      writeRun: (run) => this.writeIdealRun(run),
+      jobs: (run) => this.idealRunJobs(run),
+      rootCompletion: () => this.idealRootCompletion(),
+      collectSignals,
+      spentSince,
+      config: () => resolveAutopilotConfig(process.env, loadUserSettings().idealAutopilot),
+      autoWake: () => isBackgroundAutoWakeEnabled(),
+      emit: (event) => {
+        try {
+          (
+            globalThis as Record<string, unknown> as { __muonroiAgentRuntime?: { emitEvent: (e: unknown) => void } }
+          ).__muonroiAgentRuntime?.emitEvent(event);
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal autopilot: LiveEvent emit failed", {
+            kind: String(event.kind),
+            error: String(err),
+          });
+        }
+      },
+      now: () => new Date(),
+      log: {
+        info: (msg, ctx) => logger.info("orchestrator", msg, ctx),
+        warn: (msg, ctx) => logger.warn("orchestrator", msg, ctx),
+        error: (msg, ctx) => logger.error("orchestrator", msg, ctx),
+      },
+    });
+    return this._idealAutopilot;
+  }
+
+  /**
+   * Whether the pinned root goal is complete: `root_status=complete` on the
+   * working ledger and, when this session owns a native FLOW plan, a recorded
+   * `flow_verify` pass — the same two facts the ledger's own completion gate
+   * required when the claim was accepted (working-context.ts).
+   */
+  private async idealRootCompletion(): Promise<{ complete: boolean; verification: string | null; openItems: number }> {
+    const sessionId = this.session?.id;
+    if (!sessionId) return { complete: false, verification: null, openItems: 0 };
+    const [{ WorkingContext }, { ownedCompletionScope }] = await Promise.all([
+      import("./working-context.js"),
+      import("./completion-scope.js"),
+    ]);
+    const cwd = this.bash.getCwd();
+    const ledger = new WorkingContext(sessionId, cwd, this.messages).snapshot();
+    const facts = ownedCompletionScope(cwd, sessionId, "orchestrator", false);
+    const verification = facts?.implementationVerification ?? null;
+    const rootClosed = ledger.root_goal.trim() !== "" && ledger.root_status === "complete";
+    return {
+      complete: rootClosed && (verification === null || verification === "recorded_pass"),
+      verification,
+      openItems: ledger.root_status === "open" ? ledger.open_items.filter((i) => i.trim()).length : 0,
+    };
+  }
+
+  /**
+   * A turn of the run ended. Returns what the host does next (`continue` carries
+   * the prompt and transcript label for the next turn). `none` for any session
+   * without an armed autopilot, so the UI can call this after every turn.
+   */
+  async idealAutopilotAfterTurn(turn: TurnEnd): Promise<AutopilotDecision> {
+    if (this.executionRole !== "orchestrator") return { action: "none" };
+    return this.idealAutopilot.afterTurn(turn);
+  }
+
+  /** True while the host would start another `/ideal` turn by itself. */
+  isIdealAutopilotRunning(): boolean {
+    return this.executionRole === "orchestrator" && this.idealAutopilot.isRunning();
+  }
+
+  /** The user acted (Esc, a typed message): the autopilot yields. No-op when none is running. */
+  yieldIdealAutopilot(reason: "user_message" | "user_interrupt"): void {
+    if (this.executionRole === "orchestrator") this.idealAutopilot.yieldTo(reason);
+  }
+
   /** `/ideal status` for the orchestrator role: host state only, no model call. */
   async renderIdealCoordinationStatus(): Promise<string> {
     const { readState } = await import("../workflow/workflow-engine.js");
@@ -1884,7 +1975,14 @@ export class Agent {
         return `/ideal status: cannot read the worker ledger: ${err instanceof Error ? err.message : String(err)}\n`;
       }
     }
-    return formatIdealStatus({ run, jobs, flow, now: new Date() });
+    const now = new Date();
+    return formatIdealStatus({
+      run,
+      jobs,
+      flow,
+      now,
+      autopilotLine: run ? this.idealAutopilot.statusLine(run, now) : null,
+    });
   }
 
   /**
@@ -1900,6 +1998,8 @@ export class Agent {
       return `/ideal abort: cannot read the run record, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
     }
     if (!run) return formatIdealAbort({ run: null, outcomes: [], finished: 0 });
+    // First, so no continuation can start while the workers are being stopped.
+    this.idealAutopilot.yieldTo("user_abort");
     let jobs: IdealJob[];
     try {
       jobs = await this.idealRunJobs(run);
@@ -3907,10 +4007,18 @@ export class Agent {
       }
       const goal = payload.idea?.trim();
       if (payload.subcommand === "start") {
-        const saved = this.writeIdealRun({
+        // Arming persists the record (with the autopilot state) in one write.
+        const run = await this.idealAutopilot.arm({
           goal: goal || "(the current conversation's goal)",
           startedAt: new Date().toISOString(),
         });
+        let saved = true;
+        try {
+          saved = this.readIdealRun()?.startedAt === run.startedAt;
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal: run record unreadable after saving", { error: String(err) });
+          saved = false;
+        }
         if (!saved) {
           yield {
             type: "content",
@@ -3918,6 +4026,17 @@ export class Agent {
               "Warning: the /ideal run record could not be saved; /ideal status and /ideal abort will not find this run after a restart.\n",
           };
         }
+      } else if (payload.subcommand === "resume") {
+        // The user re-authorises the run: a fresh budget window, the turn count carries on.
+        let open: IdealCoordinationRun | null = null;
+        try {
+          open = this.readIdealRun();
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal resume: run record unreadable; autopilot not re-armed", {
+            error: String(err),
+          });
+        }
+        if (open) await this.idealAutopilot.arm(open, open.autopilot);
       }
       let councilReceipt = "";
       if (payload.flags.forceCouncil) {
@@ -3934,14 +4053,28 @@ export class Agent {
           content: receipt.output ?? receipt.error ?? "Council launch failed.",
         };
       }
+      // The host runs the loop (ideal-autopilot.ts): it starts the next turn while
+      // the root goal is open, so this prompt states the task and the fact that the
+      // host continues — it does not ask the model to keep going.
+      let autopilotNote = "";
+      try {
+        if (this.readIdealRun()?.autopilot?.status === "running")
+          autopilotNote =
+            "\nHost autopilot is on: while the root goal is open the host starts your next turn itself; it stops when root_status=complete is accepted (needs a recorded flow_verify pass), at a budget limit, or when you ask the user.";
+      } catch (err) {
+        logger.warn("orchestrator", "/ideal: run record unreadable for the autopilot note", { error: String(err) });
+      }
       yield* this.processMessage(
-        `Coordinate the user's /ideal ${payload.subcommand} request using planning tools and explicit bounded workers, followed by independent review. Do not run the legacy self-implementing product loop.\n` +
+        `Coordinate the user's /ideal ${payload.subcommand} request using planning tools and explicit bounded workers, followed by independent review.\n` +
           `Request: ${JSON.stringify({ subcommand: payload.subcommand, runId: payload.runId, flags: payload.flags })}\n` +
           (goal
             ? `User goal (preserve its language and scope):\n${goal}`
             : "Use the current conversation's goal; ask the user only if it is missing.") +
+          autopilotNote +
           councilReceipt,
         options?.observer,
+        undefined,
+        { idealAutopilotOwner: true },
       );
       return;
     }
@@ -4890,11 +5023,23 @@ export class Agent {
     userMessage: string,
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
-    turnOptions?: { internalActivity?: boolean },
+    turnOptions?: {
+      /** Host-started and hidden from the transcript (background wake). */
+      internalActivity?: boolean;
+      /** Host-started `/ideal` autopilot turn: visible in the transcript, not the user's. */
+      autopilotContinuation?: boolean;
+      /** `/ideal start|resume` itself: the user's turn, which owns the autopilot it just armed. */
+      idealAutopilotOwner?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown> {
-    // A background wake is not new user authorization to buy more reviews.
-    // Keep the same owner/cwd allowance across these internal continuations.
-    if (!turnOptions?.internalActivity) this._planReviewAllowance = undefined;
+    // The user always wins: a message they typed stops the /ideal autopilot. Host
+    // turns (background wake, autopilot continuation) are not the user, and
+    // `/ideal start|resume` own the autopilot they just armed.
+    if (!turnOptions?.internalActivity && !turnOptions?.autopilotContinuation && !turnOptions?.idealAutopilotOwner)
+      this.yieldIdealAutopilot("user_message");
+    // A background wake / autopilot continuation is not new user authorization to
+    // buy more reviews. Keep the same owner/cwd allowance across these host turns.
+    if (!turnOptions?.internalActivity && !turnOptions?.autopilotContinuation) this._planReviewAllowance = undefined;
     else if (this._planReviewAllowance) this._planReviewAllowance.budget.stopRequested = false;
     const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
     const currentChars = this.estimateConversationChars();

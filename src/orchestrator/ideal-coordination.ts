@@ -13,6 +13,7 @@
  * ledger. Pure formatting lives here so it is unit-testable; the orchestrator
  * owns the I/O (ledger read, kill).
  */
+import type { PersistedAutopilot } from "../storage/transcript.js";
 import type { DelegationStatus } from "../types/index.js";
 
 /** The `/ideal start` the orchestrator is coordinating in this session. */
@@ -20,6 +21,8 @@ export interface IdealCoordinationRun {
   goal: string;
   /** ISO timestamp; every delegation started at or after it belongs to the run. */
   startedAt: string;
+  /** Host autopilot state (ideal-autopilot.ts); absent when the run was started with the autopilot off. */
+  autopilot?: PersistedAutopilot;
 }
 
 /** The subset of a delegation ledger entry the status/abort views need. */
@@ -73,6 +76,8 @@ export function formatIdealStatus(input: {
   jobs: readonly IdealJob[];
   flow: IdealFlowView;
   now: Date;
+  /** `Autopilot: …` line from IdealAutopilotHost.statusLine; omitted when there is nothing to say. */
+  autopilotLine?: string | null;
 }): string {
   const lines: string[] = ["/ideal status (local — no model call)"];
   if (!input.run) {
@@ -80,6 +85,7 @@ export function formatIdealStatus(input: {
   } else {
     lines.push(`Goal: ${input.run.goal}`);
     lines.push(`Started: ${input.run.startedAt} (${elapsed(input.run.startedAt, input.now)} ago)`);
+    if (input.autopilotLine) lines.push(input.autopilotLine);
   }
   lines.push(
     input.flow.exists

@@ -205,6 +205,12 @@ export interface UserSettings {
   agentFirst?: boolean;
   /** Custom soft limit on the number of tool execution steps before pausing. */
   maxToolRounds?: number;
+  /**
+   * Host autopilot of an orchestrator-role `/ideal` run (orchestrator/ideal-autopilot.ts):
+   * after a turn ends with the root goal still open, the host starts the next
+   * turn itself. Env `MUONROI_IDEAL_AUTOPILOT*` overrides each field.
+   */
+  idealAutopilot?: import("../orchestrator/ideal-autopilot.js").IdealAutopilotSettings;
   /** Custom hard limit on the number of tool execution steps per turn. */
   hardMaxToolRounds?: number;
   /** Custom limit on the number of LLM call round-trips allowed in a single turn. */

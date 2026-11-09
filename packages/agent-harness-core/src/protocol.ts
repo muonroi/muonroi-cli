@@ -562,6 +562,31 @@ export type LiveEvent =
       dropped: number;
       ts: number;
     }
+  // The host autopilot of an orchestrator-role `/ideal` run
+  // (src/orchestrator/ideal-autopilot.ts). Without it the host starting a turn
+  // by itself looked, to a driver, like the model spontaneously speaking:
+  //  - `start`    — armed by `/ideal start` / `/ideal resume`
+  //  - `continue` — the host is starting turn `turn` of `maxTurns` (no human message)
+  //  - `wait`     — turn ended with workers running; their result wakes the model
+  //  - `stop`     — the host will not start another turn; `reason` is the stable
+  //                 stop code (complete | budget_turns | budget_cost | budget_wall |
+  //                 no_progress | user_message | user_interrupt | user_abort |
+  //                 needs_human | autowake_off | error). A terminal `stop` is
+  //                 followed by the run's `run-finished`.
+  | {
+      t: "event";
+      kind: "ideal-autopilot";
+      action: "start" | "continue" | "wait" | "stop";
+      /** Host-started turns in the current budget window (the turn being started, for `continue`). */
+      turn: number;
+      maxTurns: number;
+      noProgressStreak: number;
+      /** Stop code; set only on `stop`. */
+      reason?: string;
+      /** USD spent in the window as of this event; null when unmeasurable. */
+      spentUsd: number | null;
+      ts: number;
+    }
   | { t: "idle" };
 
 /** The `kind` discriminant of every non-sentinel {@link LiveEvent} member. */
@@ -608,6 +633,7 @@ export const LIVE_EVENT_KINDS = [
   "steer-inject",
   "resume-request",
   "input-ready",
+  "ideal-autopilot",
 ] as const;
 
 /** Fails to compile unless `T` is `never`. */

@@ -96,7 +96,11 @@ describe("harness-driver capabilities", () => {
     // Pinned by name — without it a card a driver saw open but that the run
     // stopped listening to looks identical to one still genuinely pending.
     expect(eventKinds).toContain("askcard-withdrawn");
-    expect(eventKinds.length).toBe(27);
+    // 27 → 28 when ideal-autopilot was added: the host (not the model) starting and
+    // stopping /ideal turns. Pinned by name — without it a host-started turn looks
+    // like the model speaking unprompted, and the stop reason is invisible.
+    expect(eventKinds).toContain("ideal-autopilot");
+    expect(eventKinds.length).toBe(28);
   });
 
   it("advertises the role vocabulary and the custom-role prefix", () => {

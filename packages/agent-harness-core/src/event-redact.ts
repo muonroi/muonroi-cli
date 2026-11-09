@@ -197,6 +197,18 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     dropped: "pass",
     ts: "pass",
   },
+  // Counters, an enum action, a stable stop code and a spend figure — no prompt
+  // or model output. Without this entry the fail-safe below would strip the
+  // event to {t, kind}, hiding the stop reason a driver needs.
+  "ideal-autopilot": {
+    action: "pass",
+    turn: "pass",
+    maxTurns: "pass",
+    noProgressStreak: "pass",
+    reason: "pass",
+    spentUsd: "pass",
+    ts: "pass",
+  },
   toast: {
     level: "pass",
     text: 500, // cap to 500 chars, then scrub

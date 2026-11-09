@@ -115,9 +115,13 @@ describe("flow workflow tools registry", () => {
         );
         for (const reference of advertised) expect(inventory).toContain(reference);
       }
-      expect(tools.flow_execute).toBeUndefined();
-      expect(tools.flow_verify).toBeUndefined();
-      expect(tools.flow_ship).toBeUndefined();
+      // The orchestrator records phase transitions and verification itself (session
+      // 55c5b65b6938 could not close a run without flow_verify); workers never get them.
+      for (const name of ["flow_execute", "flow_verify", "flow_ship"]) {
+        expect(tools[name], name).toBeDefined();
+        const advertised = tools[name]?.description?.match(/\bflow_[a-z_]+\b/g) ?? [];
+        for (const reference of advertised) expect(inventory).toContain(reference);
+      }
       expect(existsSync(planningArtifact(tmp, "STATE.md"))).toBe(false);
     } finally {
       await bash.cleanup();
