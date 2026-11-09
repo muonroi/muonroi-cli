@@ -223,6 +223,8 @@ describe("/ideal host autopilot", { retry: 0 }, () => {
 
     await run.submit(`/ideal ${GOAL}`);
     await run.ctx.driver.wait_for({ event: "run-finished", timeoutMs: 240_000 });
+    // The collector iterates the event stream asynchronously; wait until it has seen the event.
+    expect(await until(() => run.finished() !== undefined, 15_000)).toBe(true);
 
     const finished = run.finished()!;
     expect(finished).toMatchObject({ outcome: "approved", success: true, reason: "complete" });
@@ -271,6 +273,8 @@ describe("/ideal host autopilot", { retry: 0 }, () => {
 
     await run.submit(`/ideal ${GOAL}`);
     await run.ctx.driver.wait_for({ event: "run-finished", timeoutMs: 240_000 });
+    // The collector iterates the event stream asynchronously; wait until it has seen the event.
+    expect(await until(() => run.finished() !== undefined, 15_000)).toBe(true);
 
     const finished = run.finished()!;
     expect(finished).toMatchObject({ outcome: "halted", success: false, reason: "no_progress" });
@@ -312,6 +316,7 @@ describe("/ideal host autopilot", { retry: 0 }, () => {
     const stops = () => run.autopilot().filter((e) => e.action === "stop");
     expect(await until(() => stops().length > 0, 20_000)).toBe(true);
     expect(stops()[0]).toMatchObject({ reason: "user_message" });
+    expect(await until(() => run.finished() !== undefined, 15_000)).toBe(true);
     expect(run.finished()).toMatchObject({ outcome: "halted", reason: "user_message" });
 
     // No host turn after the user's: the call count settles at the answer.
