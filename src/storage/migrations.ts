@@ -2,42 +2,74 @@ import type { SQLiteDatabase } from "./db";
 
 const LATEST_DB_VERSION = 11;
 
-export function applyMigrations(db: SQLiteDatabase): void {
-  const version = Number(db.pragma("user_version", { simple: true })) || 0;
-  if (version >= LATEST_DB_VERSION) return;
+function readUserVersion(db: SQLiteDatabase): number {
+  return Number(db.pragma("user_version", { simple: true })) || 0;
+}
 
-  const migrate = db.transaction(() => {
-    if (version < 1) {
-      createInitialSchema(db);
-      db.pragma("user_version = 1");
+/**
+ * Bring the schema to LATEST_DB_VERSION. Safe when several processes open the
+ * same fresh DB at once: the version is re-read only after `BEGIN IMMEDIATE`
+ * holds the write lock (waiting up to the connection's busy_timeout), so a
+ * process that lost the race sees the winner's committed version and skips.
+ *
+ * Measured: tests/integration/headless-exit-code.test.ts spawns three CLIs on
+ * one fresh DB; with the version read outside a DEFERRED transaction, two of
+ * them both saw version 0 and the loser replayed v3's ALTER —
+ * "SQLiteError: duplicate column name: pil_active" (migrations.ts v3), no
+ * answer on stdout. Reproduced in 2 of 6 concurrent runs.
+ */
+export function applyMigrations(db: SQLiteDatabase): void {
+  if (readUserVersion(db) >= LATEST_DB_VERSION) return;
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const version = readUserVersion(db);
+    if (version < LATEST_DB_VERSION) migrateFrom(db, version);
+    db.exec("COMMIT");
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch (rollbackErr) {
+      console.error(
+        `[storage/migrations] rollback after a failed migration also failed: ${(rollbackErr as Error).message}`,
+      );
     }
-    if (version < 2) {
-      createCompactionSchema(db);
-      db.pragma("user_version = 2");
-    }
-    if (version < 3) {
-      db.exec(`
+    throw err;
+  }
+}
+
+function migrateFrom(db: SQLiteDatabase, version: number): void {
+  if (version < 1) {
+    createInitialSchema(db);
+    db.pragma("user_version = 1");
+  }
+  if (version < 2) {
+    createCompactionSchema(db);
+    db.pragma("user_version = 2");
+  }
+  if (version < 3) {
+    db.exec(`
         ALTER TABLE usage_events ADD COLUMN pil_active INTEGER NOT NULL DEFAULT 0;
         ALTER TABLE usage_events ADD COLUMN enrichment_delta INTEGER NOT NULL DEFAULT 0;
       `);
-      db.pragma("user_version = 3");
+    db.pragma("user_version = 3");
+  }
+  if (version < 4) {
+    // cache_read_tokens / cache_creation_tokens may already exist if the DB
+    // was created with the v1 schema that includes them inline.  Only add
+    // when missing to avoid "duplicate column name" errors.
+    const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("cache_read_tokens")) {
+      db.exec("ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0");
     }
-    if (version < 4) {
-      // cache_read_tokens / cache_creation_tokens may already exist if the DB
-      // was created with the v1 schema that includes them inline.  Only add
-      // when missing to avoid "duplicate column name" errors.
-      const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
-      const colNames = new Set(cols.map((c) => c.name));
-      if (!colNames.has("cache_read_tokens")) {
-        db.exec("ALTER TABLE usage_events ADD COLUMN cache_read_tokens INTEGER NOT NULL DEFAULT 0");
-      }
-      if (!colNames.has("cache_creation_tokens")) {
-        db.exec("ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0");
-      }
-      db.pragma("user_version = 4");
+    if (!colNames.has("cache_creation_tokens")) {
+      db.exec("ALTER TABLE usage_events ADD COLUMN cache_creation_tokens INTEGER NOT NULL DEFAULT 0");
     }
-    if (version < 5) {
-      db.exec(`
+    db.pragma("user_version = 4");
+  }
+  if (version < 5) {
+    db.exec(`
         CREATE TABLE IF NOT EXISTS interaction_logs (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -56,51 +88,51 @@ export function applyMigrations(db: SQLiteDatabase): void {
         CREATE INDEX IF NOT EXISTS idx_interaction_logs_event_type
           ON interaction_logs(event_type, created_at DESC);
       `);
-      db.pragma("user_version = 5");
+    db.pragma("user_version = 5");
+  }
+  if (version < 6) {
+    // Phase O1 — record the SHAPE (not values) of providerOptions sent
+    // to streamText alongside each usage event. Enables post-mortem of
+    // "did this call carry store=true / promptCacheKey?" without
+    // leaking key material into the DB.
+    const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("provider_options_shape")) {
+      db.exec("ALTER TABLE usage_events ADD COLUMN provider_options_shape TEXT");
     }
-    if (version < 6) {
-      // Phase O1 — record the SHAPE (not values) of providerOptions sent
-      // to streamText alongside each usage event. Enables post-mortem of
-      // "did this call carry store=true / promptCacheKey?" without
-      // leaking key material into the DB.
-      const cols = db.prepare("PRAGMA table_info(usage_events)").all() as Array<{ name: string }>;
-      const colNames = new Set(cols.map((c) => c.name));
-      if (!colNames.has("provider_options_shape")) {
-        db.exec("ALTER TABLE usage_events ADD COLUMN provider_options_shape TEXT");
-      }
-      db.pragma("user_version = 6");
+    db.pragma("user_version = 6");
+  }
+  if (version < 7) {
+    // Phase A5 — write-ahead persistence for assistant/user messages.
+    //
+    // `messages.status` carries the lifecycle of a row:
+    //   - 'pending'    — write-ahead INSERT before streamText fires; lets
+    //                    `recordUsage` resolve a real message_seq even when
+    //                    invoked mid-stream (was NULL → forensics anomaly).
+    //   - 'completed'  — turn settled, full message_json materialized.
+    //   - 'errored'    — stream threw mid-flight; row left with whatever
+    //                    partial content was captured.
+    //
+    // Nullable for back-compat: pre-A5 rows (legacy 'completed' state) read
+    // back as NULL and forensics treats NULL as 'completed'.
+    const cols = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("status")) {
+      db.exec("ALTER TABLE messages ADD COLUMN status TEXT");
     }
-    if (version < 7) {
-      // Phase A5 — write-ahead persistence for assistant/user messages.
-      //
-      // `messages.status` carries the lifecycle of a row:
-      //   - 'pending'    — write-ahead INSERT before streamText fires; lets
-      //                    `recordUsage` resolve a real message_seq even when
-      //                    invoked mid-stream (was NULL → forensics anomaly).
-      //   - 'completed'  — turn settled, full message_json materialized.
-      //   - 'errored'    — stream threw mid-flight; row left with whatever
-      //                    partial content was captured.
-      //
-      // Nullable for back-compat: pre-A5 rows (legacy 'completed' state) read
-      // back as NULL and forensics treats NULL as 'completed'.
-      const cols = db.prepare("PRAGMA table_info(messages)").all() as Array<{ name: string }>;
-      const colNames = new Set(cols.map((c) => c.name));
-      if (!colNames.has("status")) {
-        db.exec("ALTER TABLE messages ADD COLUMN status TEXT");
-      }
-      db.pragma("user_version = 7");
+    db.pragma("user_version = 7");
+  }
+  if (version < 8) {
+    const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("parent_session_id")) {
+      db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL");
     }
-    if (version < 8) {
-      const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
-      const colNames = new Set(cols.map((c) => c.name));
-      if (!colNames.has("parent_session_id")) {
-        db.exec("ALTER TABLE sessions ADD COLUMN parent_session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL");
-      }
-      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent_id ON sessions(parent_session_id)");
-      db.pragma("user_version = 8");
-    }
-    if (version < 9) {
-      db.exec(`
+    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent_id ON sessions(parent_session_id)");
+    db.pragma("user_version = 8");
+  }
+  if (version < 9) {
+    db.exec(`
         CREATE VIRTUAL TABLE IF NOT EXISTS session_history_fts USING fts5(
           session_id UNINDEXED,
           seq UNINDEXED,
@@ -117,41 +149,38 @@ export function applyMigrations(db: SQLiteDatabase): void {
           DELETE FROM session_history_fts WHERE session_id = old.id;
         END;
       `);
-      db.pragma("user_version = 9");
+    db.pragma("user_version = 9");
+  }
+  if (version < 10) {
+    // Thread-aware resume. The resume picker groups sessions by conversation
+    // tree; `kind` distinguishes the two kinds of child (both previously only
+    // set parent_session_id, indistinguishable) and `root_session_id`
+    // denormalizes the tree root so the picker groups without a recursive CTE.
+    const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+    const colNames = new Set(cols.map((c) => c.name));
+    if (!colNames.has("kind")) {
+      db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation'");
     }
-    if (version < 10) {
-      // Thread-aware resume. The resume picker groups sessions by conversation
-      // tree; `kind` distinguishes the two kinds of child (both previously only
-      // set parent_session_id, indistinguishable) and `root_session_id`
-      // denormalizes the tree root so the picker groups without a recursive CTE.
-      const cols = db.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
-      const colNames = new Set(cols.map((c) => c.name));
-      if (!colNames.has("kind")) {
-        db.exec("ALTER TABLE sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'conversation'");
-      }
-      if (!colNames.has("root_session_id")) {
-        db.exec("ALTER TABLE sessions ADD COLUMN root_session_id TEXT");
-      }
-      db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(workspace_id, root_session_id)");
-
-      backfillSessionTrees(db);
-
-      db.pragma("user_version = 10");
+    if (!colNames.has("root_session_id")) {
+      db.exec("ALTER TABLE sessions ADD COLUMN root_session_id TEXT");
     }
-    if (version < 11) {
-      // Durable compaction shrink: the host budget pass (compaction-budget.ts)
-      // shrinks / drops retained messages in memory; this column carries the
-      // deterministic spec that reproduces the same bounded view on reload.
-      const cols = db.prepare("PRAGMA table_info(compactions)").all() as Array<{ name: string }>;
-      // cols is empty only for a hand-built partial schema; every real DB got the table at v2.
-      if (cols.length > 0 && !cols.some((c) => c.name === "shrink_json")) {
-        db.exec("ALTER TABLE compactions ADD COLUMN shrink_json TEXT");
-      }
-      db.pragma("user_version = 11");
-    }
-  });
+    db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_root ON sessions(workspace_id, root_session_id)");
 
-  migrate();
+    backfillSessionTrees(db);
+
+    db.pragma("user_version = 10");
+  }
+  if (version < 11) {
+    // Durable compaction shrink: the host budget pass (compaction-budget.ts)
+    // shrinks / drops retained messages in memory; this column carries the
+    // deterministic spec that reproduces the same bounded view on reload.
+    const cols = db.prepare("PRAGMA table_info(compactions)").all() as Array<{ name: string }>;
+    // cols is empty only for a hand-built partial schema; every real DB got the table at v2.
+    if (cols.length > 0 && !cols.some((c) => c.name === "shrink_json")) {
+      db.exec("ALTER TABLE compactions ADD COLUMN shrink_json TEXT");
+    }
+    db.pragma("user_version = 11");
+  }
 }
 
 /**

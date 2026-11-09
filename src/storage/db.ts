@@ -69,9 +69,13 @@ export function getDatabase(): SQLiteDatabase {
   if (db) return db;
 
   const database = loadDriver(getDatabasePath());
+  // busy_timeout FIRST: switching a fresh DB to WAL takes an exclusive lock, and
+  // without a timeout a second process opening the same DB at that moment fails
+  // at once with SQLITE_BUSY (migrations-concurrent.test.ts: "database is locked"
+  // from the journal_mode pragma when it ran before busy_timeout).
+  database.pragma("busy_timeout = 5000");
   database.pragma("journal_mode = WAL");
   database.pragma("foreign_keys = ON");
-  database.pragma("busy_timeout = 5000");
   database.pragma("synchronous = NORMAL");
   applyMigrations(database);
   db = database;
