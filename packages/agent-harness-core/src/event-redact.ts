@@ -109,6 +109,13 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     phase: "pass",
     optionCount: "pass",
     defaultIndex: "pass",
+    // Approval-card fields (source/toolName/toolCallId/jobId are machine ids;
+    // preview is tool input, so it is capped + scrubbed like `question`).
+    source: "pass",
+    toolName: "pass",
+    toolCallId: "pass",
+    jobId: "pass",
+    preview: 300,
   },
   "askcard-answered": {
     questionId: "pass",

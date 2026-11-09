@@ -92,6 +92,20 @@ async function waitForRendered(handle: CostLeakHarness, text: string, timeoutMs:
   return false;
 }
 
+async function waitForEvent(
+  handle: CostLeakHarness,
+  kind: "askcard-open" | "askcard-answered",
+  timeoutMs: number,
+): Promise<ReturnType<CostLeakHarness["driver"]["last_event"]>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const e = handle.driver.last_event(kind);
+    if (e) return e;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return undefined;
+}
+
 async function driveToApprovalCard(): Promise<CostLeakHarness> {
   process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "1000000";
   process.env.MUONROI_CROSS_TURN_DEDUP = "0";
@@ -149,6 +163,38 @@ describe("safe mode: orchestrator read_file approval continues the same turn", (
     handle?.cleanup();
     handle = null;
   });
+
+  it("announces the approval card as askcard-open (waiting-on-human), then askcard-answered on Allow", async () => {
+    handle = await driveToApprovalCard();
+    // Documented "waiting on a human" signal (HARNESS-GUIDE "Observing a live
+    // run"): a driver must see it for the approval card, not only for questions.
+    // The event may land before or after the card's selector turns up, so poll
+    // the driver's event ring rather than wait_for (which only sees new events).
+    const opened = await waitForEvent(handle, "askcard-open", 10_000);
+    expect(opened, "no askcard-open event for the tool approval card").toBeDefined();
+    expect(opened).toMatchObject({
+      kind: "askcard-open",
+      source: "tool-approval",
+      phase: "tool-approval",
+      toolName: "read_file",
+      toolCallId: CALL_ID,
+      optionCount: 2,
+      defaultIndex: 0,
+      questionId: `tool-approval-${CALL_ID}`,
+    });
+    expect((opened as { preview?: string }).preview).toContain(SAMPLE_REL);
+
+    handle.driver.press("Enter"); // option 0 = allow
+    const answered = await waitForEvent(handle, "askcard-answered", 10_000);
+    expect(answered, "no askcard-answered event after Allow").toBeDefined();
+    expect(answered).toMatchObject({
+      questionId: `tool-approval-${CALL_ID}`,
+      answerKind: "choice",
+      answerText: "allow",
+    });
+    const finished = await waitForRendered(handle, FINAL_TEXT, 30_000);
+    expect(finished, "the model's final answer never rendered").toBe(true);
+  }, 180_000);
 
   it("approve → read_file executes, its result reaches the model, the turn finishes", async () => {
     handle = await driveToApprovalCard();

@@ -374,6 +374,12 @@ sprint planning legitimately runs ~12 minutes writing zero rows, so a poller
 tuned to catch the modal false-positives on normal work. Use the DB for
 post-hoc forensics (per-speaker `duration_ms`, usage), never for liveness.
 
+`askcard-open` covers permission approvals too: in `--permission safe` the main
+agent's read_file/grep (and any worker approval) opens the "Tool approval" card and
+emits `askcard-open` with `source: "tool-approval" | "worker-approval"`, `toolName`
+and `preview`. A driver that answers `askcard-open` with Enter (default = Allow once,
+e.g. `scripts/bench/replay-tcis.ts`) therefore proceeds instead of sitting on the card.
+
 `/ideal` reliably stops at the **"Approve discussion plan"** askcard between
 scoping and sprint 1. That is a fixed human-wait point, not a hang.
 
