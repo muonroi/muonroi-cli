@@ -373,6 +373,14 @@ export interface ChatEntry {
   content: string;
   /** Host-owned display metadata; raw content remains available to main/export. */
   internal?: boolean;
+  /**
+   * Host-local output (`/help`, `/skills`, `/ideal status`, …): rendered by the
+   * TUI without a model call, so it is never saved to the session history and
+   * never reaches the model. The end-of-turn transcript rebuild from saved
+   * history (`mergeLocalEntries`) re-inserts these by timestamp instead of
+   * dropping them.
+   */
+  local?: boolean;
   timestamp: Date;
   modeColor?: string;
   remoteKey?: string;

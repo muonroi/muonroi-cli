@@ -53,6 +53,7 @@ import {
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLastIdealRun,
   getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionChainInfos,
@@ -63,6 +64,7 @@ import {
   markLatestPendingMessageErrored,
   markMessageCompleted,
   persistApprovedPlan,
+  persistIdealRun,
   recordUsageEvent,
   SessionStore,
   sessionUsedFlowWorkflow,
@@ -534,8 +536,13 @@ export class Agent {
    * dispatches runProductLoopV1, streaming its chunks and clearing the flag.
    */
   private _pendingEnterIdeal: { idea: string } | null = null;
-  /** The `/ideal start` this orchestrator is coordinating; read by local status/abort. */
-  private idealCoordinationRun: IdealCoordinationRun | null = null;
+  /**
+   * The `/ideal start` this orchestrator is coordinating, ONLY for an agent with
+   * no session store (`persistSession: false`). With a session the run record
+   * lives in the session's saved history (`persistIdealRun`), so it survives a
+   * restart/resume and cannot leak into another session — see `readIdealRun`.
+   */
+  private unsavedIdealRun: IdealCoordinationRun | null = null;
   /** Workers stopped by /ideal abort: their cancellation notice is recorded, never a wake. */
   private readonly abortedIdealJobIds = new Set<string>();
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
@@ -1783,10 +1790,27 @@ export class Agent {
     return this.delegations.decideApproval(request, approved);
   }
 
-  /** Delegations of the current `/ideal` run, oldest first; [] without a run. */
-  private async idealRunJobs(): Promise<IdealJob[]> {
-    const run = this.idealCoordinationRun;
-    if (!run) return [];
+  /**
+   * The session's open `/ideal` run. Read from saved history on every call, not
+   * cached: the record then follows the session across restart/resume, and a
+   * `/new` session in the same process starts with none. Throws when the
+   * session store cannot be read.
+   */
+  private readIdealRun(): IdealCoordinationRun | null {
+    return this.session ? getLastIdealRun(this.session.id) : this.unsavedIdealRun;
+  }
+
+  /** Record (or, with null, close) the run. Returns false when it could not be saved. */
+  private writeIdealRun(run: IdealCoordinationRun | null): boolean {
+    if (!this.session) {
+      this.unsavedIdealRun = run;
+      return true;
+    }
+    return persistIdealRun(this.session.id, run);
+  }
+
+  /** Delegations of `run`, oldest first. */
+  private async idealRunJobs(run: IdealCoordinationRun): Promise<IdealJob[]> {
     try {
       return jobsOfIdealRun(run, await this.delegations.ledgerSnapshot());
     } catch (err) {
@@ -1806,13 +1830,21 @@ export class Agent {
     } catch (err) {
       logger.warn("orchestrator", "/ideal status: FLOW state unreadable", { cwd, error: String(err) });
     }
-    let jobs: IdealJob[];
+    let run: IdealCoordinationRun | null;
     try {
-      jobs = await this.idealRunJobs();
+      run = this.readIdealRun();
     } catch (err) {
-      return `/ideal status: cannot read the worker ledger: ${err instanceof Error ? err.message : String(err)}\n`;
+      return `/ideal status: cannot read the run record: ${err instanceof Error ? err.message : String(err)}\n`;
     }
-    return formatIdealStatus({ run: this.idealCoordinationRun, jobs, flow, now: new Date() });
+    let jobs: IdealJob[] = [];
+    if (run) {
+      try {
+        jobs = await this.idealRunJobs(run);
+      } catch (err) {
+        return `/ideal status: cannot read the worker ledger: ${err instanceof Error ? err.message : String(err)}\n`;
+      }
+    }
+    return formatIdealStatus({ run, jobs, flow, now: new Date() });
   }
 
   /**
@@ -1821,11 +1853,16 @@ export class Agent {
    * so a later status no longer reports it. No model call.
    */
   async abortIdealCoordination(): Promise<string> {
-    const run = this.idealCoordinationRun;
+    let run: IdealCoordinationRun | null;
+    try {
+      run = this.readIdealRun();
+    } catch (err) {
+      return `/ideal abort: cannot read the run record, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
     if (!run) return formatIdealAbort({ run: null, outcomes: [], finished: 0 });
     let jobs: IdealJob[];
     try {
-      jobs = await this.idealRunJobs();
+      jobs = await this.idealRunJobs(run);
     } catch (err) {
       return `/ideal abort: cannot read the worker ledger, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
     }
@@ -1842,13 +1879,15 @@ export class Agent {
       }
       outcomes.push({ id: job.id, success: result.success, output: result.output ?? result.error ?? "" });
     }
-    this.idealCoordinationRun = null;
+    const closed = this.writeIdealRun(null);
     logger.info("orchestrator", "/ideal abort: run closed", {
       goal: run.goal,
+      closed,
       stopped: outcomes.filter((o) => o.success).length,
       failed: outcomes.filter((o) => !o.success).length,
     });
-    return formatIdealAbort({ run, outcomes, finished: jobs.length - running.length });
+    const text = formatIdealAbort({ run, outcomes, finished: jobs.length - running.length });
+    return closed ? text : `${text}Warning: the run record could not be closed; /ideal status may still list it.\n`;
   }
 
   /** Stop a background job from the /jobs view: a delegation id or a shell process id. */
@@ -3785,10 +3824,17 @@ export class Agent {
       }
       const goal = payload.idea?.trim();
       if (payload.subcommand === "start") {
-        this.idealCoordinationRun = {
+        const saved = this.writeIdealRun({
           goal: goal || "(the current conversation's goal)",
           startedAt: new Date().toISOString(),
-        };
+        });
+        if (!saved) {
+          yield {
+            type: "content",
+            content:
+              "Warning: the /ideal run record could not be saved; /ideal status and /ideal abort will not find this run after a restart.\n",
+          };
+        }
       }
       let councilReceipt = "";
       if (payload.flags.forceCouncil) {

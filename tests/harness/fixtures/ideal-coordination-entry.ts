@@ -13,7 +13,10 @@ if (!fixtureHome || process.env.HOME !== fixtureHome || process.env.USERPROFILE 
 const jobsDir = join(fixtureHome, ".muonroi-cli", "delegations", "ideal-coordination-fixture");
 mkdirSync(jobsDir, { recursive: true });
 const model = process.env.MUONROI_IDEAL_COORD_MODEL ?? "deepseek-v4-flash";
-const session = new SessionStore(process.cwd()).createSession(model, "agent", process.cwd());
-writeFileSync(join(fixtureHome, "ideal-session.json"), JSON.stringify({ sessionId: session.id, jobsDir }));
-process.argv.push("--session", session.id);
+// MUONROI_IDEAL_COORD_RESUME=<session id> boots the SAME session again in a
+// fresh process (a CLI restart / `--session` resume) instead of seeding a new one.
+const resumeId = process.env.MUONROI_IDEAL_COORD_RESUME;
+const sessionId = resumeId ?? new SessionStore(process.cwd()).createSession(model, "agent", process.cwd()).id;
+writeFileSync(join(fixtureHome, "ideal-session.json"), JSON.stringify({ sessionId, jobsDir }));
+process.argv.push("--session", sessionId);
 await import("../../../src/index.ts");
