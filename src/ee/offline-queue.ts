@@ -16,8 +16,8 @@
  * fetchImpl and headers are passed as parameters.
  */
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,10 +37,11 @@ export interface QueueEntry {
 
 /**
  * Returns the absolute path to the offline queue directory.
- * Consistent with auth.ts homeOverride pattern.
+ * `homeOverride` is a USER home (tests); without it the queue lives in the muonroi
+ * home, which honours `MUONROI_CLI_HOME` so the suite-wide pin isolates it.
  */
 export function getQueueDir(homeOverride?: string): string {
-  return path.join(homeOverride ?? os.homedir(), ".muonroi-cli", QUEUE_DIR_NAME);
+  return path.join(muonroiHome(homeOverride), QUEUE_DIR_NAME);
 }
 
 // ─── Internal helpers ─────────────────────────────────────────────────────────

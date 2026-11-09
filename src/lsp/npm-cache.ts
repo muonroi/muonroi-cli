@@ -1,7 +1,7 @@
 import Arborist from "@npmcli/arborist";
 import { access, mkdir, readdir, readFile, rm } from "fs/promises";
-import os from "os";
 import path from "path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 const locks = new Map<string, Promise<unknown>>();
 const WINDOWS_BIN_SUFFIX = process.platform === "win32" ? ".cmd" : "";
@@ -28,7 +28,7 @@ function cachedBinPath(binDir: string, bin: string): string {
  * per call is what makes the isolation actually reachable from a test.
  */
 function cacheRoot(): string {
-  return path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "cache", "lsp");
+  return path.join(muonroiHome(), "cache", "lsp");
 }
 
 function packageDir(pkg: string): string {

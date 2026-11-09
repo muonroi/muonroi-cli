@@ -3,6 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 describe("UserSettings.webResearchPrompted", () => {
   const tmpHome = path.join(os.tmpdir(), `muonroi-cli-settings-${process.pid}-${Date.now()}`);
   const origHome = process.env.HOME;
@@ -14,6 +17,7 @@ describe("UserSettings.webResearchPrompted", () => {
     fs.mkdirSync(tmpHome, { recursive: true });
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
     // Reset module cache so settings.ts re-evaluates USER_DIR with new env
     vi.resetModules();
     const mod = await import("../settings.js");
@@ -30,6 +34,8 @@ describe("UserSettings.webResearchPrompted", () => {
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
   });
 
   it("persists webResearchPrompted=true through save/load", () => {

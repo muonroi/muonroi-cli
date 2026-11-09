@@ -7,6 +7,7 @@ import { spawn } from "child_process";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import * as leader from "../../council/leader.js";
 import { loadCatalog } from "../../models/registry.js";
+import { closeDatabase } from "../../storage/db.js";
 import { BashTool } from "../../tools/bash.js";
 import { readFile } from "../../tools/file.js";
 import { createBuiltinTools } from "../../tools/registry.js";
@@ -126,6 +127,7 @@ afterEach(async () => {
   await bash.cleanup();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  closeDatabase();
   rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 

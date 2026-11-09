@@ -144,9 +144,10 @@ describe("enqueue()", () => {
 // ─── Test 4: getQueueDir() returns correct path ───────────────────────────────
 
 describe("getQueueDir()", () => {
-  it("returns path under os.homedir() when no override given", () => {
+  it("returns path under the muonroi home (MUONROI_CLI_HOME) when no override given", () => {
     const result = getQueueDir();
-    expect(result).toBe(path.join(os.homedir(), ".muonroi-cli", "ee-offline-queue"));
+    expect(result).toBe(path.join(process.env.MUONROI_CLI_HOME as string, "ee-offline-queue"));
+    expect(result.startsWith(path.join(os.homedir(), ".muonroi-cli"))).toBe(false);
   });
 
   it("returns path under homeOverride when provided", () => {

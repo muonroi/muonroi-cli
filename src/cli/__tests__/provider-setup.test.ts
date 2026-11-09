@@ -35,6 +35,7 @@ describe("CLI interactive credential setup", () => {
         NODE_ENV: "test",
         HOME: home,
         USERPROFILE: home,
+        MUONROI_CLI_HOME: join(home, ".muonroi-cli"),
         MUONROI_ENV_FILE: envFile,
         MUONROI_AUTH_DIR: join(home, "auth"),
       },

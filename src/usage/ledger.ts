@@ -15,11 +15,11 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import lockfile from "proper-lockfile";
 import { atomicReadJSON, atomicWriteJSON } from "../storage/atomic-io.js";
 import type { UsageState } from "../storage/usage-cap.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { projectCostUSD } from "./estimator.js";
 import { appendProductLedger, type CostMeta } from "./product-ledger.js";
 import { emit, evaluateThresholds } from "./thresholds.js";
@@ -27,13 +27,13 @@ import { CapBreachError, type ReservationToken } from "./types.js";
 
 const DEFAULT_CAP_USD = 15;
 
-function muonroiHome(homeOverride?: string): string {
-  return homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(homeOverride?: string): string {
+  return homeOverride ?? muonroiHome();
 }
 
 async function loadCapUSD(homeOverride?: string): Promise<number> {
   const cfg = await atomicReadJSON<{ cap?: { monthly_usd?: number } }>(
-    path.join(muonroiHome(homeOverride), "config.json"),
+    path.join(resolveHome(homeOverride), "config.json"),
   );
   return cfg?.cap?.monthly_usd ?? DEFAULT_CAP_USD;
 }
@@ -145,7 +145,7 @@ export async function reserve(args: {
   estOutputTokens: number;
   homeOverride?: string;
 }): Promise<ReservationToken | CapBreachError> {
-  const filePath = path.join(muonroiHome(args.homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(args.homeOverride), "usage.json");
   const cap = await loadCapUSD(args.homeOverride);
 
   return withLock<ReservationToken | CapBreachError>(filePath, async (state) => {
@@ -202,7 +202,7 @@ export async function commit(
   actualOutputTokens: number,
   homeOverride?: string,
 ): Promise<void> {
-  const filePath = path.join(muonroiHome(homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(homeOverride), "usage.json");
   const cap = await loadCapUSD(homeOverride);
 
   const pendingEvents = await withLock(filePath, async (state) => {
@@ -243,7 +243,7 @@ export async function commit(
  * Used on stream abort (Pitfall 5 mitigation).
  */
 export async function release(token: ReservationToken, homeOverride?: string): Promise<void> {
-  const filePath = path.join(muonroiHome(homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(homeOverride), "usage.json");
   await withLock(filePath, async (state) => {
     const reservations = state.reservations.filter((r) => r.id !== token.id);
     return { next: { ...state, reservations }, result: undefined };
@@ -305,7 +305,7 @@ export async function commitUnreserved(args: {
   actualOutputTokens: number;
   homeOverride?: string;
 }): Promise<number> {
-  const filePath = path.join(muonroiHome(args.homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(args.homeOverride), "usage.json");
   const cap = await loadCapUSD(args.homeOverride);
   const actual = projectCostUSD(args.provider, args.model, args.actualInputTokens, args.actualOutputTokens);
 

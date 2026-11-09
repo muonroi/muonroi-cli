@@ -72,6 +72,10 @@ export async function spawnHarness(opts: SpawnHarnessOptions = {}): Promise<Harn
     ...(process.env as Record<string, string>),
     HOME: homeDir,
     USERPROFILE: homeDir,
+    // The vitest setup pins MUONROI_CLI_HOME to ONE shared temp dir and the child inherits it;
+    // getDatabasePath() honours it, so without this every spawned TUI would share one muonroi.db
+    // instead of living under its own HOME. Specs that need a specific home override via opts.env.
+    MUONROI_CLI_HOME: join(homeDir, ".muonroi-cli"),
     // MUONROI_TEST_NO_PERSIST: "1",
     // Suppress the agent-harness shim deprecation warning in the spawned
     // child — this is an internal-callsite spawn, not an external consumer.

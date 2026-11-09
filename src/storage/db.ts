@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { applyMigrations } from "./migrations";
 
 export interface SQLiteStatement {
@@ -26,8 +27,9 @@ let db: SQLiteDatabase | null = null;
 const requireSync = createRequire(import.meta.url);
 
 export function getDatabasePath(): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
-  const dir = path.join(home, ".muonroi-cli");
+  // MUONROI_CLI_HOME wins (suite pin, relocated installs); otherwise the DB stays
+  // under HOME/USERPROFILE exactly as before.
+  const dir = process.env.MUONROI_CLI_HOME ?? muonroiHome(process.env.HOME ?? process.env.USERPROFILE ?? os.homedir());
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return path.join(dir, "muonroi.db");
 }

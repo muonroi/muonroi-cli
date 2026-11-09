@@ -55,7 +55,7 @@ beforeEach(() => {
   home = fs.mkdtempSync(path.join(os.tmpdir(), "working-context-compact-"));
   vi.stubEnv("HOME", home);
   vi.stubEnv("USERPROFILE", home);
-  vi.stubEnv("MUONROI_CLI_HOME", home);
+  vi.stubEnv("MUONROI_CLI_HOME", path.join(home, ".muonroi-cli"));
   expect(getDatabasePath()).toBe(path.join(home, ".muonroi-cli", "muonroi.db"));
   vi.stubEnv("MUONROI_PROGRESSIVE_CONTEXT", "1");
   vi.stubEnv("MUONROI_EE_BASE_URL", "http://127.0.0.1:1");

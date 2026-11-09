@@ -82,9 +82,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { logger, serializeErrorRedacted } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 /** Wall-clock at module load — the origin for every `tMs` field. */
 const PROCESS_START_MS = Date.now();
@@ -220,20 +220,6 @@ export function isBreadcrumbEnabled(): boolean {
   if (raw === "0" || raw === "off" || raw === "false" || raw === "no") return false;
   if (process.env.VITEST && !process.env.MUONROI_COUNCIL_BREADCRUMB_FILE?.trim()) return false;
   return true;
-}
-
-/**
- * Root of the muonroi home.
- *
- * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
- * `muonroiHome()` convention already used by src/storage/config.ts,
- * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
- * call, never as a module-level `const`, so the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
- * records why a const cannot be redirected from a test).
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 /**

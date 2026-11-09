@@ -1,5 +1,5 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { atomicReadJSON, atomicWriteJSON } from "./atomic-io.js";
 
 /**
@@ -35,8 +35,8 @@ function currentMonthUTC(d: Date = new Date()): string {
  * Resolve the ~/.muonroi-cli/ home directory.
  * Priority: explicit override → MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli
  */
-function muonroiHome(override?: string): string {
-  return override ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(override?: string): string {
+  return override ?? muonroiHome();
 }
 
 function defaultState(): UsageState {
@@ -50,7 +50,7 @@ function defaultState(): UsageState {
  * Accepts an optional homeOverride for test isolation.
  */
 export async function loadUsage(homeOverride?: string): Promise<UsageState> {
-  const filePath = path.join(muonroiHome(homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(homeOverride), "usage.json");
   const existing = await atomicReadJSON<UsageState>(filePath);
   if (!existing) {
     const state = defaultState();
@@ -76,6 +76,6 @@ export async function loadUsage(homeOverride?: string): Promise<UsageState> {
  * Accepts an optional homeOverride for test isolation.
  */
 export async function saveUsage(state: UsageState, homeOverride?: string): Promise<void> {
-  const filePath = path.join(muonroiHome(homeOverride), "usage.json");
+  const filePath = path.join(resolveHome(homeOverride), "usage.json");
   await atomicWriteJSON(filePath, state);
 }

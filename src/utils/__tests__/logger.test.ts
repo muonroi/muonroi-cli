@@ -1,4 +1,5 @@
 import fs from "fs";
+import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { logger, redactObject, redactSecrets, serializeError, serializeErrorRedacted } from "../logger.js";
 
@@ -41,7 +42,7 @@ describe("logger utility", () => {
     expect(warnSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
     const [file, line] = vi.mocked(fs.appendFileSync).mock.calls[0];
-    expect(String(file)).toMatch(/[\\/]\.muonroi-cli[\\/]debug\.log$/);
+    expect(path.resolve(String(file))).toBe(path.resolve(process.env.MUONROI_CLI_HOME as string, "debug.log"));
     expect(String(line)).toContain("[WARN] [MCP] HTTP 401");
     expect(String(line)).toContain("invalid_token");
     expect(String(line)).not.toContain(token);

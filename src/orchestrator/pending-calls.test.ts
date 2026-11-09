@@ -33,6 +33,10 @@ function nextSessionId(): string {
   return `test-session-${++sessionCounter}-${Date.now()}`;
 }
 
+// Restore the suite pin afterwards: deleting it un-pins every later test in this worker, and
+// their stores (e.g. council-breadcrumbs.jsonl) then write into the developer's real home.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 beforeEach(async () => {
   tmpBase = await makeTmpDir();
   // Override home dir for getSessionDir so it writes into our temp dir
@@ -40,7 +44,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env.MUONROI_CLI_HOME;
+  if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+  else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
   await fs.rm(tmpBase, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }).catch(() => {
     /* best-effort cleanup */
   });

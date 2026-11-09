@@ -8,9 +8,9 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { atomicReadJSON } from "../storage/atomic-io.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 export interface ReporterCmdOpts {
   run: string;
@@ -37,10 +37,6 @@ async function inferProductSlug(flowDir: string, runId: string): Promise<string 
 
 function resolveFlowDir(): string {
   return path.join(process.cwd(), ".planning");
-}
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 async function readChannelMapping(productSlug: string): Promise<{ channelId: string; guildId: string } | null> {

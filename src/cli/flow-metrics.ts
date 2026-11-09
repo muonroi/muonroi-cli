@@ -18,10 +18,10 @@
 
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { CostLogEntry } from "../usage/cost-log.js";
 import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { extractStructuredVerdict } from "../workflow/verdict-schema.js";
 import {
   aggregateFlowMetrics,
@@ -99,7 +99,7 @@ export interface FlowMetricsOptions {
 }
 
 export function resolveHome(opts: FlowMetricsOptions): string {
-  return opts.home ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+  return opts.home ?? muonroiHome();
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,9 @@ import { closeDatabase, getDatabase } from "../db.js";
 import { SessionStore } from "../sessions.js";
 import { appendMessages, getSessionChain, getSessionChainInfos } from "../transcript.js";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 let tmpHome: string;
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
@@ -23,6 +26,7 @@ beforeEach(() => {
   prevUserProfile = process.env.USERPROFILE;
   process.env.HOME = tmpHome;
   process.env.USERPROFILE = tmpHome;
+  process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
   closeDatabase();
   getDatabase(); // migrate temp DB
 });
@@ -33,6 +37,8 @@ afterEach(() => {
   else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE;
   else process.env.USERPROFILE = prevUserProfile;
+  if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+  else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
   fs.rmSync(tmpHome, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 

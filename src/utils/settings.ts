@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import type { HooksConfig } from "../hooks/types";
 import type {
@@ -26,6 +25,7 @@ import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 import { isIdealRunUnlimited } from "./ideal-run-scope.js";
 import { logger } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
@@ -524,7 +524,7 @@ export interface ProjectSettings {
 }
 
 function getUserSettingsPath(): string {
-  return path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
+  return path.join(muonroiHome(), "user-settings.json");
 }
 
 function ensureDir(dir: string): void {

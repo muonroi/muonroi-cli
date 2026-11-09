@@ -13,8 +13,8 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { projectCostUSD, sanitizeInputTokens } from "./estimator.js";
 import type { CostMeta } from "./product-ledger.js";
 
@@ -52,8 +52,8 @@ export function setCostLogAttribution(tag: { parentSessionId?: string; delegatio
   attribution = tag;
 }
 
-function muonroiHome(homeOverride?: string): string {
-  return homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(homeOverride?: string): string {
+  return homeOverride ?? muonroiHome();
 }
 
 function todayUtc(): string {
@@ -62,7 +62,7 @@ function todayUtc(): string {
 }
 
 function logPath(homeOverride?: string): string {
-  return path.join(muonroiHome(homeOverride), "usage", `cost-log-${todayUtc()}.jsonl`);
+  return path.join(resolveHome(homeOverride), "usage", `cost-log-${todayUtc()}.jsonl`);
 }
 
 /**
@@ -245,7 +245,7 @@ export function costLogTwinView(e: CostLogEntry): CompactionTwinRow {
  */
 export async function readCostLog(date?: string, homeOverride?: string): Promise<CostLogEntry[]> {
   const day = date ?? todayUtc();
-  const fp = path.join(muonroiHome(homeOverride), "usage", `cost-log-${day}.jsonl`);
+  const fp = path.join(resolveHome(homeOverride), "usage", `cost-log-${day}.jsonl`);
   try {
     const content = await fs.readFile(fp, "utf-8");
     const entries = content

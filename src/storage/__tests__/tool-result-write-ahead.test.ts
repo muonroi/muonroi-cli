@@ -26,6 +26,9 @@ import { bestEffortRemoveSync } from "../../__test-stubs__/cleanup";
 import { closeDatabase, getDatabase } from "../db";
 import { appendMessages, persistToolCallWriteAhead, persistToolResultWriteAhead } from "../transcript";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 describe("tool_results write-ahead", () => {
   let tmpDir: string;
   let originalHome: string | undefined;
@@ -38,6 +41,7 @@ describe("tool_results write-ahead", () => {
     originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = tmpDir;
     process.env.USERPROFILE = tmpDir;
+    process.env.MUONROI_CLI_HOME = path.join(tmpDir, ".muonroi-cli");
 
     getDatabase().exec(`
       INSERT INTO workspaces (id, scope_key, canonical_path, display_name, last_seen_at)
@@ -54,6 +58,8 @@ describe("tool_results write-ahead", () => {
     else delete process.env.HOME;
     if (originalUserProfile !== undefined) process.env.USERPROFILE = originalUserProfile;
     else delete process.env.USERPROFILE;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
     bestEffortRemoveSync(tmpDir, "src/storage/__tests__/tool-result-write-ahead.test.ts");
   });
 

@@ -15,12 +15,14 @@ describe("hooks/index — executeEventHooks(SessionStart) wiring", () => {
   const tmpHome = path.join(os.tmpdir(), `muonroi-cli-hooks-idx-${process.pid}-${Date.now()}`);
   const origHome = process.env.HOME;
   const origUserProfile = process.env.USERPROFILE;
+  const origCliHome = process.env.MUONROI_CLI_HOME;
   let executeEventHooks: typeof import("../index.js").executeEventHooks;
 
   beforeEach(async () => {
     fs.mkdirSync(tmpHome, { recursive: true });
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
     fs.mkdirSync(path.join(tmpHome, ".muonroi-cli"), { recursive: true });
     fs.writeFileSync(
       path.join(tmpHome, ".muonroi-cli", "user-settings.json"),
@@ -39,6 +41,8 @@ describe("hooks/index — executeEventHooks(SessionStart) wiring", () => {
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
+    if (origCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = origCliHome;
   });
 
   it("runs the configured SessionStart command hook and returns its output as additionalContexts", async () => {

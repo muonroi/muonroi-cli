@@ -9,24 +9,10 @@
  */
 
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../../utils/muonroi-home.js";
 import { redactor } from "../../utils/redactor.js";
 import type { OAuthTokens } from "./types.js";
-
-/**
- * Root of the muonroi home.
- *
- * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
- * `muonroiHome()` convention already used by src/storage/config.ts,
- * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
- * call, never as a module-level `const`, so the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
- * records why a const cannot be redirected from a test).
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
-}
 
 /**
  * Directory holding `<provider>.json` token files.

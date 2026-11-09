@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as leader from "../../council/leader.js";
+import { closeDatabase } from "../../storage/db.js";
 import { BashTool } from "../../tools/bash.js";
 import { createBuiltinTools } from "../../tools/registry.js";
 import { ensurePlanningWorkspace } from "../../workflow/config-bridge.js";
@@ -68,6 +69,7 @@ afterEach(async () => {
   await bash.cleanup();
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  closeDatabase();
   rmSync(home, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 

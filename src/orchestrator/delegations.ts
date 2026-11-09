@@ -2,7 +2,6 @@ import { readFileSync } from "node:fs";
 import { execFile, spawn } from "child_process";
 import { createHash, randomUUID } from "crypto";
 import { promises as fs } from "fs";
-import os from "os";
 import path from "path";
 import { getModelInfo } from "../models/registry.js";
 import {
@@ -18,6 +17,7 @@ import { BACKGROUND_WAIT_GUIDANCE, formatDelegationStarted } from "../utils/back
 import { withFileLock } from "../utils/file-lock.js";
 import { isLinkFreeBelow } from "../utils/link-free-path.js";
 import { logger, redactSecrets } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
 import {
   assertPlanReviewCurrent,
@@ -2076,23 +2076,6 @@ export async function failDelegation(
     await fs.writeFile(record.outputPath, rendered, "utf8");
     await writeRecord(jobPath, record);
   });
-}
-
-/**
- * Root of the muonroi home — the repo-wide `MUONROI_CLI_HOME ?? homedir() +
- * "/.muonroi-cli"` convention (`src/storage/config.ts`, `src/tools/schedule.ts`
- * et al.), resolved LAZILY per call.
- *
- * This module used to join `os.homedir()` itself, so the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` could not reach it: every test that
- * listed delegations mkdir'd into the developer's REAL `~/.muonroi-cli`. It
- * also made `delegations-rate-limit.test.ts` red on Windows only — that test
- * redirected `HOME`, which `os.homedir()` honours on POSIX but ignores on
- * win32 (it reads `USERPROFILE`), so the manager listed one directory while
- * the test looked in another.
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 async function ensureDelegationsDir(cwd: string): Promise<string> {

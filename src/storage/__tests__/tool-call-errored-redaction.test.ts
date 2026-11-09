@@ -27,6 +27,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { closeDatabase, getDatabase } from "../db.js";
 import { markToolCallErrored, persistToolCallWriteAhead } from "../transcript.js";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 function fakeProviderKey(): string {
   return ["sk", "proj"].join("-") + "-" + "t00lc4ll" + "W".repeat(26);
 }
@@ -45,6 +48,7 @@ describe("markToolCallErrored — the error text has no path into tool_calls.arg
     originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = tmpDir;
     process.env.USERPROFILE = tmpDir;
+    process.env.MUONROI_CLI_HOME = path.join(tmpDir, ".muonroi-cli");
 
     getDatabase().exec(`
       INSERT INTO workspaces (id, scope_key, canonical_path, display_name, last_seen_at)
@@ -60,6 +64,8 @@ describe("markToolCallErrored — the error text has no path into tool_calls.arg
     else process.env.HOME = originalHome;
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {

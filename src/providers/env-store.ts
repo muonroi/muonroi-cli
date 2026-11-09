@@ -8,13 +8,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { redactor } from "../utils/redactor.js";
 
 export function envFilePath(): string {
-  return process.env.MUONROI_ENV_FILE ?? join(homedir(), ".muonroi-cli", ".env");
+  return process.env.MUONROI_ENV_FILE ?? join(muonroiHome(), ".env");
 }
 
 function readLines(): string[] {

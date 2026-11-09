@@ -1,6 +1,6 @@
 import fs from "fs";
-import * as os from "os";
 import * as path from "path";
+import { muonroiHome } from "./muonroi-home.js";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -279,7 +279,7 @@ export function isTuiActive(): boolean {
  */
 function appendToFile(level: LogLevel, ns: LogNamespace, msg: string, ctx?: LogContext): void {
   try {
-    const dir = path.join(os.homedir(), ".muonroi-cli");
+    const dir = muonroiHome();
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }

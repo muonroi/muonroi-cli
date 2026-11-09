@@ -1,9 +1,9 @@
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { listStakeholders } from "../product-loop/stakeholder-acl.js";
 import { atomicWriteText } from "../storage/atomic-io.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { type ChatChannelMapping, type ChatClient, STAKEHOLDER_ALLOW } from "./types.js";
 
 const SCHEMA_VERSION = 1;
@@ -11,10 +11,6 @@ const SCHEMA_VERSION = 1;
 interface ChannelStore {
   version: number;
   items: Record<string, ChatChannelMapping>;
-}
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 function storePath(): string {

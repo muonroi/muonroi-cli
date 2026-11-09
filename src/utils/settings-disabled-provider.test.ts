@@ -54,10 +54,12 @@ beforeAll(async () => {
 });
 
 beforeEach(() => {
-  for (const k of ["HOME", "USERPROFILE", "MUONROI_MODEL"]) saved[k] = process.env[k];
+  for (const k of ["HOME", "USERPROFILE", "MUONROI_CLI_HOME", "MUONROI_MODEL"]) saved[k] = process.env[k];
   home = fs.mkdtempSync(path.join(os.tmpdir(), "mcli-home-"));
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  // user-settings.json lives in the muonroi home, which follows the suite pin, not USERPROFILE.
+  process.env.MUONROI_CLI_HOME = path.join(home, ".muonroi-cli");
   delete process.env.MUONROI_MODEL;
   // muonroi-building-block shape: Directory.Build.props + *.sln + src/Muonroi.*, no .muonroi-cli/.
   bbCwd = fs.mkdtempSync(path.join(os.tmpdir(), "mcli-bb-"));

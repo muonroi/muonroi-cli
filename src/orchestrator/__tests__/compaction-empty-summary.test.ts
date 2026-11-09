@@ -233,6 +233,7 @@ describe("compactForContext writes exactly one cost-log row per billed summary c
       return rows;
     } finally {
       vi.unstubAllEnvs();
+      closeDatabase();
       rmSync(home, { recursive: true, force: true });
     }
   }

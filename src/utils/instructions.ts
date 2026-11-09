@@ -1,10 +1,10 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import { executeEventHooks } from "../hooks/index";
 import type { InstructionsLoadedHookInput } from "../hooks/types";
 import { findGitRoot } from "./git-root";
 import { logger } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 import { getProjectDocFallbackFilenames, getProjectDocMaxBytes } from "./settings.js";
 
 /**
@@ -118,24 +118,6 @@ export function projectCandidateFilenames(fallbacks: readonly string[]): string[
 function labelSegment(filename: string, label: string, text: string): string {
   if (filename === DEFAULT_INSTRUCTIONS_FILENAME || filename === OVERRIDE_INSTRUCTIONS_FILENAME) return text;
   return `<!-- ${label} -->\n${text}`;
-}
-
-/**
- * Root of the muonroi home.
- *
- * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
- * `muonroiHome()` convention already used by src/storage/config.ts,
- * src/usage/ledger.ts, src/chat/channel-manager.ts et al.
- *
- * Resolved LAZILY on every call, never as a module-level `const`: a const is
- * evaluated once at import, so a test importing this module normally could
- * never redirect it (`src/lsp/npm-cache.ts:20-28` records what that cost).
- * Reading the env var per call is what lets the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` reach this loader, instead of it reading
- * the developer's real `~/.muonroi-cli/AGENTS.md` into every test's prompt.
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 /** Global instructions: first non-empty of AGENTS.override.md, AGENTS.md. */

@@ -63,11 +63,11 @@
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { ModelRateLimits } from "../types/index.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { abortableSleep, rateLimitBackoffMs } from "./rate-limit-backoff.js";
 import { RATE_LIMIT_WINDOW_MS } from "./rate-limiter.js";
 
@@ -151,7 +151,7 @@ export function defaultLedgerDeps(): LedgerDeps {
   return {
     // Resolved lazily and through MUONROI_CLI_HOME, like every other home path,
     // so the test-suite home pin applies.
-    dir: path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "rate-ledger"),
+    dir: path.join(muonroiHome(), "rate-ledger"),
     now: () => Date.now(),
     sleep: abortableSleep,
     isAlive: defaultIsAlive,

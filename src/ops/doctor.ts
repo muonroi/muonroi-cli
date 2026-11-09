@@ -18,6 +18,7 @@ import { healthDetailed } from "../ee/health.js";
 import { listStoredProviders } from "../providers/keychain.js";
 import { getDatabase } from "../storage/db.js";
 import { integrationHealth } from "../utils/integration-health.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { loadMcpServers, loadUserSettings } from "../utils/settings.js";
 
 export interface CheckResult {
@@ -272,7 +273,7 @@ async function checkQdrant(): Promise<CheckResult> {
 }
 
 async function checkRecentErrorRate(): Promise<CheckResult> {
-  const errorLogPath = path.join(os.homedir(), ".muonroi-cli", "errors.log");
+  const errorLogPath = path.join(muonroiHome(), "errors.log");
   try {
     const content = await readFile(errorLogPath, "utf-8");
     const lines = content.split("\n").filter(Boolean);

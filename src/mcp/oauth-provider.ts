@@ -22,7 +22,6 @@
 
 import { randomBytes } from "node:crypto";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import {
   auth,
@@ -39,6 +38,7 @@ import type {
 } from "@modelcontextprotocol/sdk/shared/auth.js";
 import { withFileLock } from "../utils/file-lock.js";
 import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { redactor } from "../utils/redactor.js";
 import { startOAuthCallbackServer } from "./oauth-callback.js";
 
@@ -60,7 +60,7 @@ interface CliOAuthStorage {
  * the developer's real token file.
  */
 export function mcpOAuthStorePath(): string {
-  return join(process.env.MUONROI_CLI_HOME ?? join(homedir(), ".muonroi-cli"), "mcp-oauth.json");
+  return join(muonroiHome(), "mcp-oauth.json");
 }
 
 function enrollRecord(rec: CliOAuthStorage | undefined): void {

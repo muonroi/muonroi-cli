@@ -8,6 +8,7 @@ import semverGt from "semver/functions/gt.js";
 import semverValid from "semver/functions/valid.js";
 import { fileURLToPath } from "url";
 import { removeTreeLoggingFailureSync } from "./fs-cleanup.js";
+import { MUONROI_HOME_DIRNAME } from "./muonroi-home.js";
 
 export const GITHUB_REPO = "muonroi/muonroi-cli";
 export const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases`;
@@ -80,7 +81,9 @@ interface ReleaseDownload {
 }
 
 export function getUserDir(homeDir = os.homedir()): string {
-  return path.join(homeDir, ".muonroi-cli");
+  // The installer script's fixed location under the user home, deliberately NOT
+  // MUONROI_CLI_HOME: the binary and install.json sit where the script put them.
+  return path.join(homeDir, MUONROI_HOME_DIRNAME);
 }
 
 export function getScriptInstallDir(homeDir = os.homedir()): string {

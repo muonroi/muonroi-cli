@@ -1,8 +1,8 @@
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWriteText } from "../storage/atomic-io.js";
 import { withFileLock } from "../utils/file-lock.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 const SCHEMA_VERSION = 1;
 
@@ -16,10 +16,6 @@ export interface Stakeholder {
 export interface StakeholderStore {
   version: number;
   items: Record<string, { productSlug: string; stakeholders: Stakeholder[] }>;
-}
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 function storePath(): string {

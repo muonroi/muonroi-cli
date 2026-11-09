@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { logger, redactSecrets } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 
 export interface IntegrationObservation {
   component: string;
@@ -14,7 +14,7 @@ export interface IntegrationObservation {
   phase?: string | null;
   durationMs?: number;
 }
-const directory = () => path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "usage");
+const directory = () => path.join(muonroiHome(), "usage");
 
 /** Observations are facts about named checks, never an invented global readiness score. */
 export function recordIntegrationHealth(entry: IntegrationObservation): void {

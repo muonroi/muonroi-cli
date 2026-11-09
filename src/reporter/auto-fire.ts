@@ -18,9 +18,9 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ChatClient } from "../chat/types.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { loadUserSettings } from "../utils/settings.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -69,10 +69,6 @@ export function __resetAutoFireDebounceForTests(): void {
 }
 
 // ─── Channel resolver (default impl) ──────────────────────────────────────
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
-}
 
 interface ChannelStore {
   version: number;

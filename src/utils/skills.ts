@@ -4,6 +4,7 @@ import * as os from "os";
 import * as path from "path";
 import { findGitRoot } from "./git-root";
 import { logger } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 
 export type SkillScope = "project" | "user" | "builtin";
 
@@ -188,7 +189,7 @@ function listProjectSkillRoots(projectRoot: string): string[] {
 
 /** CLI-owned home, honouring MUONROI_CLI_HOME like every other CLI store. */
 function cliHomeDir(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+  return muonroiHome();
 }
 
 /**

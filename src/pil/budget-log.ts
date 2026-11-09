@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import type { IntentDetectionTrace } from "./types.js";
 
 export type IntentTraceSnapshot = IntentDetectionTrace;
@@ -26,10 +26,6 @@ export interface PilBudgetLogEntry {
   layers: PilLayerSnapshot[];
   fallbackReason: string | null;
   intentDetection: IntentTraceSnapshot | null;
-}
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 function todayUtc(): string {

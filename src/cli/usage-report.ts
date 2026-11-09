@@ -6,11 +6,11 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { type CostLogEntry, readCostLog } from "../usage/cost-log.js";
 import { listDecisionLogDates, readDecisionLog } from "../usage/decision-log.js";
 import { readProductLedger } from "../usage/product-ledger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 type GroupBy = "callsite" | "role" | "phase" | "model" | "provider";
 
@@ -27,12 +27,12 @@ interface Row {
   driftSamples: number;
 }
 
-function muonroiHome(homeOverride?: string): string {
-  return homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(homeOverride?: string): string {
+  return homeOverride ?? muonroiHome();
 }
 
 async function listCostLogDates(homeOverride?: string): Promise<string[]> {
-  const dir = path.join(muonroiHome(homeOverride), "usage");
+  const dir = path.join(resolveHome(homeOverride), "usage");
   try {
     const files = await fs.readdir(dir);
     return files
@@ -45,7 +45,7 @@ async function listCostLogDates(homeOverride?: string): Promise<string[]> {
 }
 
 async function listProductRunIds(homeOverride?: string): Promise<string[]> {
-  const dir = path.join(muonroiHome(homeOverride), "usage", "products");
+  const dir = path.join(resolveHome(homeOverride), "usage", "products");
   try {
     const files = await fs.readdir(dir);
     return files.filter((f) => f.endsWith(".jsonl")).map((f) => f.replace(/\.jsonl$/, ""));
@@ -307,7 +307,7 @@ function parseRelativeSince(since?: string): number | null {
 export async function runSecurityAudit(
   opts: { since?: string; json?: boolean; format?: "table" | "json" | "md" } = {},
 ) {
-  const home = muonroiHome();
+  const home = resolveHome();
   const cutoff = parseRelativeSince(opts.since);
   let dates = await listDecisionLogDates(home);
   if (opts.since && /^\d{4}-\d{2}-\d{2}$/.test(opts.since)) {
@@ -404,7 +404,7 @@ export async function runSecurityAudit(
  * Reuses aggregate for cost/drift snapshot. --compare is stub (delta in later phase).
  */
 export async function runPerfRegression(opts: { compare?: string; json?: boolean; format?: "table" | "json" } = {}) {
-  const home = muonroiHome();
+  const home = resolveHome();
   const dates = (await listCostLogDates(home)).slice(-2);
   let entries: CostLogEntry[] = [];
   for (const d of dates) {
