@@ -15,6 +15,7 @@ import {
   loadLatestCompaction,
   loadRawTranscript,
   loadTranscriptState,
+  revertLatestCompaction,
 } from "../../storage/transcript.js";
 import { estimateConversationTokens } from "../compaction.js";
 import { HOST_COMPACTION_STUB_PREFIX } from "../compaction-budget.js";
@@ -261,6 +262,57 @@ describe("pruning before narrative compaction", () => {
       for (let i = 0; i < 12; i++) expect(after).toContain(`Closed task ${i}`); // protected turns still visible
       expect(after).toContain("CURRENT_TASK");
       expect(a.messages.length).toBe(a.messageSeqs.length);
+    } finally {
+      __resetCompactionModelCooldownForTests();
+      await agent.cleanup();
+    }
+  });
+  // Same scenario, then a --session resume: the shrink was memory-only, so the
+  // compaction row (first_kept_seq = the earliest protected turn) brought the
+  // whole history back verbatim until the next compaction.
+  it("every turn protected: a reload holds the same bounded view, canonical rows untouched, /expand restores all", async () => {
+    const { agent, a } = await fixture(false);
+    vi.spyOn(a, "getContextProtection").mockResolvedValue({ pinned: [], pendingJobIds: ["Closed task"] });
+    markCompactionModelCooldown(agent.getSessionId()!, a._resolveCompactModel());
+    markCompactionModelCooldown(agent.getSessionId()!, a.modelId);
+    try {
+      const sessionId = agent.getSessionId()!;
+      const rawBefore = loadRawTranscript(sessionId);
+      const rawTokens = estimateConversationTokens("system", loadRawTranscript(sessionId));
+      await a.compactForContext(
+        "fixture",
+        "system",
+        1_000_000,
+        new AbortController().signal,
+        { reserveTokens: 1000, keepRecentTokens: 400 },
+        true,
+      );
+      const liveTokens = estimateConversationTokens("system", a.messages);
+      expect(liveTokens).toBeLessThan(rawTokens / 2);
+
+      // What the row used to be: first_kept_seq at the earliest protected turn, so the
+      // un-shrunk suffix is (nearly) the whole transcript.
+      const compaction = loadLatestCompaction(sessionId)!;
+      expect(compaction.firstKeptSeq).toBeLessThanOrEqual(2);
+      expect(compaction.shrink?.level).toBeGreaterThanOrEqual(1);
+
+      closeDatabase();
+      const resumed = loadTranscriptState(sessionId);
+      const resumedTokens = estimateConversationTokens("system", resumed.messages);
+      // Bounded like the live view (the persisted working receipt is the only extra row).
+      expect(resumedTokens).toBeLessThanOrEqual(liveTokens * 1.1 + 500);
+      expect(resumedTokens).toBeLessThan(rawTokens / 2);
+      const resumedText = JSON.stringify(resumed.messages);
+      expect(resumedText).toContain(HOST_COMPACTION_STUB_PREFIX);
+      for (let i = 0; i < 12; i++) expect(resumedText).toContain(`Closed task ${i}`);
+      expect(resumedText).toContain("CURRENT_TASK");
+
+      // Canonical rows are never rewritten (compaction only appends its working receipt), and
+      // /expand (revert) brings the full history back.
+      const rawAfter = loadRawTranscript(sessionId);
+      expect(JSON.stringify(rawAfter.slice(0, rawBefore.length))).toBe(JSON.stringify(rawBefore));
+      revertLatestCompaction(sessionId);
+      expect(JSON.stringify(loadTranscriptState(sessionId).messages)).toBe(JSON.stringify(rawAfter));
     } finally {
       __resetCompactionModelCooldownForTests();
       await agent.cleanup();

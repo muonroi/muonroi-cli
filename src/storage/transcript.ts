@@ -1,5 +1,6 @@
 import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
+import { isPersistedShrinkSpec, type PersistedShrinkSpec } from "../orchestrator/compaction-budget";
 import { isCompactedToolOutput, isCompactorElisionMarker } from "../orchestrator/subagent-compactor.js";
 import { WORKING_CONTEXT_TAG } from "../orchestrator/working-context.js";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
@@ -35,6 +36,7 @@ interface CompactionRow {
   summary: string;
   tokens_before: number;
   created_at: string;
+  shrink_json?: string | null;
 }
 
 interface EffectiveMessageRecord {
@@ -292,20 +294,41 @@ function sanitizeToolCallPairing<
   return { ...state, messages: outMessages, seqs: outSeqs, timestamps: outTimestamps };
 }
 
+function parseShrinkSpec(row: CompactionRow): PersistedShrinkSpec | undefined {
+  if (!row.shrink_json) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(row.shrink_json);
+    if (isPersistedShrinkSpec(parsed)) return parsed;
+    logger.warn("storage", "Ignoring malformed compaction shrink spec; history loads unshrunk", {
+      sessionId: row.session_id,
+      createdAt: row.created_at,
+    });
+  } catch (err) {
+    logger.warn("storage", "Ignoring unparseable compaction shrink spec; history loads unshrunk", {
+      sessionId: row.session_id,
+      createdAt: row.created_at,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return undefined;
+}
+
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {
   if (!row) return null;
+  const shrink = parseShrinkSpec(row);
   return {
     firstKeptSeq: row.first_kept_seq,
     summary: row.summary,
     tokensBefore: row.tokens_before,
     createdAt: new Date(row.created_at),
+    ...(shrink ? { shrink } : {}),
   };
 }
 
 export function loadLatestCompaction(sessionId: string): PersistedCompaction | null {
   const row = getDatabase()
     .prepare(`
-    SELECT session_id, first_kept_seq, summary, tokens_before, created_at
+    SELECT session_id, first_kept_seq, summary, tokens_before, created_at, shrink_json
     FROM compactions
     WHERE session_id = ?
     ORDER BY id DESC
@@ -319,8 +342,9 @@ export function loadLatestCompaction(sessionId: string): PersistedCompaction | n
 function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord[] {
   const rows = loadMessageRows(sessionId);
   const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+  // Display surface: show the canonical suffix, not the model-facing shrunk view.
   const transcript = sanitizeToolCallPairing(
-    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)),
+    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId), { applyShrink: false }),
   );
 
   return transcript.messages.map((message, index) => ({
@@ -948,6 +972,22 @@ export function appendCompaction(
     `).run(new Date().toISOString(), sessionId);
     // Commit the host-selected working set with the compaction, not only in live memory.
     if (retainedContext) appendSystemMessage(sessionId, retainedContext);
+  });
+}
+
+/**
+ * Attach the host budget pass's retained-set spec to the newest compaction row
+ * so a reload rebuilds the same bounded history (see PersistedShrinkSpec). The
+ * canonical message rows are not touched.
+ */
+export function setLatestCompactionShrink(sessionId: string, spec: PersistedShrinkSpec): void {
+  withTransaction((db) => {
+    db.prepare(`
+      UPDATE compactions
+      SET shrink_json = ?
+      WHERE session_id = ?
+      AND id = (SELECT MAX(id) FROM compactions WHERE session_id = ?)
+    `).run(JSON.stringify(spec), sessionId, sessionId);
   });
 }
 

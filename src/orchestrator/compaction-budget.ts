@@ -180,6 +180,104 @@ function shrinkMessage(
   return msg;
 }
 
+/**
+ * Durable form of a compaction's retained-set decisions. The compaction row
+ * persists only `first_kept_seq`, so after a reload every message from that seq
+ * on came back verbatim, including the ones the live pass summarized away or
+ * shrank (session c2fda568be6b: first_kept_seq stuck at 23). This spec rides on
+ * the compaction row and reproduces the live view when the transcript is
+ * rebuilt. It is a view over the canonical `messages` rows, never a rewrite of
+ * them: dropping the compaction row (/expand) removes the spec with it.
+ *
+ * The shrink itself is not stored. {@link shrinkMessage} is a pure function of
+ * the message, so the spec only records WHICH rows it applies to.
+ */
+export interface PersistedShrinkSpec {
+  v: 1;
+  /** Highest message seq that existed when the compaction ran; later rows are untouched. */
+  throughSeq: number;
+  /** Highest budget level the live pass reached (0 = only the retained set is recorded). */
+  level: 0 | 1 | 2 | 3;
+  /** First seq of the verbatim tail; rows below it were retained only by a protection. */
+  tailFromSeq: number | null;
+  /** First seq of the current turn at compaction time; it and everything after is never shrunk. */
+  currentTurnFromSeq: number;
+  /** Inclusive [from, to] seq ranges of rows the live view no longer holds (summarized or budget-dropped). */
+  droppedRanges: Array<[number, number]>;
+}
+
+/** Collapse a set of seqs into sorted inclusive ranges (spec stays small for long sessions). */
+export function toSeqRanges(seqs: Iterable<number>): Array<[number, number]> {
+  const sorted = [...new Set(seqs)].sort((a, b) => a - b);
+  const ranges: Array<[number, number]> = [];
+  for (const seq of sorted) {
+    const last = ranges[ranges.length - 1];
+    if (last && seq === last[1] + 1) last[1] = seq;
+    else ranges.push([seq, seq]);
+  }
+  return ranges;
+}
+
+export function isPersistedShrinkSpec(value: unknown): value is PersistedShrinkSpec {
+  if (!value || typeof value !== "object") return false;
+  const v = value as Partial<PersistedShrinkSpec>;
+  return (
+    v.v === 1 &&
+    typeof v.throughSeq === "number" &&
+    typeof v.level === "number" &&
+    (v.tailFromSeq === null || typeof v.tailFromSeq === "number") &&
+    typeof v.currentTurnFromSeq === "number" &&
+    Array.isArray(v.droppedRanges) &&
+    v.droppedRanges.every(
+      (r) => Array.isArray(r) && r.length === 2 && typeof r[0] === "number" && typeof r[1] === "number",
+    )
+  );
+}
+
+/**
+ * Re-apply a persisted spec to the messages a compaction row keeps
+ * (`firstKeptSeq` onward, in seq order). Rows the live pass dropped are
+ * removed; rows it shrank are shrunk with the same pure function. Rows newer
+ * than `throughSeq`, the current turn and rows with no seq are left alone.
+ */
+export function applyPersistedShrink(
+  messages: readonly ModelMessage[],
+  seqs: ReadonlyArray<number | null>,
+  spec: PersistedShrinkSpec,
+): { indices: number[]; messages: ModelMessage[] } {
+  const dropped = spec.droppedRanges;
+  const isDropped = (seq: number): boolean => {
+    // Ranges are sorted and disjoint: binary search.
+    let lo = 0;
+    let hi = dropped.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const [from, to] = dropped[mid]!;
+      if (seq < from) hi = mid - 1;
+      else if (seq > to) lo = mid + 1;
+      else return true;
+    }
+    return false;
+  };
+  const counters: Counters = { stubbed: 0, reasoning: 0, truncated: 0 };
+  const indices: number[] = [];
+  const out: ModelMessage[] = [];
+  messages.forEach((message, i) => {
+    const seq = seqs[i] ?? null;
+    if (seq === null || seq > spec.throughSeq) {
+      indices.push(i);
+      out.push(message);
+      return;
+    }
+    if (isDropped(seq)) return;
+    const inTail = spec.tailFromSeq !== null && seq >= spec.tailFromSeq;
+    const shrinkable = seq < spec.currentTurnFromSeq && (spec.level >= 2 || !inTail) && spec.level >= 1;
+    indices.push(i);
+    out.push(shrinkable ? shrinkMessage(message, counters, undefined) : message);
+  });
+  return { indices, messages: out };
+}
+
 function lastUserIndex(messages: readonly ModelMessage[]): number {
   for (let i = messages.length - 1; i >= 0; i--) if (messages[i]?.role === "user") return i;
   return messages.length;

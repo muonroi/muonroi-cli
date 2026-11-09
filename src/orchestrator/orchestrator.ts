@@ -68,6 +68,7 @@ import {
   recordUsageEvent,
   SessionStore,
   sessionUsedFlowWorkflow,
+  setLatestCompactionShrink,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -194,7 +195,7 @@ import {
   proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
-import { enforceCompactionBudget } from "./compaction-budget.js";
+import { enforceCompactionBudget, type PersistedShrinkSpec, toSeqRanges } from "./compaction-budget.js";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
 import {
   clearCompactionModelCooldown,
@@ -2534,6 +2535,8 @@ export class Agent {
 
   /** Delivery watermark at the start of the current model turn (see consumeNotificationsForTurn). */
   private _turnVisibleDeliverySeq = 0;
+  /** Wall clock taken right after the turn's pre-stream consume; deliveries at or before it were in the prompt. */
+  private _turnDeliveryCutoff: string | undefined;
 
   /**
    * Pre-stream notification consume for a model turn. Every notice appended
@@ -2544,6 +2547,7 @@ export class Agent {
   private async consumeNotificationsForTurn(): Promise<string[]> {
     const notices = await this.consumeBackgroundNotifications();
     this._turnVisibleDeliverySeq = this.delegations.currentDeliverySeq();
+    this._turnDeliveryCutoff = new Date().toISOString();
     return notices;
   }
 
@@ -2570,7 +2574,7 @@ export class Agent {
       }
     });
     void this.delegations
-      .acknowledgeProcessed(this._turnVisibleDeliverySeq, readTexts)
+      .acknowledgeProcessed(this._turnVisibleDeliverySeq, readTexts, this._turnDeliveryCutoff)
       .then((acked) => {
         if (acked.length) logger.file("info", "orchestrator", "Host-acknowledged processed results", { acked });
       })
@@ -3172,6 +3176,13 @@ export class Agent {
       });
     });
 
+    // Highest seq the live view knew about; rows appended later (the working
+    // receipt below, the next turns) are outside the persisted shrink spec.
+    const throughSeq = getNextMessageSequence(this.session.id) - 1;
+    const seqsBeforeCompaction = this.messageSeqs.filter((seq): seq is number => seq !== null);
+    const tailSeqs = [...verbatimTail]
+      .map((m) => this.messageSeqs[this.messages.indexOf(m)] ?? null)
+      .filter((seq): seq is number => seq !== null);
     appendCompaction(
       this.session.id,
       firstKeptSeq,
@@ -3279,6 +3290,39 @@ export class Agent {
         strippedReasoningParts: budget.strippedReasoningParts,
         truncatedTexts: budget.truncatedTexts,
         droppedMessages: budget.droppedMessages,
+      });
+    }
+
+    // Make the retained set durable. appendCompaction persisted only
+    // first_kept_seq, so a reload brought back every row from there on
+    // (c2fda568be6b: first_kept_seq stuck at 23, history re-inflated to 988k
+    // tokens). The spec records which rows this view no longer holds and which
+    // level of shrink applied; the canonical message rows stay untouched.
+    try {
+      const retainedSeqs = new Set(this.messageSeqs.filter((seq): seq is number => seq !== null));
+      const droppedSeqs = seqsBeforeCompaction.filter(
+        (seq) => seq >= firstKeptSeq && !retainedSeqs.has(seq) && !this._pinnedSeqs.has(seq),
+      );
+      if (budget.level > 0 || droppedSeqs.length > 0) {
+        const currentTurnIndex = this.messages.map((m) => m.role).lastIndexOf("user");
+        const currentTurnSeqs = this.messageSeqs
+          .slice(Math.max(0, currentTurnIndex))
+          .filter((seq): seq is number => seq !== null);
+        const spec: PersistedShrinkSpec = {
+          v: 1,
+          throughSeq,
+          level: budget.level,
+          tailFromSeq: tailSeqs.length ? Math.min(...tailSeqs) : null,
+          currentTurnFromSeq: currentTurnSeqs.length ? Math.min(...currentTurnSeqs) : throughSeq + 1,
+          droppedRanges: toSeqRanges(droppedSeqs),
+        };
+        setLatestCompactionShrink(this.session.id, spec);
+      }
+    } catch (err) {
+      // The live view is already bounded; only the reload loses the shrink.
+      logger.warn("orchestrator", "[compaction] persisting the retained-set spec failed; reload will re-inflate", {
+        sessionId: this.session.id,
+        error: err instanceof Error ? err.message : String(err),
       });
     }
 
