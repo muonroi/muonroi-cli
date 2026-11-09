@@ -174,6 +174,7 @@ import {
 import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
 import { type AgentActivity, collectAgentActivities, orderForJobsView } from "./utils/agent-activities.js";
 import { groupToolEntries } from "./utils/group-tool-entries.js";
+import { reconcileTranscript } from "./utils/local-entries.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -3507,16 +3508,10 @@ export function useAppLogic(props: AppLogicProps) {
       if (!wasInterrupted && !hadError) {
         if (activeTurn.kind === "local" && activeTurn.agent.getSessionId()) {
           setMessages((prev) => {
-            const fresh = activeTurn.agent.getChatEntries();
-            let prevUserIdx = 0;
-            for (let i = 0; i < fresh.length; i++) {
-              if (fresh[i]!.type !== "user") continue;
-              while (prevUserIdx < prev.length && prev[prevUserIdx]!.type !== "user") prevUserIdx++;
-              if (prevUserIdx < prev.length) {
-                fresh[i] = { ...fresh[i]!, content: prev[prevUserIdx]!.content };
-                prevUserIdx++;
-              }
-            }
+            // Saved history is the base; host-local output (`local` entries:
+            // /help, /ideal status, …) was never saved and is merged back in by
+            // timestamp, else this rebuild deleted it (see utils/local-entries.ts).
+            const fresh = reconcileTranscript(activeTurn.agent.getChatEntries(), prev);
             // The persisted transcript has one tool_result per call and no
             // tool_group, so this resync used to wipe the group the live turn
             // built and leave a flat "→ <tool>" line per call on screen — the
@@ -5282,6 +5277,7 @@ export function useAppLogic(props: AppLogicProps) {
                   seq === null
                     ? "No user message to pin."
                     : `Pinned user message (seq=${seq}). It will survive compaction.`,
+                  { local: true },
                 ),
               ]);
               return;
@@ -5293,6 +5289,7 @@ export function useAppLogic(props: AppLogicProps) {
                 ...prev,
                 buildAssistantEntry(
                   ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                  { local: true },
                 ),
               ]);
               return;
@@ -5302,7 +5299,7 @@ export function useAppLogic(props: AppLogicProps) {
               const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`, { local: true }),
               ]);
               return;
             }
@@ -5310,7 +5307,9 @@ export function useAppLogic(props: AppLogicProps) {
               const seqs = agent.getPinnedSeqs();
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`, {
+                  local: true,
+                }),
               ]);
               return;
             }
@@ -5345,10 +5344,17 @@ export function useAppLogic(props: AppLogicProps) {
               const startingLine = startsLoop
                 ? "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n"
                 : "";
+              // status/abort never reach the model, so neither the echo nor the
+              // streamed answer is in saved history: mark them host-local so the
+              // end-of-turn rebuild keeps them (utils/local-entries.ts).
+              const localOnly = !startsLoop;
               setMessages((prev) => [
                 ...prev,
-                buildUserEntry(heading),
-                buildAssistantEntry(warningPrefix ? `${warningPrefix}\n${startingLine}` : startingLine),
+                buildUserEntry(heading, localOnly ? { local: true } : undefined),
+                buildAssistantEntry(
+                  warningPrefix ? `${warningPrefix}\n${startingLine}` : startingLine,
+                  localOnly ? { local: true } : undefined,
+                ),
               ]);
               // Fresh product-loop run — clear any persisted council UI (phases,
               // statuses, AND leftover debate arrays from a prior /council or
@@ -5930,7 +5936,7 @@ export function useAppLogic(props: AppLogicProps) {
               return;
             }
 
-            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+            setMessages((prev) => [...prev, buildAssistantEntry(result, { local: true })]);
           })
           .catch((err: unknown) => {
             // A slash handler that throws must never escape as an unhandled
@@ -6009,6 +6015,7 @@ export function useAppLogic(props: AppLogicProps) {
             {
               type: "assistant",
               content: VISIBLE_SLASH_MENU_ITEMS.map((i) => `/${i.label} — ${i.description}`).join("\n"),
+              local: true,
               timestamp: new Date(),
             },
           ]);
@@ -6185,6 +6192,7 @@ export function useAppLogic(props: AppLogicProps) {
                     seq === null
                       ? "No user message to pin."
                       : `Pinned user message (seq=${seq}). It will survive compaction.`,
+                    { local: true },
                   ),
                 ]);
                 return;
@@ -6196,6 +6204,7 @@ export function useAppLogic(props: AppLogicProps) {
                   ...prev,
                   buildAssistantEntry(
                     ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                    { local: true },
                   ),
                 ]);
                 return;
@@ -6205,7 +6214,7 @@ export function useAppLogic(props: AppLogicProps) {
                 const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
                 setMessages((prev) => [
                   ...prev,
-                  buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+                  buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`, { local: true }),
                 ]);
                 return;
               }
@@ -6213,7 +6222,9 @@ export function useAppLogic(props: AppLogicProps) {
                 const seqs = agent.getPinnedSeqs();
                 setMessages((prev) => [
                   ...prev,
-                  buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+                  buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`, {
+                    local: true,
+                  }),
                 ]);
                 return;
               }
@@ -6221,7 +6232,7 @@ export function useAppLogic(props: AppLogicProps) {
               // routed through handleCommand so both entry points share ONE
               // implementation. See that comment for what the removed branch did
               // differently (legacy runCouncilRound, wrong topic parse).
-              setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+              setMessages((prev) => [...prev, buildAssistantEntry(result, { local: true })]);
             })
             .catch((err: unknown) => {
               // See the typed-slash .catch above: a throwing slash handler must

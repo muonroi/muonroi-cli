@@ -1462,6 +1462,85 @@ export function persistApprovedPlan(sessionId: string, planText: string): void {
   }
 }
 
+/** The `/ideal start` a session's orchestrator is coordinating (see orchestrator/ideal-coordination.ts). */
+export interface PersistedIdealRun {
+  goal: string;
+  /** ISO timestamp; every delegation started at or after it belongs to the run. */
+  startedAt: string;
+}
+
+const IDEAL_RUN_TOOL = "__ideal_run";
+
+/**
+ * Persist (or, with `null`, close) the session's `/ideal` run record, so
+ * `/ideal status` and `/ideal abort` still find the run after a CLI restart or
+ * `--session` resume. Keyed on the SESSION, never on the working directory:
+ * `.planning/` state belongs to the cwd and would leak into sessions that never
+ * started the run (project_cwd_owned_state_leaks_into_sessions).
+ *
+ * Stored as a synthetic tool_call row like `__approved_plan` above — no new
+ * table or migration; the newest row wins, and a `closed` row ends the run.
+ * Returns false (after logging) when the row could not be written.
+ */
+export function persistIdealRun(sessionId: string, run: PersistedIdealRun | null): boolean {
+  if (!sessionId) return false;
+  const now = new Date().toISOString();
+  const toolCallId = `ideal-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    getDatabase()
+      .prepare(`
+      INSERT INTO tool_calls (session_id, message_seq, tool_call_id, tool_name, args_json, status, started_at, completed_at)
+      VALUES (?, 0, ?, ?, ?, 'completed', ?, ?)
+    `)
+      .run(sessionId, toolCallId, IDEAL_RUN_TOOL, JSON.stringify(run ?? { closed: true }), now, now);
+    return true;
+  } catch (err) {
+    logger.error("storage", "Failed to persist /ideal run record", {
+      sessionId,
+      closing: run === null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/** The session family's open `/ideal` run, or null when none was started or the last one was closed. */
+export function getLastIdealRun(sessionId: string): PersistedIdealRun | null {
+  const chain = getSessionChain(sessionId);
+  if (chain.length === 0) return null;
+  let argsJson: string | undefined;
+  try {
+    argsJson = (
+      getDatabase()
+        .prepare(`
+      SELECT args_json FROM tool_calls
+      WHERE tool_name = ? AND session_id IN (${chain.map(() => "?").join(",")})
+      ORDER BY id DESC
+      LIMIT 1
+    `)
+        .get(IDEAL_RUN_TOOL, ...chain) as { args_json: string } | undefined
+    )?.args_json;
+  } catch (err) {
+    logger.error("storage", "Failed to read /ideal run record", {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  if (!argsJson) return null;
+  try {
+    const parsed = JSON.parse(argsJson) as Partial<PersistedIdealRun> & { closed?: boolean };
+    if (parsed.closed || typeof parsed.goal !== "string" || typeof parsed.startedAt !== "string") return null;
+    return { goal: parsed.goal, startedAt: parsed.startedAt };
+  } catch (err) {
+    logger.error("storage", "Unparseable /ideal run record — treating the run as absent", {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 /** Load the most recent persisted approved plan for this session (or parent chain). */
 export function getLastApprovedPlan(sessionId: string): string | null {
   const chain = getSessionChain(sessionId);
