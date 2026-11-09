@@ -1,4 +1,7 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { getTestModels } from "../__test-helpers__/catalog-fixtures.js";
 import { loadCatalog } from "../models/registry.js";
 import type { AgentMode } from "../types/index";
@@ -64,8 +67,26 @@ describe("parseSubAgentsRawList", () => {
 });
 
 describe("getCurrentModel with modeModels", () => {
+  // Hermetic HOME: getCurrentModel skips models whose provider the user
+  // disabled, so the developer's real ~/.muonroi-cli/user-settings.json must
+  // not decide whether the env-pinned catalog model is honoured.
+  let home: string;
+  const saved: Record<string, string | undefined> = {};
+
   beforeEach(() => {
+    for (const k of ["HOME", "USERPROFILE"]) saved[k] = process.env[k];
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "mcli-subagents-home-"));
+    process.env.HOME = home;
+    process.env.USERPROFILE = home;
     delete process.env.MUONROI_MODEL;
+  });
+
+  afterEach(() => {
+    for (const [k, v] of Object.entries(saved)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    fs.rmSync(home, { recursive: true, force: true });
   });
 
   it("respects mode-specific models when provided", () => {
