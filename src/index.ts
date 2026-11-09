@@ -65,7 +65,7 @@ import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
 import { logger } from "./utils/logger.js";
 import { type PermissionMode, parsePermissionMode } from "./utils/permission-mode.js";
-import { getApiKey, getBaseURL, getCurrentModel, loadUserSettings, saveUserSettings } from "./utils/settings";
+import { getApiKey, getBaseURL, getCurrentModel, loadUserSettings } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { reportRetryNotice, setRetryReporter } from "./utils/visible-retry.js";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
@@ -1100,9 +1100,18 @@ function resolveConfig(options: CliOptions) {
     // Persist to the env-store (per-provider) instead of plaintext settings.json.
     // Fire-and-forget: env-store write is sync; the key is also set in process.env so it
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
-    void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch(() => {});
+    void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch((err: unknown) => {
+      logger.warn("cli", "persisting the --api-key to the env-store failed; it still applies to this run", {
+        operation: "persistApiKeyToKeychain",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
-  if (typeof options.model === "string") saveUserSettings({ defaultModel: normalizeModelId(options.model) });
+  // `-m/--model` applies to THIS run only. It used to be written to the user's
+  // defaultModel, so a one-off probe (`-p ... -m <model>`, 2026-11-09) silently
+  // switched the default to a model on a disabled provider and every later start
+  // in a repo without a project pin crashed. The persistent default is changed
+  // with /model in the TUI.
 
   return { apiKey, baseURL, model, maxToolRounds };
 }
@@ -1137,7 +1146,7 @@ program
   )
   .option("-k, --api-key <key>", "API key")
   .option("-u, --base-url <url>", "API base URL")
-  .option("-m, --model <model>", "Model to use")
+  .option("-m, --model <model>", "Model to use for this run (not saved; change the default with /model)")
   .option("-d, --directory <dir>", "Working directory", process.cwd())
   .option("-p, --prompt <prompt>", "Run a single prompt headlessly")
   .option("--verify", "Run the built-in verify flow headlessly")
