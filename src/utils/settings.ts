@@ -45,14 +45,18 @@ export interface PeakHourPolicy {
 }
 
 export function getCatalogDefaultModel(): string {
+  // Every step skips models the user disabled (model-level or whole provider):
+  // a default that lands on a disabled provider makes selectOrchestratorModel
+  // throw at Agent construction.
+  const enabled = (m: { id: string }): boolean => !isModelDisabled(m.id);
   const provider = getDefaultProvider();
-  if (provider) {
-    const m = getModelByTier("fast", provider);
+  if (provider && !isProviderDisabled(provider)) {
+    const m = getModelByTier("fast", provider, enabled);
     if (m) return m.id;
   }
-  const m = getModelByTier("fast");
+  const m = getModelByTier("fast", undefined, enabled);
   if (m) return m.id;
-  return getFirstCatalogModel().id;
+  return getFirstCatalogModel(enabled).id;
 }
 
 export type TelegramStreamingMode = "off" | "partial";
@@ -814,6 +818,8 @@ export function getProviderConfigs(
   return configs;
 }
 
+const warnedDisabledConfiguredModels = new Set<string>();
+
 export function getCurrentModel(mode?: AgentMode): string {
   // Only honor a configured model if it resolves to a known catalog entry.
   // Stale configs (e.g. retired ids like "deepseek-chat") otherwise break boot.
@@ -823,7 +829,18 @@ export function getCurrentModel(mode?: AgentMode): string {
     if (!id) return undefined;
     const normalized = normalizeModelId(id);
     if (!catalogReady) return normalized;
-    return getModelInfo(normalized) ? normalized : undefined;
+    if (!getModelInfo(normalized)) return undefined;
+    // A configured model whose provider/model the user disabled is stale
+    // config, not an instruction: honouring it crashes boot in
+    // selectOrchestratorModel. Fall through to the next source instead.
+    if (isModelDisabled(normalized)) {
+      if (!warnedDisabledConfiguredModels.has(normalized)) {
+        warnedDisabledConfiguredModels.add(normalized);
+        logger.warn("cli", "Ignoring configured model: it or its provider is disabled", { model: normalized });
+      }
+      return undefined;
+    }
+    return normalized;
   };
 
   const envModel = pickValid(process.env.MUONROI_MODEL);
