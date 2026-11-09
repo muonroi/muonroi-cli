@@ -86,6 +86,11 @@ describe("Escape must reach abort() for detached slash runs (P0-4)", () => {
       it("releases the flag in its finally so the composer returns to idle", () => {
         const fin = body.lastIndexOf("} finally {");
         expect(fin, `${b.label} should tear down in a finally`).toBeGreaterThan(-1);
+        // finishTurnProcessing() clears isProcessingRef/isProcessing AND hands the next queued
+        // follow-up to a fresh turn; a bare reset stranded messages typed while the run was busy
+        // (session 7f24048ad75d). Either spelling releases the flag.
+        const finish = body.indexOf("finishTurnProcessing();", fin);
+        if (finish > fin) return;
         const release = body.indexOf("isProcessingRef.current = false;", fin);
         expect(release, `${b.label} must release isProcessingRef in its finally`).toBeGreaterThan(fin);
         expect(body.indexOf("setIsProcessing(false);", release)).toBeGreaterThan(release);

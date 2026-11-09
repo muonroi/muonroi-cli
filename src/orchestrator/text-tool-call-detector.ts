@@ -94,7 +94,7 @@ const PARAM_ALTERNATION = PARAM_TAGS.join("|");
 // is the Anthropic XML style; `<tool_call>` / `<function_calls>` are Qwen/other.
 // These are matched directly (the wrapper itself is the signal).
 const GENERIC_WRAPPER_RE =
-  /<\/?(?:tool_call|function_calls|tool_use)\b|<invoke\b[^>]*\bname\s*=|<function\b[^>]*\bname\s*=/i;
+  /<\/?(?:tool_call|function_calls|tool_use)\b|<invoke\b[^>]*\bname\s*=|<function\b[^>]*\bname\s*=|<function=[A-Za-z_]/i;
 
 // DeepSeek native tool-call markup leaking into text content. Signature is a
 // vertical-bar sentinel — either U+FF5C fullwidth `｜` or U+2502 box-drawing `│`
@@ -280,15 +280,110 @@ export function parseGlmToolCalls(text: string): ParsedDsmlCall[] {
 }
 
 /**
+ * Parse the Qwen3-coder / StepFun chat-template dialect:
+ *
+ *   <tool_call>
+ *   <function=task>
+ *   <parameter=agent>
+ *   general
+ *   </parameter>
+ *   <parameter=prompt>
+ *   Run only these commands…
+ *   </parameter>
+ *   </function>
+ *   </tool_call>
+ *
+ * Live: session 7f24048ad75d, step-5-preview. It emitted exactly this shape as
+ * assistant TEXT five times in one /ideal run (04:04:24 whole-answer, then
+ * inside prose at 04:11, 04:12, 04:15 twice). The detector fired every time
+ * (`<tool_call>`), but the GLM parser above needs a bare tool name right after
+ * `<tool_call>` and returned [] — so each re-steer was the generic nudge, the
+ * model repeated the dialect, the 2-attempt budget ran out and the turn ended
+ * with the intended `task` / `flow_plan` call never made. Restating the exact
+ * call is what makes a re-steer land (same reason the DSML and GLM parsers
+ * exist). Values are kept as the strings the model wrote; tolerant of a missing
+ * `</parameter>` / `</function>` (cheap models truncate).
+ */
+const QWEN_FUNCTION_RE =
+  /<function=([A-Za-z_][A-Za-z0-9_.-]*)>([\s\S]*?)(?=<function=[A-Za-z_]|<\/function>|<\/tool_call>|$)/gi;
+const QWEN_PARAM_RE =
+  /<parameter=([A-Za-z_][A-Za-z0-9_.-]*)>([\s\S]*?)(?=<\/parameter>|<parameter=[A-Za-z_]|<\/function>|$)/gi;
+
+export function parseQwenFunctionCalls(text: string): ParsedDsmlCall[] {
+  if (!text || !/<function=[A-Za-z_]/i.test(text)) return [];
+  const calls: ParsedDsmlCall[] = [];
+  QWEN_FUNCTION_RE.lastIndex = 0;
+  let fn: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic regex.exec loop
+  while ((fn = QWEN_FUNCTION_RE.exec(text)) !== null) {
+    const args: Record<string, string> = {};
+    const body = fn[2] ?? "";
+    const params = new RegExp(QWEN_PARAM_RE.source, "gi");
+    let p: RegExpExecArray | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic regex.exec loop
+    while ((p = params.exec(body)) !== null) {
+      args[p[1]!] = (p[2] ?? "").trim();
+    }
+    calls.push({ name: fn[1]!, args });
+  }
+  return calls;
+}
+
+/**
  * Recover a leaked tool call's intent regardless of dialect. Tries DeepSeek
- * DSML first (its bar sentinels are unambiguous), then the GLM/Qwen
- * `<tool_call>` shape. Returns [] when nothing parseable is present — callers
- * then fall back to the generic re-steer wording.
+ * DSML first (its bar sentinels are unambiguous), then the Qwen/StepFun
+ * `<function=…>` shape, then the GLM `<tool_call>` shape. Returns [] when
+ * nothing parseable is present — callers then fall back to the generic
+ * re-steer wording.
  */
 export function parseLeakedToolCalls(text: string): ParsedDsmlCall[] {
   const dsml = parseDsmlToolCalls(text);
   if (dsml.length > 0) return dsml;
+  const qwen = parseQwenFunctionCalls(text);
+  if (qwen.length > 0) return qwen;
   return parseGlmToolCalls(text);
+}
+
+/** Longest value echoed back per argument — a leaked `prompt` can run to kilobytes. */
+const INTENT_ARG_MAX_CHARS = 1_500;
+
+/**
+ * " You appear to have intended: name(arg="v"); …" for the call(s) recoverable from
+ * leaked markup, or "" when none parse. Shared by the text re-steer and the
+ * empty-final recovery (whose own text was suppressed by the tool-markup guard).
+ */
+export function describeLeakedToolCalls(text: string): string {
+  const parsed = parseLeakedToolCalls(text);
+  if (parsed.length === 0) return "";
+  const calls = parsed
+    .map(
+      (c) =>
+        `${c.name}(${Object.entries(c.args)
+          .map(
+            ([k, v]) =>
+              `${k}=${JSON.stringify(v.length > INTENT_ARG_MAX_CHARS ? `${v.slice(0, INTENT_ARG_MAX_CHARS)}…` : v)}`,
+          )
+          .join(", ")})`,
+    )
+    .join("; ");
+  return ` You appear to have intended: ${calls}. Make those exact call(s) via the tool interface now.`;
+}
+
+/**
+ * The corrective user message appended when a model wrote a tool call as text.
+ * Restates the recovered call(s) so the model can re-issue them verbatim through
+ * the real tool interface; falls back to a generic instruction when the markup
+ * could not be parsed. Pure so the exact wording is unit-testable.
+ */
+export function buildTextToolResteerMessage(detectedTool: string | null, assistantText: string): string {
+  const intent = describeLeakedToolCalls(assistantText);
+  return (
+    `Your previous reply wrote a \`${detectedTool ?? "tool"}\` tool call as XML/text. That is NOT how tools are invoked here — ` +
+    "writing tool calls as text does nothing, so the action did not run. " +
+    "Use the actual tool-calling interface (function/tool calls) to perform the action now. " +
+    "Do NOT output XML tags like <read_file>, <write_to_file>, <execute_command>, <tool_call> or <function=…> (or DSML markup) as text." +
+    intent
+  );
 }
 
 export const _internals = { TOOL_TAGS, PARAM_TAGS, GENERIC_WRAPPER_RE };

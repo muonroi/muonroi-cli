@@ -555,6 +555,89 @@ describe("durable nonblocking root Flow plan review", () => {
     expect(vi.mocked(spawn)).toHaveBeenCalledTimes(1);
   });
 
+  // Session 7f24048ad75d (2026-11-09): the verifier wrote a report and closed it with the same
+  // `{"verdict":"pass",…}` object twice. One greedy match spanned both, JSON.parse failed, the
+  // clean pass read as "prose alone is not a verdict", the stale council could not be completed
+  // and the host refused to relaunch a verifier for unchanged inputs: a deadlock.
+  it("completes a revalidation whose report closes with its verdict object repeated", async () => {
+    const { root, input } = await staleCouncil();
+    await root.flow_plan_review!.execute!(input, context);
+    const object = JSON.stringify({
+      verdict: "pass",
+      evidence: ["Read current PLAN.md acceptance criteria against the scoped fixture"],
+    });
+    const fresh = await finishVerification(
+      "pass",
+      true,
+      false,
+      1,
+      `VERIFICATION REPORT\n\nPass.\n\n${object}\n${object}`,
+    );
+    await readForMain(fresh.id, 1);
+    const done = JSON.parse(
+      (await root.flow_plan_review!.execute!(
+        {
+          action: "complete",
+          jobId: fresh.id,
+          resultVersion: fresh.resultVersion,
+          assessment: "Independent current-plan read; the verdict object is repeated in the report",
+          decisions: (await mainDecisions()).map((item: object) => ({ ...item, decision: "resolved" })),
+        },
+        context,
+      )) as string,
+    );
+    expect(done.planVerified).toBe(true);
+  });
+
+  it("never lets a repeated closing object turn an explicit fail into a pass", async () => {
+    const { root, input } = await staleCouncil();
+    await root.flow_plan_review!.execute!(input, context);
+    const pass = JSON.stringify({ verdict: "pass", evidence: ["PLAN.md read"] });
+    const fail = JSON.stringify({ verdict: "fail", evidence: ["PLAN.md acceptance is incoherent"] });
+    const fresh = await finishVerification("pass", true, false, 1, `Report.\n\n${pass}\n${fail}`);
+    expect(fresh.hostReview?.verdict?.verdict).toBe("fail");
+  });
+
+  it("launches ONE fresh verifier when the report has no parseable verdict, then refuses another", async () => {
+    const { root, input } = await staleCouncil();
+    await root.flow_plan_review!.execute!(input, context);
+    const first = await finishVerification("pass", true, false, 1, "I reviewed the plan and it looks fine. Pass.");
+    expect(first.hostReview?.verdict).toBeUndefined();
+    await readForMain(first.id, 1);
+    const refused = JSON.parse(
+      (await root.flow_plan_review!.execute!(
+        {
+          action: "complete",
+          jobId: first.id,
+          resultVersion: first.resultVersion,
+          assessment: "Prose-only report",
+          decisions: (await mainDecisions()).map((item: object) => ({ ...item, decision: "resolved" })),
+        },
+        context,
+      )) as string,
+    );
+    expect(refused.message).toContain("No valid structured verification decision");
+    expect(canExecute(cwd, "heavy").allowed).toBe(false);
+
+    // Unchanged inputs used to return the unusable report forever; now one fresh verifier runs.
+    const retried = JSON.parse((await root.flow_plan_review!.execute!(input, context)) as string);
+    expect(retried).toMatchObject({ ok: true, pending: true });
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(3);
+    expect(retried.receipt.delegation.id).not.toBe(first.id);
+    const second = await loadDelegation(jobPath(2));
+    expect(second.agent).toBe("verify");
+    expect(second.planRevalidation?.sourceJobId).toBe(first.planRevalidation?.sourceJobId);
+    expect(canExecute(cwd, "heavy").allowed).toBe(false);
+
+    // A second unparseable report exhausts it: no approval by retrying.
+    await finishVerification("pass", true, false, 2, "Looks fine again, no JSON.");
+    const exhausted = JSON.parse((await root.flow_plan_review!.execute!(input, context)) as string);
+    expect(exhausted.ok).toBe(false);
+    expect(exhausted.message).toContain("plan_revalidation_exhausted");
+    expect(vi.mocked(spawn)).toHaveBeenCalledTimes(3);
+    expect(canExecute(cwd, "heavy").allowed).toBe(false);
+  });
+
   it("keeps failed revalidation reserved and does not widen ordinary reviewOf to councils", async () => {
     const { root, input, source } = await staleCouncil();
     const ordinary = await manager.startTask(

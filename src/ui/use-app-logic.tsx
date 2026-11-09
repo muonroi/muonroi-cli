@@ -926,6 +926,18 @@ export function useAppLogic(props: AppLogicProps) {
     return () => agent.setSteerDrain(null);
   }, [agent]);
 
+  // A message drained into a request the turn watchdog then killed was never
+  // answered. Put it back at the FRONT of the queue so finishTurnProcessing sends
+  // it as the next turn instead of the user's words vanishing (session
+  // 7f24048ad75d). Wired unconditionally: with steering off nothing is drained.
+  useEffect(() => {
+    agent.setSteerRestore((texts) => {
+      queuedMessagesRef.current.unshift(...texts.map((text) => ({ text, displayText: text })));
+      setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+    });
+    return () => agent.setSteerRestore(null);
+  }, [agent]);
+
   const dismissToast = useCallback(() => setActiveToast(null), []);
   // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
 
@@ -4340,6 +4352,11 @@ export function useAppLogic(props: AppLogicProps) {
       isProcessingRef.current = true;
       setIsProcessing(true);
 
+      // No turn is in flight here (guarded above), so an aborted controller still
+      // on the agent is the corpse of a killed turn — drop it or this turn throws
+      // in its routing preamble before it records anything.
+      agent.releaseStaleAbort();
+
       const sessionInfo = agent.getSessionInfo();
       if (sessionInfo?.updatedAt) {
         const lastUpdated = new Date(sessionInfo.updatedAt).getTime();
@@ -4708,16 +4725,24 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
             }
           }
-        } catch {
+        } catch (turnErr) {
           turnHadError = true;
+          // A turn that throws used to leave only "An unexpected error occurred." on
+          // screen and nothing in any log (session 7f24048ad75d: 21 turns died this way).
+          const turnErrMessage = turnErr instanceof Error ? turnErr.message : String(turnErr);
+          logger.error("ui", "processMessage turn threw", {
+            message: turnErrMessage,
+            stack: (turnErr as Error)?.stack?.split("\n").slice(0, 3),
+          });
           if (!isStale()) {
-            contentAccRef.current += "\nAn unexpected error occurred.";
+            const shown = `An unexpected error occurred: ${turnErrMessage.slice(0, 200)}`;
+            contentAccRef.current += `\n${shown}`;
             setStreamContent(contentAccRef.current);
             agentRuntime?.emitEvent({
               t: "event",
               kind: "toast",
               level: "error",
-              text: "An unexpected error occurred.",
+              text: shown,
             });
           }
         } finally {
@@ -5763,9 +5788,10 @@ export function useAppLogic(props: AppLogicProps) {
                 setProductStatus(null);
                 // Release the processing flag re-armed before the run so the
                 // composer returns to idle and a subsequent turn isn't blocked.
-                // Mirrors the /council finally below.
-                isProcessingRef.current = false;
-                setIsProcessing(false);
+                // Mirrors the /council finally below. finishTurnProcessing, not a bare
+                // reset: a message typed while this run was busy sits in the queue and
+                // was stranded there until some later turn happened to end.
+                finishTurnProcessing();
               }
               return;
             }
@@ -6010,8 +6036,8 @@ export function useAppLogic(props: AppLogicProps) {
                 clearInterCardHeartbeat();
                 // Release the processing flag re-armed before the run so the
                 // composer returns to idle and a subsequent turn isn't blocked.
-                isProcessingRef.current = false;
-                setIsProcessing(false);
+                // Drains the follow-up queue too (see the /ideal finally above).
+                finishTurnProcessing();
               }
               return;
             }

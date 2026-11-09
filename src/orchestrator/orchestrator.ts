@@ -498,6 +498,15 @@ export class Agent {
   private abortController: AbortController | null = null;
   /** UI-registered live-queue steer drain; see Agent.setSteerDrain. */
   private steerDrain: (() => { text: string }[]) | null = null;
+  /** UI-registered hand-back for steers a killed request never answered; see Agent.setSteerRestore. */
+  private steerRestore: ((texts: string[]) => void) | null = null;
+  /**
+   * Steers drained into the request that is currently in flight (the latest
+   * prepareStep's drain only: a later prepareStep proves the earlier request
+   * completed). If the turn watchdog kills that request they were never
+   * answered and are handed back instead of silently dropped.
+   */
+  private _steersInFlight: string[] = [];
   private maxToolRounds: number;
   private hardMaxToolRounds: number;
   /** Original hard ceiling at construction — bounds auto-compaction extension. */
@@ -912,6 +921,36 @@ export class Agent {
    */
   setSteerDrain(fn: (() => { text: string }[]) | null): void {
     this.steerDrain = fn;
+  }
+
+  /**
+   * Register (or clear with null) the UI callback that takes back messages that
+   * were drained into a request the turn watchdog then killed, so the user's
+   * words are re-queued as a normal follow-up rather than lost.
+   */
+  setSteerRestore(fn: ((texts: string[]) => void) | null): void {
+    this.steerRestore = fn;
+  }
+
+  /**
+   * Drop an abort controller that is already aborted and has no live turn
+   * behind it. A user-initiated turn calls this before starting: when the
+   * previous turn was killed while its provider call ignored the abort, that
+   * turn's own `finally` never ran, the aborted controller stayed on the agent,
+   * and every later `processMessage` threw at `routingController.signal
+   * .throwIfAborted()` before logging anything (session 7f24048ad75d: 21 typed
+   * messages, zero turns). Only the host's top-level entry may call this: it
+   * runs after the UI's own in-flight guard, so no owner is mid-run.
+   */
+  releaseStaleAbort(): boolean {
+    const stale = this.abortController;
+    if (!stale?.signal.aborted) return false;
+    logger.warn("orchestrator", "Released an aborted turn controller left behind by a killed turn", {
+      sessionId: this.session?.id,
+      reason: String(stale.signal.reason ?? "unknown").slice(0, 200),
+    });
+    this.abortController = null;
+    return true;
   }
 
   getActiveRunId(): string | null {
@@ -4873,6 +4912,10 @@ export class Agent {
     // Routing can wait on provider pacing before MessageProcessor owns a turn.
     // Expose that wait to abort() without replacing a nested caller's controller.
     const ownsRoutingController = !this.abortController;
+    // Only a top-level turn (no owner above it) may release the controller after a
+    // watchdog kill; a nested turn shares its owner's controller and must not null it.
+    const isTopLevelTurn = ownsRoutingController;
+    if (isTopLevelTurn) this._steersInFlight = [];
     const routingController = this.abortController ?? new AbortController();
     if (ownsRoutingController) this.abortController = routingController;
     try {
@@ -5361,7 +5404,39 @@ export class Agent {
                 kind: stallErr.kind,
                 message: stallErr.message,
               });
-              this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              const killedController = this.abortController;
+              killedController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              // The killed turn's own `finally` is what normally clears the controller, but
+              // it only runs once the hung provider call settles — and a call that ignores
+              // the abort never does. Left in place, the aborted controller made every
+              // later `processMessage` throw in its routing preamble (session
+              // 7f24048ad75d: 21 typed messages, no turn). A top-level turn releases it
+              // here; the killed run's finally compares identity, so it stays harmless.
+              if (isTopLevelTurn && killedController && this.abortController === killedController) {
+                this.abortController = null;
+              }
+              // Messages typed during the killed request were drained into it and never
+              // answered. Hand them back to the host to re-queue; with no host hook say so.
+              const unanswered = this._steersInFlight;
+              this._steersInFlight = [];
+              let unansweredNotice = "";
+              if (unanswered.length > 0) {
+                let handedBack = false;
+                try {
+                  if (this.steerRestore) {
+                    this.steerRestore(unanswered);
+                    handedBack = true;
+                  }
+                } catch (restoreErr) {
+                  logger.error("orchestrator", "steer hand-back after watchdog kill failed", {
+                    error: (restoreErr as Error)?.message,
+                    count: unanswered.length,
+                  });
+                }
+                if (!handedBack) {
+                  unansweredNotice = ` Not answered: ${unanswered.map((t) => JSON.stringify(t.slice(0, 120))).join(", ")}.`;
+                }
+              }
               // A watchdog kill must leave the SAME three artifacts a thrown
               // provider error leaves (tool-engine.ts error path) — otherwise it
               // ends the turn more quietly than a crash and the whole failure is
@@ -5373,7 +5448,7 @@ export class Agent {
               //   2. the write-ahead user row flipped off `pending`,
               //   3. an `error` chunk, not a toast — the UI folds `error` content
               //      into the transcript, while a toast auto-dismisses.
-              const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              const stallMessage = `Turn ended by watchdog: ${stallErr.message}${unansweredNotice}`;
               // Attribute the hang to the phase that STARTED without a closing
               // breadcrumb — see the `preStreamPhase` helper in
               // message-processor.ts and the coarse "pre-stream.toolEngine"
@@ -5872,7 +5947,12 @@ export class Agent {
       readPlanReview: (input) => self.readPlanReview(input),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
-      drainSteerMessages: () => self.steerDrain?.() ?? [],
+      drainSteerMessages: () => {
+        const drained = self.steerDrain?.() ?? [];
+        // One drain per prepareStep: a new one proves the previous request completed.
+        self._steersInFlight = drained.map((m) => m.text);
+        return drained;
+      },
       appendMidTurnMessages: (msgs) => self.appendMidTurnMessages(msgs),
       appendCompletedTurn: (user, asst) => {
         self.appendCompletedTurn(user, asst);

@@ -279,7 +279,12 @@ import {
 } from "./subagent-compactor.js";
 import { foldMidConversationSystemMessages } from "./system-message-fold.js";
 import { projectTaskContext, TaskContext } from "./task-context.js";
-import { detectTextEmittedToolCall, parseLeakedToolCalls } from "./text-tool-call-detector.js";
+import {
+  buildTextToolResteerMessage,
+  describeLeakedToolCalls,
+  detectTextEmittedToolCall,
+  parseLeakedToolCalls,
+} from "./text-tool-call-detector.js";
 import { beginToolActivity, endToolActivity, isToolActivityLive, withToolActivity } from "./tool-activity.js";
 import {
   buildToolApprovalInfo,
@@ -1054,6 +1059,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       let encryptedReasoningHidden = false;
       let streamOk = false;
       let retryEmptyFinal = false;
+      // Call(s) recoverable from the markup the tool-markup guard suppressed in a text-only
+      // synthesis (session 7f24048ad75d 04:04:24: a whole `task` call arrived as text).
+      let suppressedMarkupIntent = "";
       let finalAnswerFailed = false;
       let closeMcp: (() => Promise<void>) | undefined;
       let disposeProviderWatchdog: (() => void) | undefined;
@@ -4464,6 +4472,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                   _f6Outcome = "error";
                   _f6Error = (_err as Error)?.message?.slice(0, 200) ?? String(_err).slice(0, 200);
                   _f6MarkupFailure = _err instanceof ToolCallMarkupLeakError;
+                  if (_err instanceof ToolCallMarkupLeakError) {
+                    suppressedMarkupIntent = describeLeakedToolCalls(_err.suppressed);
+                  }
                   logger.file("warn", "orchestrator", "Final synthesis failed", {
                     error: _f6Error,
                     sessionId: deps.session?.id,
@@ -4783,8 +4794,10 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
               "[Final answer recovery] Your last attempt ended without a usable answer and its text-only synthesis emitted invalid tool markup. " +
               "Continue the original request from the completed tool evidence above. Do not repeat completed actions. " +
               "If further work is required, use the actual tool interface subject to its normal approvals; never write tool-call XML as text. " +
-              "Otherwise give the user the verified result and remaining blockers.",
+              "Otherwise give the user the verified result and remaining blockers." +
+              suppressedMarkupIntent,
           });
+          suppressedMarkupIntent = "";
           deps.messageSeqs.push(null);
           if (deps.session)
             logInteraction(deps.session.id, "final_answer_recovery", {
@@ -4997,26 +5010,9 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           // Recover the model's INTENT from the leaked markup (DeepSeek-native
           // DSML carries the tool + args) so the corrective restates the exact
           // call — far more effective than a generic "use the tool" nudge.
-          const _parsedCalls = parseLeakedToolCalls(assistantText);
-          const _intent =
-            _parsedCalls.length > 0
-              ? ` You appear to have intended: ${_parsedCalls
-                  .map(
-                    (c) =>
-                      `${c.name}(${Object.entries(c.args)
-                        .map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-                        .join(", ")})`,
-                  )
-                  .join("; ")}. Make those exact call(s) via the tool interface now.`
-              : "";
           deps.messages.push({
             role: "user",
-            content:
-              `Your previous reply wrote a \`${_textToolCall.tool}\` tool call as XML/text. That is NOT how tools are invoked here — ` +
-              "writing tool calls as text does nothing, so the action did not run. " +
-              "Use the actual tool-calling interface (function/tool calls) to perform the action now. " +
-              "Do NOT output XML tags like <read_file>, <write_to_file>, <execute_command>, or <tool_call> (or DSML markup) as text." +
-              _intent,
+            content: buildTextToolResteerMessage(_textToolCall.tool, assistantText),
           });
           if (deps.session) {
             try {
