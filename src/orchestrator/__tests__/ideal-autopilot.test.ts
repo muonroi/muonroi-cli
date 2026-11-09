@@ -10,6 +10,7 @@ import { describe, expect, it } from "vitest";
 import {
   AUTOPILOT_DEFAULTS,
   AUTOPILOT_PROMPT_TAG,
+  AUTOPILOT_STOP_TEXT,
   type AutopilotLimits,
   type AutopilotObservation,
   type AutopilotSignals,
@@ -68,6 +69,26 @@ describe("continue", () => {
     const { decision } = step(s, { signals: sig() });
     expect(decision.action).toBe("continue");
     if (decision.action === "continue") expect(decision.prompt).toContain("last 2 turn(s) changed nothing");
+  });
+});
+
+describe("complete stop detail names which case applied", () => {
+  it("recorded pass: the detail says a FLOW verification pass was recorded", () => {
+    const { decision } = step(fresh(), { rootComplete: true, facts: { verification: "recorded_pass", openItems: 0 } });
+    expect(decision).toMatchObject({ action: "stop", reason: "complete" });
+    if (decision.action !== "stop") return;
+    expect(decision.detail).toBe("a recorded FLOW verification pass");
+  });
+
+  it("no native plan in scope (verification null): the detail does NOT claim a verification pass", () => {
+    const { state, decision } = step(fresh(), { rootComplete: true, facts: { verification: null, openItems: 0 } });
+    expect(decision).toMatchObject({ action: "stop", reason: "complete" });
+    if (decision.action !== "stop") return;
+    expect(decision.detail).toContain("no native FLOW plan in scope");
+    expect(decision.detail).not.toContain("recorded");
+    expect(state.stop?.detail).toBe(decision.detail);
+    // The reason text alone must not assert a verification either.
+    expect(AUTOPILOT_STOP_TEXT.complete).not.toContain("verification");
   });
 });
 

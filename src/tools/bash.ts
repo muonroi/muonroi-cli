@@ -108,6 +108,29 @@ export class BashTool {
     this.sandboxSettings = settings;
   }
 
+  /**
+   * An independent BashTool that STARTS at this tool's cwd and carries the same
+   * sandbox and shell settings, but shares nothing mutable with it: its own cwd,
+   * its own background-process table, its own temp dir.
+   *
+   * Exists because the in-band `cd` handler in {@link execute} permanently moves
+   * `this.cwd`, and the main session's cwd anchors the working-context ledger,
+   * flow-state resolution and the run-root. A secondary agent (council member)
+   * handed the session's tool would walk it out of the run root with one `cd`.
+   * Measured: session 7b2886c90a51, a council research call `cd`'d the shared
+   * tool into a sibling `probe/` project, sessions.cwd_last ended there, and the
+   * run was declared complete against an empty planning tree.
+   *
+   * The caller owns the fork and should `cleanup()` it when its work is done.
+   */
+  fork(options: { workerScope?: boolean } = {}): BashTool {
+    return new BashTool(this.cwd, {
+      workerScope: options.workerScope === true,
+      sandboxSettings: this.sandboxSettings,
+      shellSettings: this.shellSettings,
+    });
+  }
+
   private async ensureTmpDir(): Promise<string> {
     if (!this.tmpDir) {
       this.tmpDir = await mkdtemp(path.join(os.tmpdir(), "muonroi-bg-"));

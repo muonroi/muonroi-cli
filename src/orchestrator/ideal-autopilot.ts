@@ -219,7 +219,8 @@ export function madeProgress(
 }
 
 export const AUTOPILOT_STOP_TEXT: Record<AutopilotStopReason, string> = {
-  complete: "root goal complete with a recorded verification pass",
+  // The detail says which case applied: see completeStopDetail.
+  complete: "root goal complete",
   budget_turns: "turn budget reached",
   budget_cost: "cost budget reached",
   budget_wall: "time budget reached",
@@ -231,6 +232,19 @@ export const AUTOPILOT_STOP_TEXT: Record<AutopilotStopReason, string> = {
   autowake_off: "workers are running but background auto-wake is off",
   error: "the turn ended in an error",
 };
+
+/**
+ * Detail for the `complete` stop. `verification === null` means no native FLOW
+ * plan was in scope, so NO verification gate applied — saying "with a recorded
+ * verification pass" there was false (session 7b2886c90a51 stopped "complete"
+ * while the repo's VERIFY.md said `verdict: fail`: the plan was invisible from
+ * the drifted cwd, the gate saw null and accepted the claim).
+ */
+export function completeStopDetail(verification: string | null): string {
+  return verification === "recorded_pass"
+    ? "a recorded FLOW verification pass"
+    : "no native FLOW plan in scope, so no verification gate applied";
+}
 
 /** `complete` is the success exit; every other reason is a halt. Maps onto the `run-finished` outcome. */
 export function runFinishedOutcome(reason: AutopilotStopReason): "approved" | "halted" | "error" {
@@ -284,7 +298,7 @@ export function decideAutopilotStep(
     spentUsd: obs.spentUsd ?? state.spentUsd,
     noProgressStreak: progressed ? 0 : state.noProgressStreak,
   };
-  if (obs.rootComplete) return stop("complete", AUTOPILOT_STOP_TEXT.complete, next);
+  if (obs.rootComplete) return stop("complete", completeStopDetail(obs.facts.verification), next);
 
   if (limits.maxCostUsd !== null && obs.spentUsd !== null && obs.spentUsd >= limits.maxCostUsd)
     return stop("budget_cost", `spent $${obs.spentUsd.toFixed(2)} of $${limits.maxCostUsd.toFixed(2)}`, next);
