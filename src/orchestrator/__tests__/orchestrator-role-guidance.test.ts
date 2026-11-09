@@ -63,8 +63,7 @@ describe("actual root SDK role guidance", () => {
       for (const call of calls) {
         const names = call.tools?.filter((tool) => tool.type === "function").map((tool) => tool.name);
         expect(names).toEqual(expect.arrayContaining(["read_file", "grep"]));
-        for (const excluded of ["write_file", "edit_file", "bash", "flow_execute", "flow_verify", "flow_ship"])
-          expect(names).not.toContain(excluded);
+        for (const excluded of ["write_file", "edit_file", "bash"]) expect(names).not.toContain(excluded);
       }
       expect(chunks.some((chunk) => chunk.type === "error")).toBe(false);
     } finally {

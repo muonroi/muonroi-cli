@@ -972,8 +972,11 @@ describe("durable nonblocking root Flow plan review", () => {
     expect(snapshot()).toEqual(before);
     expect(canExecute(cwd, depth).allowed).toBe(false);
     expect(inline).not.toHaveBeenCalled();
-    expect(root.flow_verify).toBeUndefined();
-    expect(root.flow_ship).toBeUndefined();
+    // The orchestrator records phase transitions and verification itself; the
+    // gate (canExecute) above still refuses the transition until the plan passes.
+    expect(root.flow_execute).toBeDefined();
+    expect(root.flow_verify).toBeDefined();
+    expect(root.flow_ship).toBeDefined();
   });
 
   it("deduplicates concurrent starts and survives manager reconstruction", async () => {

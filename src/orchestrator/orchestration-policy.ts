@@ -239,6 +239,14 @@ const ORCHESTRATION_TOOLS = new Set([
   "flow_discuss",
   "flow_plan",
   "flow_plan_review",
+  // Phase transitions and verification are recorded by the orchestrator itself;
+  // workers do the work and the independent checks and cannot call flow_*.
+  // Without these three the root-goal completion gate (implementationVerification
+  // must be recorded_pass) was unsatisfiable from the orchestrator role
+  // (session 55c5b65b6938: every `root_status=complete` claim was refused).
+  "flow_execute",
+  "flow_verify",
+  "flow_ship",
 ]);
 const WORKER_FORBIDDEN = new Set([
   ...ORCHESTRATION_TOOLS,

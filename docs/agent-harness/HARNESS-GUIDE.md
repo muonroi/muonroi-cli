@@ -423,6 +423,16 @@ iterating), alongside `runId`, `subcommand`, `success`, `reason`, `sprintsRun`,
 `shipped`. Block on it with `tui.wait_for {event: "run-finished"}`; read the
 outcome with `tui.last_event {kind: "run-finished"}`.
 
+For an orchestrator-role `/ideal` (the TUI main agent) the run is driven by the
+host autopilot: it starts follow-up turns itself, announces each one as
+`ideal-autopilot action=continue` (no human message), and ends with
+`ideal-autopilot action=stop reason=…` followed by `run-finished`
+(`complete` → `approved`; budget/no-progress/user/askcard stops → `halted`; a hard
+error → `error`; `reason` is the stop code). Typing, Esc or `/ideal abort`
+stops it (`user_*`). `/ideal status` shows the `Autopilot:` line. Specs that script
+a do-nothing orchestrator and assert call counts set `MUONROI_IDEAL_AUTOPILOT=0`;
+`tests/harness/ideal-autopilot.spec.ts` is the reference for driving it.
+
 ## Selector grammar quick reference
 
 ```

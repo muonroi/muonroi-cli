@@ -98,3 +98,57 @@ asks the user (no blocking card). Allowance: env `MUONROI_FLOW_PLAN_REVIEW_MAX_A
 E2E coverage of the deterministic gate: `tests/harness/flow-hard-gate.spec.ts`
 (seeds `.planning/STATE.md` in a throwaway temp cwd; assessor OFF for
 determinism). Gate/assessor/verify logic is unit-covered under `src/workflow/__tests__/`.
+
+## Orchestrator FLOW tools and the host autopilot (`/ideal`)
+
+**The orchestrator records phase transitions itself.** `flow_execute`, `flow_verify`
+and `flow_ship` are in `ORCHESTRATION_TOOLS` (`src/orchestrator/orchestration-policy.ts`);
+workers still cannot call any `flow_*` tool. The orchestrator dispatches the work and
+the independent check to workers, then records the outcome: `flow_verify(passed, evidence)`
+keeps the deterministic floor (`passed=true` needs evidence), runs the verify council at
+standard/heavy depth (its verdict overrides `passed`) and writes `VERIFY.md`
+(`verdict: pass|fail`). A recorded `pass` is `implementationVerification=recorded_pass`,
+which is what `context_load(root_status="complete")` requires when the session owns a
+native plan (`working-context.ts`). Session 55c5b65b6938 could never close because the
+orchestrator had no `flow_verify`. Unit evidence:
+`src/orchestrator/__tests__/orchestrator-flow-verify-completion.test.ts`.
+
+**The host starts the next turn.** For an orchestrator-role `/ideal` run, when a turn
+ends and the run is not done the HOST starts the next turn (`src/orchestrator/ideal-autopilot*.ts`;
+the UI only applies the decision, `use-app-logic.tsx` `idealAutopilotStepRef`). No prose in
+the model contract asks it to keep going. The continuation is a visible host entry
+(`⟲ /ideal autopilot — turn N/M`) with a short fact-only prompt tagged
+`[host: /ideal autopilot, turn N/M]`. Stop conditions, first match wins:
+
+| Reason | Rule |
+|---|---|
+| `user_message` / `user_interrupt` / `user_abort` | The user always wins: a typed message, Esc/Ctrl+C, or `/ideal abort` stops it at once (applied when the user acts, also between turns). `/ideal status` does not. |
+| `error` | The turn ended in a hard error, or the delegation ledger was unreadable. |
+| `needs_human` | A card (askcard, preflight, tool-loop/safety/approval card) is waiting. Never auto-answered. |
+| `complete` | Root goal closed: `root_status=complete` on the ledger and, when a native plan exists, `recorded_pass`. Success exit. |
+| `budget_cost` / `budget_wall` | Spend (usage_events + worker cost-log rows) or wall minutes of the current budget window reached the cap. |
+| `no_progress` | N consecutive turn ends (workers not running) with no file change, no delegation started/finished, and no FLOW change (phase, plan verified, implementation verification, PLAN.md/VERIFY.md mtime). Host-owned paths (`.muonroi-cli/`, `.planning/`, `.muonroi-flow/`) are excluded from the file signal. Waiting on running workers is not a stall. |
+| `autowake_off` | Workers are running but `MUONROI_BACKGROUND_AUTOWAKE=0`, so nothing would continue the run. |
+| `budget_turns` | `maxTurns` host-started turns in the window. |
+
+While workers run the autopilot just waits: each result wakes the model (existing
+auto-wake) and that turn's end is evaluated again.
+
+Knobs (env wins over `settings.json` `idealAutopilot.*`; `0` = no limit for turns/wall/cost):
+
+| Env | Setting | Default |
+|---|---|---|
+| `MUONROI_IDEAL_AUTOPILOT=0` | `enabled` | on |
+| `MUONROI_IDEAL_AUTOPILOT_MAX_TURNS` | `maxTurns` | 40 host-started turns per window |
+| `MUONROI_IDEAL_AUTOPILOT_MAX_COST_USD` | `maxCostUsd` | no cap (the standing "/ideal has no spend cap" decision) |
+| `MUONROI_IDEAL_AUTOPILOT_MAX_WALL_MIN` | `maxWallMinutes` | 240 |
+| `MUONROI_IDEAL_AUTOPILOT_NO_PROGRESS` | `noProgressTurns` | 3 |
+
+State rides in the `__ideal_run` record (`autopilot`: status, window start, turns,
+no-progress streak, last signals, spend, stop reason), so it survives a restart.
+`/ideal start` and `/ideal resume` open a fresh budget window (resume keeps the total turn
+count and clears the stop); a restart alone never starts a turn — only a human action does.
+`/ideal status` prints the `Autopilot:` line with the stop reason. LiveEvents: `ideal-autopilot`
+(`start` | `continue` | `wait` | `stop`, with `reason` on stop) and, for the terminal stop, `run-finished`
+(`complete` → `outcome=approved`, `error` → `error`, anything else → `halted`; `reason` = the stop code).
+E2E: `tests/harness/ideal-autopilot.spec.ts`.

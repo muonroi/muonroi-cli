@@ -99,6 +99,10 @@ it("/ideal status and /ideal abort run locally; abort stops the run's running wo
       MUONROI_LLM_FIRST_CLASSIFY: "0",
       MUONROI_FLOW_ASSESSOR: "0",
       MUONROI_NO_SHELL_HOLD: "1",
+      // This spec pins "status/abort never call the model" on a scripted orchestrator that
+      // ends every turn with text and changes nothing. The host autopilot (ideal-autopilot.spec.ts)
+      // would keep starting turns on such a run until its no-progress rule fires.
+      MUONROI_IDEAL_AUTOPILOT: "0",
     },
   });
   const { driver } = ctx;

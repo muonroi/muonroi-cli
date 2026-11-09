@@ -92,6 +92,20 @@ export function getSessionTotalTokens(sessionId: string): number {
   return total;
 }
 
+/** USD billed to the session family by `usage_events` rows created at or after `sinceIso` (ISO timestamps sort as text). */
+export function sumSessionCostUsdSince(sessionId: string, sinceIso: string): number {
+  const chain = getSessionChain(sessionId);
+  if (chain.length === 0) return 0;
+  const row = getDatabase()
+    .prepare(`
+    SELECT COALESCE(SUM(cost_micros), 0) AS micros
+    FROM usage_events
+    WHERE session_id IN (${chain.map(() => "?").join(",")}) AND created_at >= ?
+  `)
+    .get(...chain, sinceIso) as { micros: number } | undefined;
+  return (row?.micros ?? 0) / 1_000_000;
+}
+
 export function listSessionUsage(sessionId: string): UsageEvent[] {
   const chain = getSessionChain(sessionId);
   const placeholders = chain.map(() => "?").join(",");

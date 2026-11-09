@@ -118,6 +118,9 @@ it("/ideal status and /ideal abort find the run after the CLI restarts on the sa
         MUONROI_LLM_FIRST_CLASSIFY: "0",
         MUONROI_FLOW_ASSESSOR: "0",
         MUONROI_NO_SHELL_HOLD: "1",
+        // Same scripted do-nothing orchestrator as ideal-local-subcommands.spec.ts: pin the
+        // run-record behaviour without host-started turns (covered by ideal-autopilot.spec.ts).
+        MUONROI_IDEAL_AUTOPILOT: "0",
       },
     });
     await ctx.driver.wait_for({ selector: "role=textbox", timeoutMs: 60_000 });

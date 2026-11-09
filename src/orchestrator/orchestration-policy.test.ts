@@ -50,6 +50,10 @@ describe("orchestrator execution policy", () => {
       write_file: {},
       ee_query: {},
       flow_status: {},
+      flow_execute: {},
+      flow_verify: {},
+      flow_ship: {},
+      flow_next: {},
     };
     const merged = {
       ...native,
@@ -64,7 +68,13 @@ describe("orchestrator execution policy", () => {
       "grep",
       "ee_query",
       "flow_status",
+      "flow_execute",
+      "flow_verify",
+      "flow_ship",
     ]);
+    // Workers never get the FLOW transition tools the orchestrator now owns.
+    for (const name of ["flow_execute", "flow_verify", "flow_ship", "flow_next"])
+      expect(filterExecutionTools(merged, native, "worker")).not.toHaveProperty(name);
     expect(filterExecutionTools({ ...merged, task: {} }, native, "orchestrator")).not.toHaveProperty("task");
     expect(filterExecutionTools({ read_file: {} }, native, "orchestrator")).not.toHaveProperty("read_file");
   });

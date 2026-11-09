@@ -46,6 +46,7 @@ import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
 import type { ToolApprovalAskInfo } from "../orchestrator/tool-approval.js";
 import { ASK_USER_DISMISSED, buildAskUserQuestion } from "../orchestrator/ask-user.js";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
+import { AUTOPILOT_STOP_TEXT } from "../orchestrator/ideal-autopilot.js";
 import { Agent } from "../orchestrator/orchestrator";
 import {
   buildCompactResumeMessage,
@@ -1697,8 +1698,10 @@ export function useAppLogic(props: AppLogicProps) {
   const showApiKeyModalRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
   const processMessageRef = useRef<
-    (text: string, displayText?: string, internalActivity?: boolean) => Promise<void> | void
+    (text: string, displayText?: string, internalActivity?: boolean | "autopilot") => Promise<void> | void
   >(() => {});
+  // Host autopilot step for an orchestrator-role /ideal run; assigned below `processMessage`.
+  const idealAutopilotStepRef = useRef<(turn: { error?: string | null }) => void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const modeInfoRef = useRef<(typeof MODES)[number]>(MODES[0]);
   const activeRunIdRef = useRef(0);
@@ -4094,6 +4097,18 @@ export function useAppLogic(props: AppLogicProps) {
       if (pendingCouncilQuestionRef.current || preflightCardStateRef.current) {
         return false;
       }
+      // Between turns an armed /ideal autopilot is still running (waiting for a
+      // worker, or about to start the next turn): Esc is the user taking over.
+      if (!isProcessingRef.current && agent.isIdealAutopilotRunning()) {
+        agent.yieldIdealAutopilot("user_interrupt");
+        setMessages((prev) => [
+          ...prev,
+          buildAssistantEntry(`⟲ /ideal autopilot stopped — ${AUTOPILOT_STOP_TEXT.user_interrupt}`, { local: true }),
+        ]);
+        key?.preventDefault();
+        key?.stopPropagation();
+        return true;
+      }
       if (!isProcessingRef.current) return false;
       key?.preventDefault();
       key?.stopPropagation();
@@ -4247,7 +4262,8 @@ export function useAppLogic(props: AppLogicProps) {
       text: string,
       displayText?: string,
       images?: Array<{ path: string; mediaType: string; base64: string }>,
-      internalActivity = false,
+      // true = hidden host turn (background wake); "autopilot" = host turn that stays visible in the transcript.
+      internalActivity: boolean | "autopilot" = false,
     ) => {
       if (!text.trim() || isProcessingRef.current) return;
       if (taskListClearTimerRef.current) {
@@ -4280,16 +4296,20 @@ export function useAppLogic(props: AppLogicProps) {
         beginLiveTurn({ kind: "local", agent, modeColor: color });
         setMessages((prev) => [
           ...prev,
-          buildUserEntry((displayText ?? text).trim(), { modeColor: color, internal: internalActivity }),
+          buildUserEntry((displayText ?? text).trim(), { modeColor: color, internal: internalActivity === true }),
         ]);
         setTimeout(scrollToBottom, 50);
         await new Promise((r) => setTimeout(r, 0));
         let turnHadError = false;
+        let turnErrorText = "";
         let turnHadAuthError = false;
         try {
           // Main retains the full EE guidance; UI decoration is file-only.
           setActiveEeYield(recordInternalExperience);
-          for await (const chunk of agent.processMessage(text.trim(), undefined, images, { internalActivity })) {
+          for await (const chunk of agent.processMessage(text.trim(), undefined, images, {
+            internalActivity: internalActivity === true,
+            autopilotContinuation: internalActivity === "autopilot",
+          })) {
             // A council spliced into a NORMAL agent turn (convene_council /
             // auto-council route through tool-engine's runCouncilV2, not through
             // the /council or /ideal slash loops) delivers its chunks here. This
@@ -4549,6 +4569,7 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "error":
                 turnHadError = true;
+                turnErrorText ||= (chunk.content || "Unknown error").slice(0, 300);
                 if (chunk.isAuthError) {
                   turnHadAuthError = true;
                 }
@@ -4628,8 +4649,9 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
             }
           }
-        } catch {
+        } catch (err) {
           turnHadError = true;
+          turnErrorText ||= `unexpected error: ${err instanceof Error ? err.message : String(err)}`.slice(0, 300);
           if (!isStale()) {
             contentAccRef.current += "\nAn unexpected error occurred.";
             setStreamContent(contentAccRef.current);
@@ -4672,6 +4694,10 @@ export function useAppLogic(props: AppLogicProps) {
           // commands (it streams text to the model), so the compaction must be
           // performed inline here — not by re-dispatching "/compact" as a prompt.
           const finalContent = contentAccRef.current.trim();
+          // A turn of an armed /ideal run ended: the host decides whether to start the
+          // next one. Not for a proactive compaction — its resume turn ends through here.
+          if (!wasInterrupted && !finalContent.startsWith("/compact"))
+            idealAutopilotStepRef.current({ error: turnHadError ? turnErrorText : null });
           if (finalContent.startsWith("/compact")) {
             const _pc = detectProactiveCompactRequest(finalContent);
             const _resume = buildCompactResumeMessage(_pc.instructions);
@@ -4746,6 +4772,52 @@ export function useAppLogic(props: AppLogicProps) {
     processMessageRef.current = (text, displayText, internalActivity) =>
       processMessage(text, displayText, undefined, internalActivity);
   }, [processMessage]);
+
+  // Host autopilot of an orchestrator-role /ideal run (orchestrator/ideal-autopilot.ts).
+  // Called when a turn of the run ends. The agent decides from host-observable facts
+  // (root goal complete? budget? progress? workers running?); this only applies it:
+  // start the next turn as a visible host turn, or say why the run stopped. A no-op
+  // for any session without an armed autopilot.
+  useEffect(() => {
+    idealAutopilotStepRef.current = (turn) => {
+      // A turn (typed, queued, another host turn) already owns the composer: the user is driving.
+      if (isProcessingRef.current) return;
+      // Something the user typed during the turn is still queued (the /ideal slash turn does not drain the queue): it wins.
+      if (queuedMessagesRef.current.length > 0) {
+        agent.yieldIdealAutopilot("user_message");
+        finishTurnProcessing();
+        return;
+      }
+      void (async () => {
+        const awaitingHuman =
+          pendingCouncilQuestionRef.current !== null ||
+          preflightCardStateRef.current !== null ||
+          askUserResolversRef.current.size > 0 ||
+          toolLoopCapResolversRef.current.size > 0 ||
+          safetyOverrideResolversRef.current.size > 0;
+        try {
+          const decision = await agent.idealAutopilotAfterTurn({ error: turn.error ?? null, awaitingHuman });
+          if (decision.action === "continue") {
+            // Re-check after the await: the user may have typed or pressed Esc while the host measured.
+            if (isProcessingRef.current || !agent.isIdealAutopilotRunning()) return;
+            void processMessageRef.current(decision.prompt, decision.label, "autopilot");
+          } else if (decision.action === "stop") {
+            const text = `⟲ /ideal autopilot stopped — ${AUTOPILOT_STOP_TEXT[decision.reason]}${
+              decision.detail && decision.detail !== AUTOPILOT_STOP_TEXT[decision.reason] ? ` (${decision.detail})` : ""
+            }\n`;
+            setMessages((prev) => [...prev, buildAssistantEntry(text, { local: true })]);
+            pushToast(decision.reason === "complete" ? "info" : "warn", text.trim());
+            setTimeout(scrollToBottom, 10);
+          }
+        } catch (err) {
+          logger.error("ui", "/ideal autopilot step failed", {
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          });
+        }
+      })();
+    };
+  }, [agent, finishTurnProcessing, pushToast, scrollToBottom]);
 
   // Scaffold-checkpoint integration — wraps initNewProject() so a single helper
   // serves both submit branches (design-preview + bb-template) and the R-key
@@ -5409,6 +5481,7 @@ export function useAppLogic(props: AppLogicProps) {
               // "esc to interrupt" affordance).
               isProcessingRef.current = true;
               setIsProcessing(true);
+              let slashErrorText: string | null = null;
               try {
                 const gen = (agent as any).runProductLoopV1(payload);
                 for await (const chunk of gen) {
@@ -5627,6 +5700,8 @@ export function useAppLogic(props: AppLogicProps) {
                       },
                     });
                   }
+                  // Not rendered here (it never was); only remembered so the /ideal autopilot stops on it.
+                  if (chunk.type === "error") slashErrorText ||= (chunk.content || "Unknown error").slice(0, 300);
                   if (chunk.type === "done") break;
                   if (process.env.MUONROI_DEBUG_LEADER === "1") {
                     process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);
@@ -5647,6 +5722,7 @@ export function useAppLogic(props: AppLogicProps) {
                 // Resume/Retry/Abort auto-detect the newest incomplete run (A/B)
                 // so the user never has to know the runId.
                 const errMsg = e instanceof Error ? e.message : String(e);
+                slashErrorText = errMsg.slice(0, 300);
                 const brokenSprintN =
                   payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
                 setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
@@ -5687,6 +5763,8 @@ export function useAppLogic(props: AppLogicProps) {
                 isProcessingRef.current = false;
                 setIsProcessing(false);
               }
+              // `/ideal start|resume` ran one turn of the run: the host decides about the next.
+              if (startsLoop) idealAutopilotStepRef.current({ error: slashErrorText });
               return;
             }
 

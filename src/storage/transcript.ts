@@ -1507,6 +1507,79 @@ export interface PersistedIdealRun {
   goal: string;
   /** ISO timestamp; every delegation started at or after it belongs to the run. */
   startedAt: string;
+  /** Host autopilot state (orchestrator/ideal-autopilot.ts); absent on records written before it existed. */
+  autopilot?: PersistedAutopilot;
+}
+
+/** Why the host stopped starting turns by itself; orchestrator/ideal-autopilot.ts describes each. */
+export const AUTOPILOT_STOP_REASONS = [
+  "complete",
+  "budget_turns",
+  "budget_cost",
+  "budget_wall",
+  "no_progress",
+  "user_message",
+  "user_interrupt",
+  "user_abort",
+  "needs_human",
+  "autowake_off",
+  "error",
+] as const;
+export type AutopilotStopReason = (typeof AUTOPILOT_STOP_REASONS)[number];
+
+/** What the host last observed; progress is any difference between two of these. */
+export interface AutopilotSignals {
+  /** Fingerprint of the working tree (HEAD + every changed file's path/mtime/size). */
+  workspace: string;
+  /** Delegations of the run that were started / that reached a terminal status. */
+  delegationsStarted: number;
+  delegationsFinished: number;
+  /** FLOW phase | plan verified | implementation verification. */
+  flow: string;
+}
+
+export interface PersistedAutopilot {
+  status: "running" | "stopped";
+  /** ISO; start of the budget window. Reset by `/ideal start` and `/ideal resume`. */
+  armedAt: string;
+  /** Turns the host started itself in this budget window. */
+  turns: number;
+  /** Same, across every window of this run (resume keeps counting). */
+  totalTurns: number;
+  /** Consecutive turn ends with no host-observable progress. */
+  noProgressStreak: number;
+  signals: AutopilotSignals;
+  /** USD spent in this window as of the last evaluation; null when unmeasurable. */
+  spentUsd: number | null;
+  stop?: { reason: AutopilotStopReason; detail: string; at: string };
+}
+
+function parseAutopilot(value: unknown): PersistedAutopilot | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const a = value as Partial<PersistedAutopilot>;
+  const sig = a.signals as Partial<AutopilotSignals> | undefined;
+  const stop = a.stop as Partial<NonNullable<PersistedAutopilot["stop"]>> | undefined;
+  const validStop =
+    stop === undefined ||
+    (typeof stop.detail === "string" &&
+      typeof stop.at === "string" &&
+      (AUTOPILOT_STOP_REASONS as readonly string[]).includes(stop.reason as string));
+  if (
+    (a.status !== "running" && a.status !== "stopped") ||
+    typeof a.armedAt !== "string" ||
+    !Number.isSafeInteger(a.turns) ||
+    !Number.isSafeInteger(a.totalTurns) ||
+    !Number.isSafeInteger(a.noProgressStreak) ||
+    !sig ||
+    typeof sig.workspace !== "string" ||
+    !Number.isSafeInteger(sig.delegationsStarted) ||
+    !Number.isSafeInteger(sig.delegationsFinished) ||
+    typeof sig.flow !== "string" ||
+    !(a.spentUsd === null || typeof a.spentUsd === "number") ||
+    !validStop
+  )
+    return undefined;
+  return a as PersistedAutopilot;
 }
 
 const IDEAL_RUN_TOOL = "__ideal_run";
@@ -1571,7 +1644,10 @@ export function getLastIdealRun(sessionId: string): PersistedIdealRun | null {
   try {
     const parsed = JSON.parse(argsJson) as Partial<PersistedIdealRun> & { closed?: boolean };
     if (parsed.closed || typeof parsed.goal !== "string" || typeof parsed.startedAt !== "string") return null;
-    return { goal: parsed.goal, startedAt: parsed.startedAt };
+    const autopilot = parseAutopilot(parsed.autopilot);
+    if (parsed.autopilot !== undefined && !autopilot)
+      logger.warn("storage", "Unreadable /ideal autopilot state — treating the autopilot as not armed", { sessionId });
+    return { goal: parsed.goal, startedAt: parsed.startedAt, ...(autopilot ? { autopilot } : {}) };
   } catch (err) {
     logger.error("storage", "Unparseable /ideal run record — treating the run as absent", {
       sessionId,

@@ -517,7 +517,9 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
 
   tools.flow_execute = dynamicTool({
     description:
-      "Advance to execute phase after plan-verify pass. Does not run code itself — unlocks implement step in workflow state.",
+      opts.executionRole === "orchestrator"
+        ? "Record the move to the execute phase after plan-verify pass (or settlement). Runs no code: dispatch the implementation to workers with task/delegate."
+        : "Advance to execute phase after plan-verify pass. Does not run code itself — unlocks implement step in workflow state.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -538,7 +540,10 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
   });
 
   tools.flow_verify = dynamicTool({
-    description: "Mark verify phase complete after tests/self-verify. Requires evidence when passed=true.",
+    description:
+      opts.executionRole === "orchestrator"
+        ? "Record the verification outcome of the whole plan. passed=true needs evidence from an executed check: dispatch an independent verify worker, then summarise its result here (cite its job id); your own reading is not evidence. At standard/heavy depth the verify council adjudicates goal achievement and its verdict overrides passed. A recorded pass (VERIFY.md verdict: pass) is what lets context_load accept root_status=complete."
+        : "Mark verify phase complete after tests/self-verify. Requires evidence when passed=true.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
@@ -629,7 +634,9 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
 
   tools.flow_ship = dynamicTool({
     description:
-      "Polish delivery after flow_verify pass — writes .planning/SHIP.md. Call when task is ready to hand off.",
+      opts.executionRole === "orchestrator"
+        ? "Record delivery after a recorded flow_verify pass — writes .planning/SHIP.md (notes and a suggested commit message only; it commits and pushes nothing)."
+        : "Polish delivery after flow_verify pass — writes .planning/SHIP.md. Call when task is ready to hand off.",
     inputSchema: jsonSchema({
       type: "object",
       properties: {
