@@ -764,6 +764,22 @@ function recordCouncilProviderFailure(args: {
  */
 export const __testRecordCouncilProviderFailure = recordCouncilProviderFailure;
 
+/**
+ * The BashTool a council member's tools run on: a throwaway fork of the
+ * session's, never the session's own (see {@link BashTool.fork}).
+ *
+ * `workerScope: true` — a council member is a secondary agent on a machine it
+ * shares with the main session's dev servers and builds. workerScope refuses
+ * shell process termination (`taskkill`/`kill`/`pkill`/`Stop-Process`, build-
+ * server shutdown, `nuget locals --clear`, also nested through `bash -c`),
+ * which would act on PIDs the member does not own. Research reads and probes;
+ * it does not need process control, and workerScope leaves `cd`, builds and
+ * tests alone, so it costs no legitimate capability.
+ */
+function councilBashFork(bash: BashTool): BashTool {
+  return bash.fork({ workerScope: true });
+}
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
@@ -1047,7 +1063,9 @@ export function createCouncilLLM(
       let mcpBundleForDebate: McpToolBundle | null = null;
       if (options?.enableVerificationTools) {
         try {
-          const builtins = createTools(bash, mode);
+          // Fork (not the session's tool): a council tool must never move the
+          // caller's BashTool cwd. See BashTool.fork and councilBashFork.
+          const builtins = createTools(councilBashFork(bash), mode);
           // Strict allowlist — NO bash/edit/write/task in debate verification.
           const ALLOWED = new Set(["grep", "read_file"]);
           const filtered: ToolSet = {};
@@ -1257,14 +1275,24 @@ export function createCouncilLLM(
       // must report the identical budget.
       const researchMaxOut = maxOutSpread(runtime, 4096);
 
-      const builtinTools = createTools(bash, mode);
+      // Per-call fork — research carries the FULL builtin set including bash, and
+      // a member's `cd` must not move the session's shared BashTool (session
+      // 7b2886c90a51: cwd_last ended in a sibling `probe/` project). Owned by this
+      // call: cleaned up in `finally` so its background processes die with it.
+      const researchBash = councilBashFork(bash);
+      const builtinTools = createTools(researchBash, mode);
 
       // CQ-03: Lazy MCP bundle per research call — fail-open so builtins remain available
       let mcpBundle: McpToolBundle | null = null;
       try {
         mcpBundle = await buildMcpToolSet(loadMcpServers());
-      } catch {
-        // MCP spawn failed — research continues with builtin tools only
+      } catch (err) {
+        // MCP spawn failed — research continues with builtin tools only, but a
+        // silent swallow hid which server failed and why. (No-Silent-Catch.)
+        console.error(
+          `[council/llm] research MCP tool discovery failed, continuing with builtins only: ${err instanceof Error ? err.message : String(err)}`,
+          { modelId, provider: providerId },
+        );
       }
 
       const mergedResearchTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
@@ -1470,6 +1498,12 @@ export function createCouncilLLM(
         );
       } finally {
         await mcpBundle?.close().catch(() => {});
+        await researchBash.cleanup().catch((err: unknown) => {
+          console.error(
+            `[council/llm] research bash fork cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+            { modelId },
+          );
+        });
       }
     },
   };

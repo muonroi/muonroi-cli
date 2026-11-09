@@ -30,6 +30,10 @@ function streamTextMock(captured: Record<string, unknown>[], parts: Array<Record
   });
 }
 
+// Council tools run on a per-call fork of the session BashTool (BashTool.fork); the
+// tool factory is mocked here, so a stub that can fork is all these tests need.
+const FORKABLE_BASH = { fork: () => ({ cleanup: async () => {} }) };
+
 const FINISH = { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
 
 describe("debate() call shape — tools off by default, on with explicit opt-in", () => {
@@ -66,7 +70,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     await llm.debate("gpt-4o", "system prompt", "user prompt", undefined);
 
@@ -126,7 +130,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     await llm.debate("gpt-4o", "system", "prompt", undefined, undefined, { enableVerificationTools: true });
 
@@ -183,7 +187,7 @@ describe("debate() call shape — tools off by default, on with explicit opt-in"
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     await llm.debate("gpt-4o", "system", "prompt");
 
@@ -252,10 +256,10 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     const observed: unknown[] = [];
-    const evidenceLLM = createCouncilLLM({} as any, "agent" as any, undefined, stats, (event) => {
+    const evidenceLLM = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats, (event) => {
       observed.push(event);
     });
     const result = await evidenceLLM.debate("gpt-4o", "system", "prompt");
@@ -312,7 +316,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     const result = await llm.debate("gpt-4o", "system", "prompt");
     expect(result.toolCalls).toEqual([]);
@@ -358,7 +362,7 @@ describe("CQ-07: debate() returns { text, toolCalls } — not bare string", () =
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     expect(stats.calls).toBe(0);
     await llm.debate("gpt-4o", "system", "prompt");
