@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  buildTextToolResteerMessage,
+  describeLeakedToolCalls,
   detectTextEmittedToolCall,
   parseDsmlToolCalls,
   parseGlmToolCalls,
@@ -216,5 +218,103 @@ describe("parseGlmToolCalls / parseLeakedToolCalls", () => {
       { name: "grep", args: { pattern: "foo" } },
     ]);
     expect(parseLeakedToolCalls("plain text").length).toBe(0);
+  });
+});
+
+// Verbatim opening of the leak captured in session 7f24048ad75d (interaction_logs
+// id 81108, error/tool_markup_leak, 2026-11-09T04:04:24Z, step-5-preview). The
+// log keeps the first 500 chars; the closing tags are what the model's template
+// writes after the last parameter.
+const STEPFUN_PROMPT =
+  "Run only these commands, one at a time, in the current working directory: (1) node --version (2) npm --version";
+const STEPFUN_LEAK = [
+  "<tool_call>",
+  "<function=task>",
+  "<parameter=agent>",
+  "general",
+  "</parameter>",
+  "<parameter=background>",
+  "False",
+  "</parameter>",
+  "<parameter=description>",
+  "Toolchain probe for notes CLI",
+  "</parameter>",
+  "<parameter=modelId>",
+  "step-3.7-flash",
+  "</parameter>",
+  "<parameter=prompt>",
+  STEPFUN_PROMPT,
+  "</parameter>",
+  "</function>",
+  "</tool_call>",
+].join("\n");
+
+describe("Qwen/StepFun <function=name><parameter=key> dialect (session 7f24048ad75d)", () => {
+  it("is detected as a text-emitted tool call", () => {
+    expect(detectTextEmittedToolCall(STEPFUN_LEAK).detected).toBe(true);
+  });
+
+  it("is detected without the <tool_call> wrapper too", () => {
+    const text = "Plan amended.\n<function=flow_plan>\n<parameter=action>\namend\n</parameter>";
+    expect(detectTextEmittedToolCall(text).detected).toBe(true);
+  });
+
+  it("recovers the exact call and arguments", () => {
+    expect(parseLeakedToolCalls(STEPFUN_LEAK)).toEqual([
+      {
+        name: "task",
+        args: {
+          agent: "general",
+          background: "False",
+          description: "Toolchain probe for notes CLI",
+          modelId: "step-3.7-flash",
+          prompt: STEPFUN_PROMPT,
+        },
+      },
+    ]);
+  });
+
+  it("recovers a call cut off mid-block (log truncation / model stopped early)", () => {
+    const cut = STEPFUN_LEAK.slice(0, STEPFUN_LEAK.indexOf("<parameter=modelId>"));
+    expect(parseLeakedToolCalls(cut)).toEqual([
+      { name: "task", args: { agent: "general", background: "False", description: "Toolchain probe for notes CLI" } },
+    ]);
+  });
+
+  it("recovers several calls in one reply, between prose", () => {
+    const text =
+      "First I check.\n<tool_call>\n<function=read_file>\n<parameter=file_path>\na.ts\n</parameter>\n</function>\n</tool_call>\nthen\n<tool_call>\n<function=grep>\n<parameter=pattern>\nfoo\n</parameter>\n</function>\n</tool_call>";
+    expect(parseLeakedToolCalls(text).map((c) => [c.name, c.args])).toEqual([
+      ["read_file", { file_path: "a.ts" }],
+      ["grep", { pattern: "foo" }],
+    ]);
+  });
+
+  it("does not claim prose that merely mentions the syntax", () => {
+    expect(parseLeakedToolCalls("Use the <function> element and a parameter list.")).toEqual([]);
+  });
+
+  it("the re-steer restates the exact call so the model can re-issue it", () => {
+    const detected = detectTextEmittedToolCall(STEPFUN_LEAK);
+    const msg = buildTextToolResteerMessage(detected.tool, STEPFUN_LEAK);
+    expect(msg).toContain("You appear to have intended: task(");
+    expect(msg).toContain('agent="general"');
+    expect(msg).toContain('modelId="step-3.7-flash"');
+    expect(msg).toContain("via the tool interface now");
+  });
+
+  it("falls back to the generic wording when nothing parses", () => {
+    const msg = buildTextToolResteerMessage("tool_call", "<tool_call>");
+    expect(msg).toContain("NOT how tools are invoked here");
+    expect(msg).not.toContain("You appear to have intended");
+  });
+
+  it("truncates a huge argument in the restated call", () => {
+    const big = "x".repeat(5_000);
+    const msg = describeLeakedToolCalls(
+      `<tool_call>\n<function=task>\n<parameter=prompt>\n${big}\n</parameter>\n</function>`,
+    );
+    expect(msg.length).toBeLessThan(2_000);
+    expect(msg).toContain("…");
   });
 });

@@ -257,6 +257,75 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
 }
 
 /**
+ * A round containing `{type:"stall", stallMs}` models a provider that accepts
+ * the request and then holds the socket open without sending a byte (session
+ * 7f24048ad75d: `lastPhase:"mainStream.provider"`, 120s of silence, watchdog
+ * kill). The part is consumed here, never forwarded. The silence ends after
+ * `stallMs` or when the request's abort signal fires, whichever is first — a
+ * real fetch rejects on abort, and a stall that ignored the signal would not
+ * be a faithful model of one.
+ */
+function splitStall(chunks: StreamChunks): { chunks: StreamChunks; stallMs: number } {
+  let stallMs = 0;
+  const rest: StreamChunks = [];
+  for (const c of chunks) {
+    if ((c as { type?: string }).type === "stall") {
+      stallMs = Math.max(stallMs, Number((c as { stallMs?: number }).stallMs ?? 0));
+      continue;
+    }
+    rest.push(c);
+  }
+  return { chunks: rest, stallMs };
+}
+
+function stallThenStream(
+  chunks: StreamChunks,
+  stallMs: number,
+  signal: AbortSignal | undefined,
+): ReadableStream<LanguageModelV3StreamPart> {
+  return new ReadableStream<LanguageModelV3StreamPart>({
+    async start(controller) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+            return;
+          }
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal?.reason ?? new DOMException("aborted", "AbortError"));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, stallMs);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+  });
+}
+
+/** The stream for one scripted round: honours a `stall` part, else paced by `chunkDelayMs`. */
+function roundStream(
+  chunks: StreamChunks,
+  options: LanguageModelV3CallOptions,
+  chunkDelayMs: number,
+): ReadableStream<LanguageModelV3StreamPart> {
+  const { chunks: parts, stallMs } = splitStall(chunks);
+  if (stallMs > 0) return stallThenStream(parts, stallMs, options.abortSignal);
+  return simulateReadableStream<LanguageModelV3StreamPart>({
+    chunks: parts,
+    initialDelayInMs: chunkDelayMs || null,
+    chunkDelayInMs: chunkDelayMs || null,
+  });
+}
+
+/**
  * A round whose chunk is `{type:"error", rejectRequest:true, error}` makes
  * doStream itself REJECT — the shape of a real provider answering with an HTTP
  * error status before any chunk (e.g. 503 "engine overloaded"), as opposed to
@@ -362,13 +431,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
               `[mock-model] doStream route "${route.systemIncludes}" #${route.cursor} → ${routed.length} parts, types=${routed.map((c) => c.type).join(",")}\n`,
             );
           }
-          return {
-            stream: simulateReadableStream<LanguageModelV3StreamPart>({
-              chunks: routed,
-              initialDelayInMs: chunkDelayMs || null,
-              chunkDelayInMs: chunkDelayMs || null,
-            }),
-          };
+          return { stream: roundStream(routed, options, chunkDelayMs) };
         }
       }
       const chunks = resolvePriorPlaceholders(streams[Math.min(callIdx, streams.length - 1)]!, options);
@@ -381,16 +444,10 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
           `[mock-model] doStream #${callIdx} → ${chunks.length} parts, types=${chunks.map((c) => c.type).join(",")}\n`,
         );
       }
-      return {
-        stream: simulateReadableStream<LanguageModelV3StreamPart>({
-          chunks,
-          // Only the turn stream honours the delay — the classify intercept above
-          // fires on EVERY turn, so pacing it would tax specs that just want a
-          // slow answer.
-          initialDelayInMs: chunkDelayMs || null,
-          chunkDelayInMs: chunkDelayMs || null,
-        }),
-      };
+      // Only the turn stream honours the delay — the classify intercept above
+      // fires on EVERY turn, so pacing it would tax specs that just want a
+      // slow answer.
+      return { stream: roundStream(chunks, options, chunkDelayMs) };
     },
     // doGenerate backs `generateObject` / non-streaming `generateText`. The AI
     // SDK reads the first text content part as the object JSON (generateObject)
