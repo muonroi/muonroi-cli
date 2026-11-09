@@ -37,6 +37,7 @@
  *   --mock-llm <dir>        mock model fixtures; isolates HOME in the temp dir
  *   --live                  allow real provider traffic in your normal HOME
  *   --model <id>            pass -m <id> to the CLI (default: your settings)
+ *   --permission <mode>     pass --permission <mode> to the CLI (safe | auto-edit | yolo)
  *   --budget-usd <n>        abort when spend exceeds n (default 15)
  *   --max-wall-min <n>      abort after n minutes (default 120)
  *   --quiet-sec <n>         settled = no UI change AND no running worker for n s (default 90)
@@ -83,6 +84,7 @@ const { values: opt } = parseArgs({
     "mock-llm": { type: "string" },
     live: { type: "boolean", default: false },
     model: { type: "string" },
+    permission: { type: "string" },
     "budget-usd": { type: "string", default: "15" },
     "max-wall-min": { type: "string", default: "120" },
     "quiet-sec": { type: "string", default: "90" },
@@ -328,6 +330,8 @@ async function main(): Promise<void> {
   }
   const args = [join(repoRoot, "src/index.ts"), "--agent-mode", ...(mock ? ["--mock-llm", mock] : [])];
   if (opt.model) args.push("-m", opt.model);
+  // --permission safe|auto-edit|yolo overrides the user setting for this run (safe exercises approval cards).
+  if (opt.permission) args.push("--permission", opt.permission);
   log(`launching CLI (${mock ? `mock ${mock}` : "LIVE"}) in ${cwd}`);
   const { proc, inWrite, outRead } = await spawnAgentTui(args, { spawnOpts: { env, cwd } });
 
