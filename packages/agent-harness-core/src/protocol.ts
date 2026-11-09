@@ -236,6 +236,20 @@ export type LiveEvent =
       phase: string;
       optionCount: number;
       defaultIndex?: number;
+      /**
+       * Set ONLY when the card is a permission approval (not a question): the
+       * run is blocked on a human Allow/Deny. `phase` carries the same value.
+       * Close counterparts: askcard-answered (answerText "allow"|"deny"),
+       * askcard-cancel (Esc = deny), askcard-withdrawn (card removed unanswered).
+       */
+      source?: "tool-approval" | "worker-approval";
+      /** Approval cards: the tool awaiting a decision. */
+      toolName?: string;
+      toolCallId?: string;
+      /** Approval cards: redacted, bounded preview of the tool input (capped again on the wire). */
+      preview?: string;
+      /** worker-approval only: the delegation job that asked. */
+      jobId?: string;
     }
   | {
       t: "event";

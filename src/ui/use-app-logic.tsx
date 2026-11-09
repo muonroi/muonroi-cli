@@ -27,6 +27,7 @@ import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import { approvalOpenEvent } from "./approval-card-events.js";
 import { isApprovalAllowed, toggleApprovalSelection, useLiveState } from "./live-state.js";
 import os from "os";
 import { recordInternalExperience } from "./utils/internal-activity.js";
@@ -3439,6 +3440,75 @@ export function useAppLogic(props: AppLogicProps) {
     }),
     [],
   );
+  // Harness events for the approval card: it blocks a turn on a human exactly
+  // like a question card, so it announces itself with askcard-open (see
+  // approval-card-events.ts) and closes with answered / cancel / withdrawn.
+  // `approvalEventIdRef` is the id of the card whose open event is still unclosed.
+  const approvalEventIdRef = useRef<string | null>(null);
+  const closeApprovalEvent = useCallback(
+    (
+      close:
+        | { kind: "answered"; allowed: boolean }
+        | { kind: "cancel" }
+        | { kind: "withdrawn"; reason: string; notice: string },
+      onlyQuestionId?: string,
+    ) => {
+      const questionId = approvalEventIdRef.current;
+      if (!questionId || (onlyQuestionId && onlyQuestionId !== questionId)) return;
+      approvalEventIdRef.current = null;
+      try {
+        if (close.kind === "answered") {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-answered",
+            questionId,
+            answerKind: "choice",
+            answerText: close.allowed ? "allow" : "deny",
+          });
+        } else if (close.kind === "cancel") {
+          agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId });
+        } else {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-withdrawn",
+            questionId,
+            reason: close.reason,
+            notice: close.notice,
+          });
+        }
+      } catch (err) {
+        logger.warn("ui", "[approval-card] close harness event failed", {
+          questionId,
+          closeKind: close.kind,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    const open = approvalOpenEvent(pendingPaymentApproval);
+    const openId = approvalEventIdRef.current;
+    // Same card (Allow/Deny toggle replaces the object, not the identity).
+    if (openId && openId === open?.questionId) return;
+    // The previous card went away without a recorded answer (worker request
+    // expired, replaced by another approval, agent swap).
+    closeApprovalEvent({
+      kind: "withdrawn",
+      reason: "card-removed",
+      notice: "Approval card removed before an answer was recorded.",
+    });
+    if (!open) return;
+    approvalEventIdRef.current = open.questionId;
+    try {
+      agentRuntime?.emitEvent(open);
+    } catch (err) {
+      logger.warn("ui", "[approval-card] askcard-open harness event failed", {
+        questionId: open.questionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, [pendingPaymentApproval, closeApprovalEvent]);
   const settleToolApproval = useCallback(
     (info: ToolApprovalAskInfo, verdict: "allow" | "deny") => {
       const queue = toolApprovalQueueRef.current;
@@ -3471,7 +3541,17 @@ export function useAppLogic(props: AppLogicProps) {
           signal?.addEventListener(
             "abort",
             () => {
-              if (queue.some((entry) => entry.info === info)) settleToolApproval(info, "deny");
+              if (queue.some((entry) => entry.info === info)) {
+                closeApprovalEvent(
+                  {
+                    kind: "withdrawn",
+                    reason: "turn-aborted",
+                    notice: "Turn cancelled while the tool approval was open.",
+                  },
+                  `tool-approval-${info.toolCallId}`,
+                );
+                settleToolApproval(info, "deny");
+              }
             },
             { once: true },
           );
@@ -3483,7 +3563,7 @@ export function useAppLogic(props: AppLogicProps) {
       for (const entry of queue.splice(0)) entry.resolve("deny");
       setPendingPaymentApproval((current) => (current?.toolApproval ? null : current));
     };
-  }, [agent, toolApprovalCard, settleToolApproval, setPendingPaymentApproval]);
+  }, [agent, toolApprovalCard, settleToolApproval, closeApprovalEvent, setPendingPaymentApproval]);
 
   const finalizeActiveTurn = useCallback(
     ({ wasInterrupted = false, hadError = false }: { wasInterrupted?: boolean; hadError?: boolean } = {}) => {
@@ -8314,6 +8394,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (isEscapeKey(key)) {
           const request = approvalCardNow.workerApproval;
+          closeApprovalEvent({ kind: "cancel" });
           setPendingPaymentApproval(null);
           if (approvalCardNow.toolApproval) {
             settleToolApproval(approvalCardNow.toolApproval, "deny");
@@ -8345,6 +8426,7 @@ export function useAppLogic(props: AppLogicProps) {
           const approved = isApprovalAllowed(approvalCardNow.selected);
           const toolApproval = approvalCardNow.toolApproval;
           const request = approvalCardNow.workerApproval;
+          closeApprovalEvent({ kind: "answered", allowed: approved });
           setPendingPaymentApproval(null);
           if (request) {
             workerApprovalDecisionsRef.current.add(request.id);
