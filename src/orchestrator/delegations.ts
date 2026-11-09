@@ -152,6 +152,12 @@ export interface StoredDelegation {
   resultVersion?: string;
   deliveredVersion?: string;
   deliveredAt?: string;
+  /**
+   * Completed owner model turns that started after `deliveredVersion` reached
+   * main and ended without it being ACKed ({@link DelegationManager.acknowledgeProcessed}).
+   * Durable on purpose: the in-memory delivery map dies with the process.
+   */
+  deliveredTurnsSeen?: number;
   acknowledgedVersion?: string;
   acknowledgedAt?: string;
   parentSessionId?: string;
@@ -212,6 +218,15 @@ interface FullDelivery {
   seq: number;
 }
 
+/**
+ * Completed model turns after which a delivered, still-unacknowledged result
+ * counts as processed. In c2fda568be6b all 23 ACKed jobs were ACKed within 1-2
+ * completed turns of delivery (acknowledgedAt vs the turn rows). Of the 10
+ * that never were, 7 had 18-33 completed turns after delivery and 3 had 0-1
+ * (their wake turns errored), so 3 leaves margin over every observed ACK.
+ */
+export const STALE_DELIVERY_TURNS = 3;
+
 export class DelegationManager {
   /**
    * Full deliveries waiting for a model turn to process them. The ACK exists to
@@ -235,12 +250,99 @@ export class DelegationManager {
   }
 
   /**
+   * Delivered-but-unacknowledged jobs the stale-delivery guard watches
+   * ({@link ackStaleDeliveries}). `null` until first hydrated from disk, so a
+   * resumed session also covers deliveries made by an earlier process.
+   */
+  private staleCandidates: Set<string> | null = null;
+  private lastSweptTurnStart: string | undefined;
+
+  private trackDelivered(id: string): void {
+    this.staleCandidates?.add(id);
+  }
+
+  private isUnackedDelivery(record: StoredDelegation): boolean {
+    const owner = this.getOwnerId();
+    return (
+      !!owner &&
+      record.parentSessionId === owner &&
+      record.status !== "running" &&
+      !!record.resultVersion &&
+      record.deliveredVersion === record.resultVersion &&
+      record.acknowledgedVersion !== record.resultVersion
+    );
+  }
+
+  private async hydrateStaleCandidates(): Promise<Set<string>> {
+    if (this.staleCandidates) return this.staleCandidates;
+    // Publish the set before scanning so a delivery during the scan is tracked too.
+    const ids = new Set<string>();
+    this.staleCandidates = ids;
+    for (const jobPath of await this.jobPaths()) {
+      const record = await readRecord(jobPath);
+      if (record && this.isUnackedDelivery(record)) ids.add(record.id);
+    }
+    return ids;
+  }
+
+  /**
+   * Stale-delivery guard. Every other ACK path needs a signal (a whole inline
+   * body, a read to the result's end, a dossier read) and each one has a gap:
+   * failure notices carry no body, partial reads never reach the end, a
+   * restart drops the in-memory map. Without a backstop "outstanding" is
+   * permanent for a result the model already saw, and working-context keeps
+   * every turn that mentions it verbatim (c2fda568be6b: 10 of 33 jobs, ~830k
+   * tokens, compaction saved 0). A delivered result that
+   * {@link STALE_DELIVERY_TURNS} completed turns have started after, without
+   * being ACKed, counts as processed. Counted per turn on the job record, so
+   * it survives restarts. Returns the jobIds ACKed.
+   */
+  private async ackStaleDeliveries(turnStartedAt: string): Promise<string[]> {
+    if (process.env.MUONROI_BACKGROUND_CHILD === "1" || !this.getOwnerId()) return [];
+    // One count per turn: a turn can append more than once (tool-engine paths).
+    if (this.lastSweptTurnStart === turnStartedAt) return [];
+    this.lastSweptTurnStart = turnStartedAt;
+    const candidates = await this.hydrateStaleCandidates();
+    const acked: string[] = [];
+    for (const id of [...candidates]) {
+      const jobPath = await this.jobPath(id);
+      await withFileLock(jobPath, async () => {
+        const current = await readRecord(jobPath);
+        if (!current || !this.isUnackedDelivery(current)) {
+          candidates.delete(id);
+          return;
+        }
+        // Delivered after this turn's prompt was built: the turn could not have seen it.
+        if (!current.deliveredAt || current.deliveredAt > turnStartedAt) return;
+        const seen = (current.deliveredTurnsSeen ?? 0) + 1;
+        current.deliveredTurnsSeen = seen;
+        if (seen >= STALE_DELIVERY_TURNS) {
+          current.acknowledgedVersion = current.resultVersion;
+          current.acknowledgedAt ??= new Date().toISOString();
+          candidates.delete(id);
+          acked.push(id);
+          logger.file("info", "orchestrator", "Stale-delivery ACK: result seen by completed turns", {
+            id,
+            turns: seen,
+          });
+        }
+        await writeRecord(jobPath, current);
+      });
+    }
+    return acked;
+  }
+
+  /**
    * ACK every full delivery a completed model turn processed: notices consumed
    * before that turn started (`visibleNoticeSeq`), and delegation_read results
    * the turn's model saw (`readResultTexts`: tool-result texts followed by a
    * later assistant step). Returns the acknowledged jobIds. Never throws.
    */
-  async acknowledgeProcessed(visibleNoticeSeq: number, readResultTexts: readonly string[]): Promise<string[]> {
+  async acknowledgeProcessed(
+    visibleNoticeSeq: number,
+    readResultTexts: readonly string[],
+    turnStartedAt?: string,
+  ): Promise<string[]> {
     const acked: string[] = [];
     for (const [key, entry] of [...this.fullDeliveries]) {
       const seen =
@@ -264,6 +366,13 @@ export class DelegationManager {
           via: entry.via,
           error: String(err),
         });
+      }
+    }
+    if (turnStartedAt) {
+      try {
+        acked.push(...(await this.ackStaleDeliveries(turnStartedAt)));
+      } catch (err) {
+        logger.warn("orchestrator", "Stale-delivery ACK sweep failed", { error: String(err) });
       }
     }
     return acked;
@@ -996,6 +1105,10 @@ export class DelegationManager {
         const output = await fs.readFile(current.outputPath, "utf8");
         current.resultVersion = verifyResultVersion(current, output);
         if (deliverToOwner) {
+          if (current.deliveredVersion !== current.resultVersion) {
+            current.deliveredAt = new Date().toISOString();
+            current.deliveredTurnsSeen = 0;
+          }
           current.deliveredVersion = current.resultVersion;
           current.deliveredAt ??= new Date().toISOString();
           if (current.planReview) current.planReviewReadVersion = current.resultVersion;
@@ -1039,6 +1152,7 @@ export class DelegationManager {
         const body = page ? pageResultText(current.id, output, page.offset, page.maxChars) : output;
         // The whole result (or its last page) is now in a tool result for main:
         // the host ACKs it once a model turn has read it (acknowledgeProcessed).
+        if (deliverToOwner && !acknowledged) this.trackDelivered(current.id);
         if (deliverToOwner && !acknowledged && (!page || pageReachesEnd(output, page.offset, page.maxChars)))
           this.noteFullDelivery(current.id, current.resultVersion, deliveryVia);
         return { success: true, output: `${resultReference(current)}\n${handling}\n\n${body}` };
@@ -1091,6 +1205,12 @@ export class DelegationManager {
           if (name === "findings.json" && offset === 0) {
             current.planReviewDossierReadVersion = version;
             await writeRecord(jobPath, current);
+            // Plan-review results are excluded from inline delivery and the
+            // model adjudicates them through this dossier, never by paging the
+            // prose result to its end (calm-copper-badger, clever-amber-fox).
+            // The dossier read IS the processing signal.
+            if (current.planReview && current.acknowledgedVersion !== version)
+              this.noteFullDelivery(current.id, version, "read");
           }
           return {
             success: true,
@@ -1348,8 +1468,17 @@ export class DelegationManager {
           record.notifiedAt = new Date().toISOString();
           record.deliveredAt = record.notifiedAt;
           record.deliveredVersion = record.resultVersion;
+          record.deliveredTurnsSeen = 0;
           await writeRecord(jobPath, record);
-          if (persistDelivery && inlineChars > 0 && inlinesResult(record) && output.length <= inlineChars)
+          this.trackDelivered(record.id);
+          // A failed/cancelled notice carries everything it will ever carry
+          // (summary, error, recovery guidance; the body is only a pointer), so
+          // it is a whole delivery too. Without this every failed job stayed
+          // outstanding forever (4 of the 10 unacked jobs in c2fda568be6b).
+          if (
+            persistDelivery &&
+            ((inlineChars > 0 && inlinesResult(record) && output.length <= inlineChars) || record.status !== "complete")
+          )
             this.noteFullDelivery(record.id, record.resultVersion, "notice");
           notifications.push(notification);
         });

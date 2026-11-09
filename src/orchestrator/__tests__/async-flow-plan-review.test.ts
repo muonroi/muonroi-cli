@@ -739,6 +739,25 @@ describe("durable nonblocking root Flow plan review", () => {
     expect(snapshot()).toEqual(before);
     expect(canExecute(cwd, "heavy").allowed).toBe(false);
   });
+  it("host-ACKs a plan review once main has read its findings dossier, without paging the prose result to its end", async () => {
+    const started = await manager.startPlanReview({ depth: "heavy", revisionCycle: 0 }, options);
+    await completeDelegation(jobPath(), verdict("approve"));
+    const record = await loadDelegation(jobPath());
+    const id = started.delegation!.id;
+    // c2fda568be6b: plan reviews are never inlined, and main read a page of the
+    // prose plus the dossier — neither reached the end of the result, so the
+    // job stayed outstanding forever.
+    const notices = await manager.consumeNotifications(() => undefined);
+    expect(notices).toHaveLength(1);
+    expect(await manager.acknowledgeProcessed(manager.currentDeliverySeq(), [])).toEqual([]);
+    const page = (await manager.readResult(id, true, { offset: 0, maxChars: 1 })).output!;
+    expect(await manager.acknowledgeProcessed(0, [page])).toEqual([]);
+    const dossier = await manager.readToolArtifact(id, "report:findings.json", record.resultVersion);
+    expect(dossier.success).toBe(true);
+    expect(await manager.acknowledgeProcessed(0, [dossier.output!])).toEqual([id]);
+    const after = await loadDelegation(jobPath());
+    expect(after.acknowledgedVersion).toBe(after.resultVersion);
+  });
   it("reports the actual finding schema error rather than blaming a JSON fence", async () => {
     const started = await manager.startPlanReview({ depth: "heavy", revisionCycle: 0 }, options);
     await completeDelegation(

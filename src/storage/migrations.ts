@@ -1,6 +1,6 @@
 import type { SQLiteDatabase } from "./db";
 
-const LATEST_DB_VERSION = 10;
+const LATEST_DB_VERSION = 11;
 
 export function applyMigrations(db: SQLiteDatabase): void {
   const version = Number(db.pragma("user_version", { simple: true })) || 0;
@@ -137,6 +137,17 @@ export function applyMigrations(db: SQLiteDatabase): void {
       backfillSessionTrees(db);
 
       db.pragma("user_version = 10");
+    }
+    if (version < 11) {
+      // Durable compaction shrink: the host budget pass (compaction-budget.ts)
+      // shrinks / drops retained messages in memory; this column carries the
+      // deterministic spec that reproduces the same bounded view on reload.
+      const cols = db.prepare("PRAGMA table_info(compactions)").all() as Array<{ name: string }>;
+      // cols is empty only for a hand-built partial schema; every real DB got the table at v2.
+      if (cols.length > 0 && !cols.some((c) => c.name === "shrink_json")) {
+        db.exec("ALTER TABLE compactions ADD COLUMN shrink_json TEXT");
+      }
+      db.pragma("user_version = 11");
     }
   });
 
