@@ -5,6 +5,7 @@ import type { VerifyContextBundle } from "../verify-context.js";
 import {
   buildVerifyDebateTopic,
   buildVerifyPerspectivePrompt,
+  NO_DIFF_DELIVERABLE_SECTION,
   VERIFY_PERSPECTIVES,
 } from "../verify-council-prompts.js";
 import { renderVerifyGateAxes, VERIFY_GATE_DIMENSIONS } from "../verify-gate-vocabulary.js";
@@ -62,6 +63,31 @@ describe("verify-gate parity — interactive debate vs headless perspective", ()
     const ids = new Set(VERIFY_GATE_DIMENSIONS.map((d) => d.id));
     for (const p of VERIFY_PERSPECTIVES) {
       expect(ids.has(p.dimension), `perspective "${p.id}" → unknown dimension "${p.dimension}"`).toBe(true);
+    }
+  });
+
+  it("an empty diff renders the no-diff analysis section in BOTH paths, never the diff block", () => {
+    const empty: VerifyContextBundle = { ...BUNDLE, diff: "", diffChars: 0 };
+    const prompts = [
+      buildVerifyDebateTopic(empty),
+      ...VERIFY_PERSPECTIVES.map((p) => buildVerifyPerspectivePrompt(p, empty)),
+    ];
+    for (const prompt of prompts) {
+      expect(prompt).toContain(NO_DIFF_DELIVERABLE_SECTION);
+      expect(prompt).toContain("is NOT a concern by itself");
+      expect(prompt).not.toContain("Implementation diff under review");
+      expect(prompt).not.toContain("(no diff supplied)");
+    }
+  });
+
+  it("a non-empty diff keeps the diff block and omits the no-diff section", () => {
+    for (const prompt of [
+      buildVerifyDebateTopic(BUNDLE),
+      ...VERIFY_PERSPECTIVES.map((p) => buildVerifyPerspectivePrompt(p, BUNDLE)),
+    ]) {
+      expect(prompt).toContain("### Implementation diff under review");
+      expect(prompt).toContain("+ added a line");
+      expect(prompt).not.toContain(NO_DIFF_DELIVERABLE_SECTION);
     }
   });
 

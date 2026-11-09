@@ -54,7 +54,25 @@ export function verifyPerspectivesForDepth(depth: string): VerifyPerspective[] {
   return VERIFY_PERSPECTIVES;
 }
 
+/**
+ * Rendered in place of the diff block when the filtered diff is empty. A plan whose deliverable is an
+ * answer or report (read-only analysis) changes no files; demanding a diff would make it unpassable.
+ */
+export const NO_DIFF_DELIVERABLE_SECTION = [
+  "### No implementation diff (analysis / report deliverable)",
+  "",
+  "This plan changed no files in the repository. That is EXPECTED for an analysis, research or report",
+  "deliverable, whose product is the answer itself, not a code change. The absence of a diff, and the",
+  "absence of any repo file embedding the results, is NOT a concern by itself.",
+  "Judge acceptance against the verification evidence above instead: the cited checks, job ids and",
+  "re-read results. A criterion is unmet only when that evidence fails to support it or contradicts it.",
+  "Do not raise concerns about planning-state files or placeholder phase entries written by the FLOW host.",
+].join("\n");
+
 function renderBundle(bundle: VerifyContextBundle): string {
+  const diffSection = bundle.diff.trim()
+    ? ["### Implementation diff under review", "", "```diff", bundle.diff, "```"].join("\n")
+    : NO_DIFF_DELIVERABLE_SECTION;
   return [
     renderCouncilContextBlock(bundle.base),
     "",
@@ -62,11 +80,7 @@ function renderBundle(bundle: VerifyContextBundle): string {
     "",
     bundle.evidence || "(no evidence supplied)",
     "",
-    "### Implementation diff under review",
-    "",
-    "```diff",
-    bundle.diff || "(no diff supplied)",
-    "```",
+    diffSection,
   ].join("\n");
 }
 

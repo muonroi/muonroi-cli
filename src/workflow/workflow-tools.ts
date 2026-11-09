@@ -1,14 +1,16 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { ExecutionRole } from "../orchestrator/orchestration-policy.js";
+import { canonicalize, isInside } from "../tools/write-scope.js";
 import type { TaskRequest, ToolResult } from "../types/index.js";
 import type { AsyncPlanReviewHost, CompletedPlanReview } from "./async-plan-review.js";
 import { ensurePlanningWorkspace } from "./config-bridge.js";
 import { logFlowNativeEvent } from "./ee-closure.js";
 import { isFlowNativeEnabled } from "./flags.js";
 import { getFlowLoopHost, loopHostContext, taskToRunPerspectiveFn } from "./loop-host.js";
-import { planningArtifact } from "./paths.js";
+import { planningArtifact, planningRoot } from "./paths.js";
 import type { PlanPerspective } from "./plan-council-prompts.js";
 import {
   assessConvergence,
@@ -66,10 +68,59 @@ function verifyRunPerspectiveFn(
   return (prompt, p) => planFn(prompt, p as unknown as PlanPerspective);
 }
 
-/** Best-effort implementation diff for the verify council. Empty on any failure — never throws. */
-function readImplementationDiff(cwd: string): string {
+/**
+ * Pathspec excludes (relative to the git toplevel, forward slashes) for the FLOW host's OWN state
+ * trees: the resolved planning root (`.planning`, `.muonroi-flow/planning`, or a `MUONROI_STATE_DIR` /
+ * `stateDir` override) and `.muonroi-flow/`. Those edits are host bookkeeping, not the task's work, so
+ * they must not reach the verify council as "the implementation". A tree outside the repo needs no
+ * exclude. Returns [] when the toplevel cannot be resolved.
+ */
+export function flowStateExcludePathspecs(cwd: string): string[] {
+  let top: string;
   try {
-    return execFileSync("git", ["diff", "HEAD"], { cwd, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+    top = canonicalize(
+      execFileSync("git", ["rev-parse", "--show-toplevel"], {
+        cwd,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "pipe"],
+      }).trim(),
+    );
+  } catch (err) {
+    console.error(`[flow] verify-council git toplevel lookup failed: ${(err as Error).message}`);
+    return [];
+  }
+  const roots = new Set<string>();
+  try {
+    roots.add(planningRoot(cwd));
+  } catch (err) {
+    console.error(`[flow] verify-council planning root lookup failed: ${(err as Error).message}`);
+  }
+  roots.add(join(cwd, ".muonroi-flow"));
+  roots.add(join(top, ".muonroi-flow"));
+  const excludes = new Set<string>();
+  for (const root of roots) {
+    const canonical = canonicalize(root);
+    // Outside the repo (or the repo itself): nothing in the diff can live there.
+    if (canonical === top || !isInside(top, canonical)) continue;
+    excludes.add(`:(top,exclude)${relative(top, canonical).split(sep).join("/")}`);
+  }
+  return [...excludes];
+}
+
+/**
+ * Best-effort implementation diff for the verify council: `git diff HEAD` minus the FLOW host's own
+ * state trees (see `flowStateExcludePathspecs`). Empty on any failure — never throws.
+ */
+export function readImplementationDiff(cwd: string): string {
+  try {
+    const excludes = flowStateExcludePathspecs(cwd);
+    const args = ["diff", "HEAD", ...(excludes.length ? ["--", ":(top)", ...excludes] : [])];
+    return execFileSync("git", args, {
+      cwd,
+      encoding: "utf8",
+      maxBuffer: 16 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
   } catch (err) {
     console.error(`[flow] verify-council diff capture failed: ${(err as Error).message}`);
     return "";
