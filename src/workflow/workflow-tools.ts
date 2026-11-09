@@ -109,7 +109,9 @@ export function flowStateExcludePathspecs(cwd: string): string[] {
 
 /**
  * Best-effort implementation diff for the verify council: `git diff HEAD` minus the FLOW host's own
- * state trees (see `flowStateExcludePathspecs`). Empty on any failure — never throws.
+ * state trees (see `flowStateExcludePathspecs`). Never throws. A capture failure returns a non-empty
+ * marker, NOT "": an empty diff tells the council the plan changed no files (analysis deliverable),
+ * which would be a false claim about an implementation whose diff merely could not be read.
  */
 export function readImplementationDiff(cwd: string): string {
   try {
@@ -122,8 +124,9 @@ export function readImplementationDiff(cwd: string): string {
       stdio: ["ignore", "pipe", "pipe"],
     });
   } catch (err) {
-    console.error(`[flow] verify-council diff capture failed: ${(err as Error).message}`);
-    return "";
+    const message = (err as Error).message;
+    console.error(`[flow] verify-council diff capture failed: ${message}`);
+    return `(implementation diff unavailable: git diff failed: ${message.split("\n")[0]})`;
   }
 }
 

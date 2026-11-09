@@ -79,9 +79,11 @@ describe("readImplementationDiff", () => {
     expect(readImplementationDiff(cwd)).toContain("+export const a = 3;");
   });
 
-  it("returns an empty string (never throws) outside a git repo", () => {
+  it("returns an unavailable marker, not an empty diff (never throws), outside a git repo", () => {
     const cwd = mkdtempSync(join(tmpdir(), "flow-implrdiff-nogit-"));
     dirs.push(cwd);
-    expect(readImplementationDiff(cwd)).toBe("");
+    const diff = readImplementationDiff(cwd);
+    expect(diff.startsWith("(implementation diff unavailable: git diff failed: ")).toBe(true);
+    expect(diff.trim()).not.toBe("");
   });
 });
