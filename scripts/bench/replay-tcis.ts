@@ -30,6 +30,9 @@
  *   --baseline <prefix>     baseline session (default 4edc02516a92)
  *   --baseline-home <dir>   muonroi home of the baseline (default ~/.muonroi-cli)
  *   --commit <sha>          start commit (default cd596d4, see START_COMMIT)
+ *   --prompt <text>         run THIS prompt instead of the baseline's first prompt; the run is then
+ *                           reported on its own (no baseline comparison)
+ *   --greenfield            work in a fresh empty git repo instead of cloning a source repo
  *   --source-repo <path>    override the repo to clone (default: baseline cwd)
  *   --mock-llm <dir>        mock model fixtures; isolates HOME in the temp dir
  *   --live                  allow real provider traffic in your normal HOME
@@ -55,7 +58,7 @@ import { createDriver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
-import { computeFlowMetrics, openReadOnlyDatabase } from "../../src/cli/flow-metrics.js";
+import { computeFlowMetrics, formatFlowMetrics, openReadOnlyDatabase } from "../../src/cli/flow-metrics.js";
 import { compareFlowMetrics, formatComparison } from "../../src/cli/flow-metrics-compare.js";
 
 /**
@@ -74,6 +77,8 @@ const { values: opt } = parseArgs({
     baseline: { type: "string", default: BASELINE_SESSION },
     "baseline-home": { type: "string" },
     commit: { type: "string", default: START_COMMIT },
+    prompt: { type: "string" },
+    greenfield: { type: "boolean", default: false },
     "source-repo": { type: "string" },
     "mock-llm": { type: "string" },
     live: { type: "boolean", default: false },
@@ -283,13 +288,27 @@ function killTree(pid: number, label: string): void {
 const startedAt = Date.now();
 
 async function main(): Promise<void> {
-  const baseline = readBaseline();
-  const sourceRepo = opt["source-repo"] ?? baseline.cwd;
-  log(`baseline ${baseline.sessionId}; source repo ${sourceRepo}; prompt (${baseline.prompt.length} chars):`);
-  log(`  ${JSON.stringify(baseline.prompt)}`);
-
-  const root = mkdtempSync(join(tmpdir(), "tcis-replay-"));
-  const cwd = prepareClone(sourceRepo, opt.commit!, root);
+  // --prompt runs an arbitrary task: no baseline session, no comparison.
+  const baseline = opt.prompt ? undefined : readBaseline();
+  const prompt = opt.prompt ?? baseline!.prompt;
+  const root = mkdtempSync(join(tmpdir(), opt.prompt ? "task-run-" : "tcis-replay-"));
+  let cwd: string;
+  if (opt.greenfield) {
+    cwd = join(root, "repo");
+    mkdirSync(cwd, { recursive: true });
+    git(["init", "--quiet"], cwd);
+    git(
+      ["-c", "user.name=bench", "-c", "user.email=bench@localhost", "commit", "--quiet", "--allow-empty", "-m", "init"],
+      cwd,
+    );
+    log(`greenfield repo ${cwd}`);
+  } else {
+    const sourceRepo = opt["source-repo"] ?? baseline?.cwd;
+    if (!sourceRepo) fail("--prompt without --greenfield needs --source-repo");
+    cwd = prepareClone(sourceRepo, opt.commit!, root);
+  }
+  log(`${baseline ? `baseline ${baseline.sessionId}; ` : ""}prompt (${prompt.length} chars):`);
+  log(`  ${JSON.stringify(prompt)}`);
 
   const mock = opt["mock-llm"] ? resolve(opt["mock-llm"]) : undefined;
   const userHome = mock ? join(root, "home") : homedir();
@@ -351,7 +370,7 @@ async function main(): Promise<void> {
 
   await driver.wait_for({ idle: true, timeoutMs: 60_000 });
   log("TUI ready; sending the baseline prompt");
-  driver.type(baseline.prompt);
+  driver.type(prompt);
   driver.press("Enter");
 
   let reason = "settled";
@@ -410,10 +429,21 @@ async function main(): Promise<void> {
 
   if (ids.length === 0) fail(`no session was recorded for ${cwd} in ${runDb}`);
   const replayId = ids[0]!;
+  const after = await withIoRetry(() => computeFlowMetrics(replayId, { home: runHome, db: runDb }));
+  if (!baseline) {
+    process.stdout.write(
+      `\nRun ${replayId} (${reason}; auto-continues ${autoContinues})\n${formatFlowMetrics(after)}\n`,
+    );
+    if (opt.out) {
+      writeFileSync(opt.out, JSON.stringify({ reason, autoContinues, prompt, cwd, replay: after }, null, 2));
+      log(`wrote ${opt.out}`);
+    }
+    if (opt.keep) log(`kept ${root}`);
+    return;
+  }
   const before = await withIoRetry(() =>
     computeFlowMetrics(baseline.sessionId, { home: baselineHome, db: baselineDb }),
   );
-  const after = await withIoRetry(() => computeFlowMetrics(replayId, { home: runHome, db: runDb }));
   const rows = compareFlowMetrics(before, after);
   process.stdout.write(
     `\nReplay ${replayId} (${reason}; auto-continues ${autoContinues}) vs baseline ${baseline.sessionId}\n${formatComparison(
