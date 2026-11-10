@@ -60,6 +60,8 @@ export interface IdealAutopilotDeps {
 export interface TurnEnd {
   interrupted?: boolean;
   error?: string | null;
+  /** Every error of the turn was a turn-watchdog kill (transient; see StreamChunk.isWatchdogStall). */
+  transient?: boolean;
   awaitingHuman?: boolean;
 }
 
@@ -219,6 +221,7 @@ export class IdealAutopilotHost {
       turn: {
         interrupted: turn.interrupted === true,
         error: turn.error === undefined || turn.error === null ? null : turn.error || "the turn ended in an error",
+        transient: turn.transient === true,
         awaitingHuman: turn.awaitingHuman === true,
       },
       rootComplete: completion.complete,

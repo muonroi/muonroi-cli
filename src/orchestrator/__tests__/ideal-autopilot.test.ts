@@ -17,6 +17,7 @@ import {
   armAutopilot,
   decideAutopilotStep,
   formatAutopilotLine,
+  MAX_TRANSIENT_ERROR_RETRIES,
   madeProgress,
   type PersistedAutopilot,
   resolveAutopilotConfig,
@@ -191,6 +192,44 @@ describe("stop conditions", () => {
     const r = step(fresh(), { turn: { interrupted: false, error: "401 invalid api key", awaitingHuman: false } });
     expect(r.decision).toMatchObject({ action: "stop", reason: "error", detail: "401 invalid api key" });
     expect(runFinishedOutcome("error")).toBe("error");
+  });
+
+  it("transient (watchdog) error: retried up to MAX_TRANSIENT_ERROR_RETRIES, then stops; a clean turn resets the count", () => {
+    // Session 876b87182b86: one stalled provider stream ended a run whose fix was already verified.
+    const stall = {
+      interrupted: false,
+      error: "Turn ended by watchdog: assistant turn produced no output for 120s — treated as hung",
+      transient: true,
+      awaitingHuman: false,
+    };
+    let state = fresh();
+    for (let i = 1; i <= MAX_TRANSIENT_ERROR_RETRIES; i++) {
+      const r = step(state, { turn: stall, signals: sig({ workspace: `w${i}` }) });
+      expect(r.decision.action).toBe("continue");
+      expect(r.state.transientErrorStreak).toBe(i);
+      if (r.decision.action === "continue") expect(r.decision.prompt).toContain("ended by the turn watchdog");
+      state = r.state;
+    }
+    const last = step(state, { turn: stall, signals: sig({ workspace: "wz" }) });
+    expect(last.decision).toMatchObject({ action: "stop", reason: "error" });
+    if (last.decision.action === "stop")
+      expect(last.decision.detail).toContain(`${MAX_TRANSIENT_ERROR_RETRIES + 1} consecutive watchdog-killed turns`);
+
+    // A clean turn end between stalls resets the streak.
+    const once = step(fresh(), { turn: stall }).state;
+    const clean = step(once, { signals: sig({ workspace: "w9" }) });
+    expect(clean.state.transientErrorStreak).toBe(0);
+  });
+
+  it("transient error still respects the other rules: complete wins, running workers wait", () => {
+    const stall = { interrupted: false, error: "Turn ended by watchdog: x", transient: true, awaitingHuman: false };
+    expect(step(fresh(), { turn: stall, rootComplete: true }).decision).toMatchObject({ reason: "complete" });
+    expect(step(fresh(), { turn: stall, runningJobs: 1 }).decision).toEqual({ action: "wait" });
+  });
+
+  it("a non-transient error is never retried, even with a zero streak", () => {
+    const r = step(fresh(), { turn: { interrupted: false, error: "boom", transient: false, awaitingHuman: false } });
+    expect(r.decision).toMatchObject({ action: "stop", reason: "error", detail: "boom" });
   });
 
   it("user interrupt at turn end stops the run", () => {

@@ -798,18 +798,34 @@ export class DelegationManager {
     let hostReview: StoredDelegation["hostReview"];
     if (request.reviewOf) {
       try {
-        if (request.agent !== "verify" || !this.getOwnerId())
-          throw new Error("Review requires a fresh verify worker owned by main.");
+        // Each refusal names the ONE condition that failed. The former combined
+        // "Review requires a fresh verify worker owned by main." was read by the
+        // model as a complaint about the TARGET (session 876b87182b86: it had sent
+        // agent="general" with reviewOf, and retried three times before the turn
+        // stalled) — the label must match its reason.
+        if (request.agent !== "verify")
+          throw new Error(
+            `reviewOf needs agent="verify" (got agent="${request.agent ?? "general"}"): a review is run by a fresh verify worker. Re-dispatch with agent="verify".`,
+          );
+        if (!this.getOwnerId()) throw new Error("Review needs an owning main session; none is bound to this host.");
         const target = await this.getById(request.reviewOf.jobId);
-        if (
-          !target ||
-          target.parentSessionId !== this.getOwnerId() ||
-          target.status !== "complete" ||
-          (target.kind === "council" && !planRevalidation) ||
-          target.reviewOf ||
-          target.resultVersion !== request.reviewOf.resultVersion
-        )
-          throw new Error("Review target must be an owned successful current implementation in the same workspace.");
+        const targetProblem = !target
+          ? `no delegation with id ${request.reviewOf.jobId}`
+          : target.parentSessionId !== this.getOwnerId()
+            ? "it was started by another session"
+            : target.status !== "complete"
+              ? `its status is ${target.status}, not complete`
+              : target.kind === "council" && !planRevalidation
+                ? "it is a council job"
+                : target.reviewOf
+                  ? "it is itself a review"
+                  : target.resultVersion !== request.reviewOf.resultVersion
+                    ? `its current resultVersion is ${target.resultVersion}, not the one given`
+                    : null;
+        if (targetProblem || !target)
+          throw new Error(
+            `Review target ${request.reviewOf.jobId} must be an owned successful current implementation in the same workspace: ${targetProblem}.`,
+          );
         if (!request.cwd) cwd = target.cwd;
         if (path.resolve(target.cwd) !== path.resolve(cwd))
           throw new Error(

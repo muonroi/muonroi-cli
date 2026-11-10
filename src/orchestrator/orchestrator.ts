@@ -5631,7 +5631,7 @@ export class Agent {
                   logger.error("orchestrator", "watchdog pending-message mark failed", { error: markErr });
                 }
               }
-              yield { type: "error", content: stallMessage, isAuthError: false };
+              yield { type: "error", content: stallMessage, isAuthError: false, isWatchdogStall: true };
               yield { type: "done" };
             } else {
               throw stallErr;
@@ -5794,7 +5794,12 @@ export class Agent {
                 });
                 markLatestPendingMessageErrored(this.session.id);
               }
-              yield { type: "error", content: `Turn ended by watchdog: ${err.message}`, isAuthError: false };
+              yield {
+                type: "error",
+                content: `Turn ended by watchdog: ${err.message}`,
+                isAuthError: false,
+                isWatchdogStall: true,
+              };
               yield { type: "done" };
             } else {
               // biome-ignore lint/correctness/noUnsafeFinally: Main acceptance is a new turn; propagate its failure after the nested ownership cleanup.

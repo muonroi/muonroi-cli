@@ -1548,6 +1548,8 @@ export interface PersistedAutopilot {
   totalTurns: number;
   /** Consecutive turn ends with no host-observable progress. */
   noProgressStreak: number;
+  /** Consecutive turns ended by a transient (watchdog) error; absent in records written before it existed = 0. */
+  transientErrorStreak?: number;
   signals: AutopilotSignals;
   /** USD spent in this window as of the last evaluation; null when unmeasurable. */
   spentUsd: number | null;
@@ -1570,6 +1572,7 @@ function parseAutopilot(value: unknown): PersistedAutopilot | undefined {
     !Number.isSafeInteger(a.turns) ||
     !Number.isSafeInteger(a.totalTurns) ||
     !Number.isSafeInteger(a.noProgressStreak) ||
+    !(a.transientErrorStreak === undefined || Number.isSafeInteger(a.transientErrorStreak)) ||
     !sig ||
     typeof sig.workspace !== "string" ||
     !Number.isSafeInteger(sig.delegationsStarted) ||

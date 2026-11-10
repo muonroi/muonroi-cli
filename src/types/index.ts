@@ -873,6 +873,13 @@ export interface StreamChunk {
   toolCall?: ToolCall;
   toolResult?: ToolResult;
   isAuthError?: boolean;
+  /**
+   * The error chunk is a turn-watchdog kill (the turn produced no output for the
+   * idle window, e.g. a provider stream that stalled) — transient, unlike a
+   * provider/tool error. The /ideal autopilot retries such a turn a bounded
+   * number of times instead of ending the whole run (session 876b87182b86).
+   */
+  isWatchdogStall?: boolean;
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;
   /** Populated when type === "council_question_withdrawn". */

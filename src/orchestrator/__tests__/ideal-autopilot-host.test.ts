@@ -176,6 +176,21 @@ describe("events", () => {
     expect(bad.events.at(-1)).toMatchObject({ kind: "run-finished", outcome: "error", reason: "error" });
   });
 
+  it("a watchdog-killed turn (transient) continues and persists the streak; a hard error with the same text stops", async () => {
+    const stallText = "Turn ended by watchdog: assistant turn produced no output for 120s — treated as hung";
+    const w = world();
+    const h = host(w);
+    await h.arm(RUN);
+    w.signals = sig({ workspace: "w1" });
+    expect(await h.afterTurn({ error: stallText, transient: true })).toMatchObject({ action: "continue" });
+    expect(w.store.run?.autopilot).toMatchObject({ status: "running", transientErrorStreak: 1 });
+
+    const hard = world();
+    const hh = host(hard);
+    await hh.arm(RUN);
+    expect(await hh.afterTurn({ error: stallText })).toMatchObject({ action: "stop", reason: "error" });
+  });
+
   it("needs_human: a pending card stops the run without answering it", async () => {
     const w = world();
     const h = host(w);

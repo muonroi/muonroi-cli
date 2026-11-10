@@ -19,7 +19,11 @@
  *   1. user_interrupt / user_message / user_abort — the user always wins. These
  *      are applied by the orchestrator the moment the user acts (Esc, a typed
  *      message, `/ideal abort`), not at turn end.
- *   2. error         — the turn ended in a hard error.
+ *   2. error         — the turn ended in a hard error. A turn-watchdog kill (the
+ *                      turn produced no output for the idle window — a stalled
+ *                      provider stream) is transient: up to
+ *                      {@link MAX_TRANSIENT_ERROR_RETRIES} consecutive ones fall
+ *                      through to the remaining rules instead of ending the run.
  *   3. needs_human   — a card (askcard / preflight / halt / approval) awaits a
  *                      human at turn end. The host never answers it.
  *   4. complete      — the root goal is `root_status=complete` (host-gated: no
@@ -62,6 +66,14 @@ export interface AutopilotConfig {
   /** Settings/env values that were present but unusable (logged by the caller, then ignored). */
   ignored: string[];
 }
+
+/**
+ * Consecutive watchdog-killed turns the autopilot rides through before it stops
+ * with `error`. Evidence: session 876b87182b86 — the fix was in and verified
+ * (build exit 0, 43/43 tests) when ONE stalled step-5-preview stream (no token for
+ * 120s, lastPhase mainStream.provider) ended the whole run before flow_verify.
+ */
+export const MAX_TRANSIENT_ERROR_RETRIES = 2;
 
 /** Defaults. Documented in docs/architecture/FLOW-PIPELINE.md ("Host autopilot"). */
 export const AUTOPILOT_DEFAULTS = {
@@ -178,6 +190,8 @@ export interface AutopilotObservation {
     interrupted: boolean;
     /** The turn ended in a hard error (message for the stop detail). */
     error: string | null;
+    /** Every error of the turn was a turn-watchdog kill (retryable, bounded). */
+    transient?: boolean;
     /** An askcard / preflight / halt / approval card is waiting for a human. */
     awaitingHuman: boolean;
   };
@@ -258,6 +272,9 @@ function continuation(state: PersistedAutopilot, limits: AutopilotLimits, obs: A
     "root goal not recorded complete",
     obs.facts.verification ? `FLOW verification: ${obs.facts.verification}` : null,
     obs.facts.openItems > 0 ? `${obs.facts.openItems} open item(s)` : null,
+    (state.transientErrorStreak ?? 0) > 0
+      ? `the previous turn was ended by the turn watchdog (no output for the idle window); resume from the last completed step (retry ${state.transientErrorStreak}/${MAX_TRANSIENT_ERROR_RETRIES})`
+      : null,
     state.noProgressStreak > 0
       ? `last ${state.noProgressStreak} turn(s) changed nothing observable (stops at ${limits.noProgressTurns})`
       : null,
@@ -288,7 +305,15 @@ export function decideAutopilotStep(
   });
 
   if (obs.turn.interrupted) return stop("user_interrupt", AUTOPILOT_STOP_TEXT.user_interrupt);
-  if (obs.turn.error !== null) return stop("error", obs.turn.error);
+  const transientStreak = state.transientErrorStreak ?? 0;
+  if (obs.turn.error !== null) {
+    if (!obs.turn.transient) return stop("error", obs.turn.error);
+    if (transientStreak >= MAX_TRANSIENT_ERROR_RETRIES)
+      return stop(
+        "error",
+        `${obs.turn.error} (${transientStreak + 1} consecutive watchdog-killed turns; retried ${MAX_TRANSIENT_ERROR_RETRIES})`,
+      );
+  }
   if (obs.turn.awaitingHuman) return stop("needs_human", AUTOPILOT_STOP_TEXT.needs_human);
 
   const { progressed } = madeProgress(state.signals, obs.signals);
@@ -297,6 +322,8 @@ export function decideAutopilotStep(
     signals: obs.signals,
     spentUsd: obs.spentUsd ?? state.spentUsd,
     noProgressStreak: progressed ? 0 : state.noProgressStreak,
+    // A transient (watchdog) error that got here is being retried; any clean turn end resets the count.
+    transientErrorStreak: obs.turn.error !== null ? transientStreak + 1 : 0,
   };
   if (obs.rootComplete) return stop("complete", completeStopDetail(obs.facts.verification), next);
 

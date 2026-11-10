@@ -1714,7 +1714,7 @@ export function useAppLogic(props: AppLogicProps) {
     (text: string, displayText?: string, internalActivity?: boolean | "autopilot") => Promise<void> | void
   >(() => {});
   // Host autopilot step for an orchestrator-role /ideal run; assigned below `processMessage`.
-  const idealAutopilotStepRef = useRef<(turn: { error?: string | null }) => void>(() => {});
+  const idealAutopilotStepRef = useRef<(turn: { error?: string | null; transient?: boolean }) => void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const modeInfoRef = useRef<(typeof MODES)[number]>(MODES[0]);
   const activeRunIdRef = useRef(0);
@@ -4399,6 +4399,9 @@ export function useAppLogic(props: AppLogicProps) {
         await new Promise((r) => setTimeout(r, 0));
         let turnHadError = false;
         let turnErrorText = "";
+        // True while every error this turn was a turn-watchdog kill (transient) — the
+        // /ideal autopilot retries such a turn instead of ending the run.
+        let turnErrorsAllWatchdog = true;
         let turnHadAuthError = false;
         try {
           // Main retains the full EE guidance; UI decoration is file-only.
@@ -4667,6 +4670,7 @@ export function useAppLogic(props: AppLogicProps) {
               case "error":
                 turnHadError = true;
                 turnErrorText ||= (chunk.content || "Unknown error").slice(0, 300);
+                if (!chunk.isWatchdogStall) turnErrorsAllWatchdog = false;
                 if (chunk.isAuthError) {
                   turnHadAuthError = true;
                 }
@@ -4748,6 +4752,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
         } catch (turnErr) {
           turnHadError = true;
+          turnErrorsAllWatchdog = false;
           // A turn that throws used to leave only "An unexpected error occurred." on
           // screen and nothing in any log (session 7f24048ad75d: 21 turns died this way).
           const turnErrMessage = turnErr instanceof Error ? turnErr.message : String(turnErr);
@@ -4802,7 +4807,10 @@ export function useAppLogic(props: AppLogicProps) {
           // A turn of an armed /ideal run ended: the host decides whether to start the
           // next one. Not for a proactive compaction — its resume turn ends through here.
           if (!wasInterrupted && !finalContent.startsWith("/compact"))
-            idealAutopilotStepRef.current({ error: turnHadError ? turnErrorText : null });
+            idealAutopilotStepRef.current({
+              error: turnHadError ? turnErrorText : null,
+              transient: turnHadError && turnErrorsAllWatchdog,
+            });
           if (finalContent.startsWith("/compact")) {
             const _pc = detectProactiveCompactRequest(finalContent);
             const _resume = buildCompactResumeMessage(_pc.instructions);
@@ -4901,7 +4909,11 @@ export function useAppLogic(props: AppLogicProps) {
           toolLoopCapResolversRef.current.size > 0 ||
           safetyOverrideResolversRef.current.size > 0;
         try {
-          const decision = await agent.idealAutopilotAfterTurn({ error: turn.error ?? null, awaitingHuman });
+          const decision = await agent.idealAutopilotAfterTurn({
+            error: turn.error ?? null,
+            transient: turn.transient === true,
+            awaitingHuman,
+          });
           if (decision.action === "continue") {
             // Re-check after the await: the user may have typed or pressed Esc while the host measured.
             if (isProcessingRef.current || !agent.isIdealAutopilotRunning()) return;

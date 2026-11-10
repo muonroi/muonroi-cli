@@ -372,12 +372,32 @@ describe("independent version-bound acceptance", () => {
       prompt: "Tests",
       reviewOf: { jobId: "implementation", resultVersion: "stale" },
     };
-    expect((await manager.startTask(req, options)).success).toBe(false);
+    const stale = await manager.startTask(req, options);
+    expect(stale.success).toBe(false);
+    expect(stale.output).toContain("current resultVersion is");
     req.reviewOf.resultVersion = read("implementation").resultVersion!;
     save("implementation", (r) => {
       r.status = "error";
     });
-    expect((await manager.startTask(req, options)).success).toBe(false);
+    const failed = await manager.startTask(req, options);
+    expect(failed.success).toBe(false);
+    expect(failed.output).toContain("status is error, not complete");
+  });
+
+  it("names the reviewer-agent condition, not the target, when reviewOf comes with a non-verify agent", async () => {
+    // Session 876b87182b86: agent="general" + reviewOf got "Review requires a fresh verify worker
+    // owned by main.", which the model read as a problem with the (fresh, owned) target.
+    const r = await manager.startTask(
+      {
+        agent: "general",
+        description: "Review",
+        prompt: "Tests",
+        reviewOf: { jobId: "implementation", resultVersion: read("implementation").resultVersion! },
+      },
+      options,
+    );
+    expect(r.success).toBe(false);
+    expect(r.output).toContain('reviewOf needs agent="verify" (got agent="general")');
   });
   it("rejects source repair performed as a test side effect", async () => {
     const target = read("implementation");
