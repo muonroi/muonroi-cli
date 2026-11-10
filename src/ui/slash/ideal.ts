@@ -210,6 +210,12 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .option("--new", "force Mode A (greenfield) — overrides verify-recipe auto-detect")
     .option("--gh-pr", "Mode C only — run gh pr create after building the PR artifact")
     .option("--budget-tokens <N>", "ignored — /ideal has no token budget")
+    // /ideal flags are recognised only BEFORE the idea; from its first word on,
+    // everything is the idea verbatim. The idea is free-form prose that often
+    // quotes commands: "/ideal … bunx tsc --noEmit pass …" was rejected as
+    // "error: unknown option '--noEmit'" and the run never started (bench run
+    // ideal4-ee-local-20261110-081950, $0 spent in 10 min).
+    .passThroughOptions()
     .exitOverride(); // never call process.exit on parse error
 
   // commander expects a leading argv with [node, script, ...args]; we synthesize.

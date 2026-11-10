@@ -103,6 +103,36 @@ describe("/ideal slash parser", () => {
     expect(r.flags.forceCouncil).toBeUndefined();
   });
 
+  it("an idea that quotes command flags keeps them verbatim instead of failing as unknown options", () => {
+    // Bench run ideal4-ee-local-20261110-081950: "… bunx tsc --noEmit pass …" never started.
+    const r = parseIdealArgs([
+      "--force-council",
+      "make",
+      "setup",
+      "simple.",
+      "Done",
+      "when",
+      "bunx",
+      "tsc",
+      "--noEmit",
+      "passes",
+      "and",
+      "npm",
+      "test",
+      "--",
+      "--watch=false",
+      "--new",
+      "works",
+    ]);
+    expect(r.subcommand).toBe("start");
+    expect(r.idea).toBe(
+      "make setup simple. Done when bunx tsc --noEmit passes and npm test -- --watch=false --new works",
+    );
+    expect(r.flags.forceCouncil).toBe(true);
+    // A flag after the idea is part of the idea, not a mode switch.
+    expect(r.flags.mode).toBeUndefined();
+  });
+
   it("--force-council appears in --help text", () => {
     expect(getIdealHelpText().includes("--force-council")).toBe(true);
   });
