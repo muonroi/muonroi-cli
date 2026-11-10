@@ -1207,11 +1207,13 @@ export class DelegationManager {
                 "Helper: forward this jobId/resultVersion to main; main's host acknowledges it once a main turn processes the result.",
               ]),
         ].join("\n");
-        const body = page ? pageResultText(current.id, output, page.offset, page.maxChars) : output;
+        // The model reads the summarized view; host checks above used the full saved text.
+        const view = resultModelView(current, output);
+        const body = page ? pageResultText(current.id, view, page.offset, page.maxChars) : view;
         // The whole result (or its last page) is now in a tool result for main:
         // the host ACKs it once a model turn has read it (acknowledgeProcessed).
         if (deliverToOwner && !acknowledged) this.trackDelivered(current.id);
-        if (deliverToOwner && !acknowledged && (!page || pageReachesEnd(output, page.offset, page.maxChars)))
+        if (deliverToOwner && !acknowledged && (!page || pageReachesEnd(view, page.offset, page.maxChars)))
           this.noteFullDelivery(current.id, current.resultVersion, deliveryVia);
         return { success: true, output: `${resultReference(current)}\n${handling}\n\n${body}` };
       });
@@ -2332,6 +2334,73 @@ export function pageResultText(id: string, output: string, offset = 0, maxChars?
   return `[result chars ${start}-${end} of ${output.length}${next}]\n${output.slice(start, end)}`;
 }
 
+const MODEL_VIEW_MANIFEST_IDS = 40;
+const MODEL_VIEW_RUNS = 12;
+
+/**
+ * What the MODEL is shown of a saved result: the worker's answer with the two
+ * host-proof blocks collapsed to summaries. The saved file, its resultVersion
+ * and every host check (verifyResultVersion, assertPlanRevalidationEvidence,
+ * acceptance) keep reading the full text; raw per-call output stays reachable
+ * with delegation_read({id, toolCallId, resultVersion}).
+ *
+ * Measured (session 36185ebf61a8, /ideal EE-local): verify results were
+ * 43k-167k chars, of which the "## Host review evidence" JSON was ~80%
+ * (gentle-copper-lynx: 166,682 chars total, the worker's answer ends at char
+ * 35,050; 63 toolEvidence entries carrying outputPreview). Main paged through
+ * that proof: 16 offset reads (170k chars) on top of 14 first reads (172k),
+ * all of it re-sent with every later step until compaction.
+ */
+export function resultModelView(record: StoredDelegation, output: string): string {
+  let view = output;
+  if (record.toolArtifacts?.length) {
+    const manifest = JSON.stringify({ toolArtifacts: record.toolArtifacts, artifactError: record.artifactError });
+    if (view.includes(manifest)) {
+      const ids = record.toolArtifacts.slice(0, MODEL_VIEW_MANIFEST_IDS).map((a) => `${a.toolCallId} ${a.toolName}`);
+      const more = record.toolArtifacts.length - ids.length;
+      view = view.replace(
+        manifest,
+        `Host tool manifest (${record.toolArtifacts.length} captured calls${record.artifactError ? `; artifactError: ${record.artifactError}` : ""}): ${ids.join(", ")}${more > 0 ? `, +${more} more` : ""}`,
+      );
+    }
+  }
+  if (record.hostReview) {
+    const proof = JSON.stringify(record.hostReview, null, 2);
+    const at = view.lastIndexOf(proof);
+    if (at >= 0)
+      view = `${view.slice(0, at)}${hostReviewSummary(record.hostReview, proof)}${view.slice(at + proof.length)}`;
+  }
+  return view;
+}
+
+function hostReviewSummary(proof: NonNullable<StoredDelegation["hostReview"]>, raw: string): string {
+  const evidence = proof.toolEvidence ?? [];
+  const byTool = new Map<string, { ok: number; failed: number }>();
+  for (const e of evidence) {
+    const c = byTool.get(e.tool) ?? { ok: 0, failed: 0 };
+    if (e.success) c.ok++;
+    else c.failed++;
+    byTool.set(e.tool, c);
+  }
+  const runs = evidence
+    .filter((e) => e.tool === "verification_run")
+    .slice(0, MODEL_VIEW_RUNS)
+    .map((e) => {
+      const target = (e.resolvedPaths ?? [])[0] ?? JSON.stringify((e.input as { files?: unknown })?.files ?? "");
+      const state =
+        e.exitCode === undefined
+          ? `not executed (${String(e.outputPreview ?? "").slice(0, 80)})`
+          : `exit=${e.exitCode}`;
+      return `  - ${state} ${target}`;
+    });
+  return [
+    `[host proof summarized for the model — sha256=${createHash("sha256").update(raw).digest("hex")}, ${raw.length} chars, host-verified; raw call output: delegation_read({id, toolCallId, resultVersion})]`,
+    `sourceUnchanged=${proof.sourceUnchanged === true}; verdict=${proof.verdict?.verdict ?? "none"} (${proof.verdict?.evidence?.length ?? 0} evidence items)`,
+    `toolEvidence (${evidence.length}): ${[...byTool].map(([t, c]) => `${t} ${c.ok} ok${c.failed ? `/${c.failed} failed` : ""}`).join(", ") || "none"}`,
+    ...(runs.length ? ["verification_run:", ...runs] : []),
+  ].join("\n");
+}
+
 /**
  * Collapse inline result bodies to a one-line pointer. The TUI wake prompt
  * repeats every notice text, while the full notice already sits in the
@@ -2377,12 +2446,13 @@ function formatNotification(record: StoredDelegation, output?: string, inlineCha
       lines.push(
         `Raw worker evidence: delegation_read(${JSON.stringify({ id: record.id, toolCallId: record.toolArtifacts[0]!.toolCallId, resultVersion: record.resultVersion, offset: 0, maxChars: 4000 })}). Use each toolCallId from the host manifest; resultVersion/digest are different identifiers.`,
       );
+    const view = resultModelView(record, output);
     lines.push(
-      output.length <= inlineChars
+      view.length <= inlineChars
         ? "Result (complete, inline below; no delegation_read needed):"
         : "Result (first part inline below; read only the remainder via the next-page delegation_read it names):",
     );
-    lines.push(INLINE_RESULT_BEGIN, pageResultText(record.id, output, 0, inlineChars), INLINE_RESULT_END);
+    lines.push(INLINE_RESULT_BEGIN, pageResultText(record.id, view, 0, inlineChars), INLINE_RESULT_END);
   } else {
     lines.push(`Use \`delegation_read("${record.id}")\` to retrieve the full result.`);
   }

@@ -243,7 +243,11 @@ describe("independent version-bound acceptance", () => {
     );
     await manager.read(target.id);
     const raw = await manager.read(id);
-    expect(raw).toContain('"toolEvidence"');
+    // The model's read carries the host proof summarized (resultModelView), not its JSON;
+    // acceptance below still checks the full stored proof.
+    expect(raw).not.toContain('"toolEvidence"');
+    expect(raw).toContain("[host proof summarized for the model");
+    expect(raw).toContain("toolEvidence (");
     expect(raw).toContain("Host review evidence sha256=");
     expect(delegationResultForDisplay(raw)).not.toContain('"toolEvidence"');
     expect(delegationResultForDisplay(raw)).toContain('"verdict":"pass"');

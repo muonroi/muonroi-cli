@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ReviewToolEvidence } from "../../types/index.js";
 import {
   completeDelegation,
   DEFAULT_INLINE_RESULT_CHARS,
@@ -11,9 +12,12 @@ import {
   INLINE_RESULT_END,
   inlineResultChars,
   pageResultText,
+  resultModelView,
   type StoredDelegation,
+  saveDelegationToolResult,
   withoutInlineResults,
 } from "../delegations.js";
+import { sourceFingerprint } from "../review-evidence.js";
 
 /**
  * Session 4edc02516a92: 88 of 720 orchestrator tool steps were a lone full
@@ -137,6 +141,82 @@ describe("completion notice carries the saved result", () => {
     expect(read.output).toContain("FULL-BODY-1\nFULL-BODY-2");
     expect(read.output).not.toContain("[result chars");
     expect(stored(jobPath).deliveredVersion).toBe(stored(jobPath).resultVersion);
+  });
+
+  // Session 36185ebf61a8: verify results were 43k-167k chars, ~80% of it the host proof
+  // JSON (63 toolEvidence entries with outputPreview); main paged through it (16 offset
+  // reads, 170k chars) because the result exceeded the 16k inline cap.
+  it("shows the model the worker's answer with the host proof summarized; saved file and version unchanged", async () => {
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.writeFileSync(path.join(cwd, "a.ts"), "export const a = 1;\n");
+    const jobPath = writeJob("verify-worker", {
+      agent: "verify",
+      reviewOf: { jobId: "impl", resultVersion: "v1" },
+      hostReview: { contextId: "ctx", sourceFingerprint: await sourceFingerprint(cwd) },
+    });
+    const preview = "P".repeat(1600);
+    const evidence: ReviewToolEvidence[] = Array.from({ length: 30 }, (_, i) => ({
+      tool: i === 0 ? ("verification_run" as const) : ("read_file" as const),
+      success: true,
+      scope: "workspace" as const,
+      resolvedPaths: [path.join(cwd, "a.ts")],
+      input: {},
+      ...(i === 0 ? { exitCode: 0 } : {}),
+      outputPreview: preview,
+      outputDigest: "0".repeat(64),
+      completedAt: new Date().toISOString(),
+    }));
+    evidence.push({
+      ...evidence[1]!,
+      tool: "verification_run",
+      success: false,
+      outputPreview: "Invalid test file: scripts/x.ts",
+    });
+    for (let i = 0; i < 5; i++)
+      await saveDelegationToolResult(jobPath, `call_${i}`, "read_file", { file_path: "a.ts" }, "x".repeat(50));
+    await completeDelegation(
+      jobPath,
+      'ANSWER-SENTINEL\n{"verdict":"pass","evidence":["a.ts:1 read"]}',
+      undefined,
+      evidence,
+    );
+
+    const record = stored(jobPath);
+    const saved = fs.readFileSync(record.outputPath, "utf8");
+    expect(saved.length).toBeGreaterThan(48_000); // the proof really is in the file
+    expect(saved).toContain(preview);
+    const view = resultModelView(record, saved);
+    expect(view.length).toBeLessThan(DEFAULT_INLINE_RESULT_CHARS);
+    expect(view).toContain("ANSWER-SENTINEL");
+    expect(view).not.toContain(preview);
+    expect(view).toContain("toolEvidence (31): verification_run 1 ok/1 failed, read_file 29 ok");
+    expect(view).toContain("- exit=0 ");
+    expect(view).toContain("- not executed (Invalid test file: scripts/x.ts)");
+    expect(view).toMatch(/Host tool manifest \(5 captured calls\): call_0 read_file/);
+    expect(view).toContain(
+      `sha256=${createHash("sha256")
+        .update(JSON.stringify(record.hostReview, null, 2))
+        .digest("hex")}`,
+    );
+
+    // The notice now inlines the whole (summarized) result: no read, no paging.
+    const [notice] = await manager.consumeNotifications(() => undefined);
+    expect(notice!.message).toContain("no delegation_read needed");
+    expect(notice!.message).toContain("ANSWER-SENTINEL");
+    expect(notice!.message).not.toContain(preview);
+
+    // A read returns the same view; the host binding still covers the full saved file.
+    const read = await manager.readResult("verify-worker");
+    expect(read.success).toBe(true);
+    expect(read.output).toContain("ANSWER-SENTINEL");
+    expect(read.output).not.toContain(preview);
+    expect(stored(jobPath).resultVersion).toBe(createHash("sha256").update(saved).digest("hex"));
+    expect(fs.readFileSync(record.outputPath, "utf8")).toBe(saved);
+  });
+
+  it("leaves a result without host proof untouched", () => {
+    const record = { id: "plain" } as unknown as StoredDelegation;
+    expect(resultModelView(record, "plain body")).toBe("plain body");
   });
 });
 
