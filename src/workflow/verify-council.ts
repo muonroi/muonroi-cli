@@ -27,6 +27,8 @@ export interface VerifyCouncilOpts {
   depth: string;
   evidence?: string;
   diff?: string;
+  /** Host-recorded evidence of the run's finished workers (rendered separately from `evidence`). */
+  hostEvidence?: string;
   runPerspectiveFn?: (prompt: string, p: VerifyPerspective) => Promise<string>;
   runDebate?: (topic: string, synthesisOutputContract?: string) => Promise<string>;
   abortSignal?: AbortSignal;
@@ -73,7 +75,12 @@ export async function runVerifyCouncil(opts: VerifyCouncilOpts): Promise<VerifyC
     return { skipped: true, verdict: "pass", concerns: [], verdictSource: "structured" };
   }
 
-  const bundle = buildVerifyContextBundle(opts.cwd, { depth: opts.depth, evidence: opts.evidence, diff: opts.diff });
+  const bundle = buildVerifyContextBundle(opts.cwd, {
+    depth: opts.depth,
+    evidence: opts.evidence,
+    diff: opts.diff,
+    hostEvidence: opts.hostEvidence,
+  });
   const leader = await resolvePlanCouncilLeader(opts.sessionModelId);
 
   // ---- Debate path (production: runCouncilV2 synthesis) ----

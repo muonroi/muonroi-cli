@@ -80,6 +80,16 @@ function renderBundle(bundle: VerifyContextBundle): string {
     "",
     bundle.evidence || "(no evidence supplied)",
     "",
+    ...(bundle.hostEvidence
+      ? [
+          "### Host-recorded worker evidence",
+          "",
+          "Collected by the host from this run's finished workers (newest first), independent of main's summary above. A criterion is supported when this evidence shows it, even if main's summary omits it; it is a worker's report, so weigh it against the plan and the diff.",
+          "",
+          bundle.hostEvidence,
+          "",
+        ]
+      : []),
     diffSection,
   ].join("\n");
 }

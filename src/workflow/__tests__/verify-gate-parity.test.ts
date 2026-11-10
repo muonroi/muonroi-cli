@@ -33,6 +33,7 @@ const BUNDLE: VerifyContextBundle = {
   diff: "+ added a line",
   diffChars: 14,
   evidence: "all tests pass",
+  hostEvidence: "",
   planVerdict: "pass",
 };
 
@@ -96,5 +97,22 @@ describe("verify-gate parity — interactive debate vs headless perspective", ()
     for (const d of VERIFY_GATE_DIMENSIONS) {
       expect(axes, d.id).toContain(d.label);
     }
+  });
+
+  // Session 36185ebf61a8: F4 was re-raised in verify rounds 1, 3 and 4 although a worker had
+  // already produced that proof; main's capped (4k) evidence left it out. The host block is
+  // rendered in BOTH verify paths, separately from main's evidence.
+  it("host-recorded worker evidence reaches both verify paths, after main's evidence", () => {
+    const withHost = {
+      ...BUNDLE,
+      hostEvidence: "- steady-teal-otter [general, complete] E2E dual-home byte-compare proof",
+    };
+    const topic = buildVerifyDebateTopic(withHost);
+    expect(topic).toContain("### Host-recorded worker evidence");
+    expect(topic).toContain("steady-teal-otter");
+    expect(topic.indexOf("all tests pass")).toBeLessThan(topic.indexOf("### Host-recorded worker evidence"));
+    for (const p of VERIFY_PERSPECTIVES)
+      expect(buildVerifyPerspectivePrompt(p, withHost)).toContain("steady-teal-otter");
+    expect(buildVerifyDebateTopic(BUNDLE)).not.toContain("### Host-recorded worker evidence");
   });
 });

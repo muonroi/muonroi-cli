@@ -8,12 +8,18 @@ export interface VerifyContextBundle {
   diffChars: number;
   /** Deterministic-floor evidence (test/lint/self-verify output). */
   evidence: string;
+  /**
+   * Host-recorded evidence of the run's finished workers (DelegationManager.verifyWorkerEvidence),
+   * capped separately so main's own evidence cap cannot crowd it out.
+   */
+  hostEvidence: string;
   /** The plan-verify verdict recorded before execution — sanity anchor. */
   planVerdict: "pass" | "revise" | "block" | null;
 }
 
 const DIFF_CAP = 8000;
 const EVIDENCE_CAP = 4000;
+const HOST_EVIDENCE_CAP = 12_000;
 
 function cap(text: string, max: number): string {
   const t = (text ?? "").trim();
@@ -28,7 +34,7 @@ function cap(text: string, max: number): string {
  */
 export function buildVerifyContextBundle(
   cwd: string,
-  opts: { depth: string; evidence?: string; diff?: string },
+  opts: { depth: string; evidence?: string; diff?: string; hostEvidence?: string },
 ): VerifyContextBundle {
   const base = buildCouncilContextBundle(cwd, { depth: opts.depth });
   const diff = cap(opts.diff ?? "", DIFF_CAP);
@@ -38,6 +44,7 @@ export function buildVerifyContextBundle(
     diff,
     diffChars: diff.length,
     evidence,
+    hostEvidence: cap(opts.hostEvidence ?? "", HOST_EVIDENCE_CAP),
     planVerdict: readPlanVerifyVerdict(cwd),
   };
 }

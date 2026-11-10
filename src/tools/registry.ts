@@ -127,6 +127,8 @@ interface ToolRegistryOpts {
   }) => Promise<ToolResult>;
   startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
   readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+  /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
+  verifyWorkerEvidence?: () => Promise<string>;
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
@@ -2100,6 +2102,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       runDebate: opts?.runDebate,
       startPlanReview: opts?.startPlanReview,
       readPlanReview: opts?.readPlanReview,
+      verifyWorkerEvidence: opts?.verifyWorkerEvidence,
     });
   }
 

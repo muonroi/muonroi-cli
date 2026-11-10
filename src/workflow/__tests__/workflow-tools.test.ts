@@ -218,6 +218,71 @@ describe("flow workflow tools registry", () => {
     }
   });
 
+  // Session 36185ebf61a8: F4 re-raised in verify rounds 1, 3 and 4 although worker
+  // steady-teal-otter had produced that proof; main's evidence (capped at 4k) left it out.
+  it("flow_verify hands the host-recorded worker evidence to the verify council", async () => {
+    const leader = await import("../../council/leader.js");
+    const resolution = vi.spyOn(leader, "resolvePlanCouncilLeader").mockResolvedValue({ modelId: "test-leader" });
+    ensurePlanningWorkspace(tmp, "test-model");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Implement change\n2. Verify tests\n", "utf8");
+    const topics: string[] = [];
+    const debate = vi.fn(async (topic: string) => {
+      topics.push(topic);
+      return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+    });
+    const hostBlock =
+      "- steady-teal-otter [general, complete] E2E dual-home byte-compare proof\n  answer: both homes unchanged";
+    const tools = createBuiltinTools(new BashTool(tmp), "agent", {
+      modelId: "test-model",
+      depthTier: "standard",
+      runDebate: debate,
+      verifyWorkerEvidence: async () => hostBlock,
+    });
+    try {
+      const execute = tools.flow_verify!.execute as (...args: any[]) => Promise<string>;
+      const out = JSON.parse(
+        await execute({ passed: true, evidence: "tests passed" }, { toolCallId: "verify-host", messages: [] }),
+      );
+      expect(out.passed).toBe(true);
+      expect(topics).toHaveLength(1);
+      expect(topics[0]).toContain("### Host-recorded worker evidence");
+      expect(topics[0]).toContain("both homes unchanged");
+    } finally {
+      resolution.mockRestore();
+    }
+  });
+
+  it("flow_verify still runs the council when the host evidence hook throws", async () => {
+    const leader = await import("../../council/leader.js");
+    const resolution = vi.spyOn(leader, "resolvePlanCouncilLeader").mockResolvedValue({ modelId: "test-leader" });
+    ensurePlanningWorkspace(tmp, "test-model");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Implement change\n", "utf8");
+    const debate = vi.fn(async () => '```council-verdict\n{"verdict":"approve","concerns":[]}\n```');
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const tools = createBuiltinTools(new BashTool(tmp), "agent", {
+      modelId: "test-model",
+      depthTier: "standard",
+      runDebate: debate,
+      verifyWorkerEvidence: async () => {
+        throw new Error("ledger unreadable");
+      },
+    });
+    try {
+      const execute = tools.flow_verify!.execute as (...args: any[]) => Promise<string>;
+      const out = JSON.parse(
+        await execute({ passed: true, evidence: "tests passed" }, { toolCallId: "verify-host-err", messages: [] }),
+      );
+      expect(out.passed).toBe(true);
+      expect(debate).toHaveBeenCalledTimes(1);
+      expect(
+        error.mock.calls.some((c) => String(c[0]).includes("host worker evidence unavailable: ledger unreadable")),
+      ).toBe(true);
+    } finally {
+      error.mockRestore();
+      resolution.mockRestore();
+    }
+  });
+
   it("flow_execute allowed after plan-review council pass", async () => {
     const bash = new BashTool(tmp);
     ensurePlanningWorkspace(tmp, "deepseek-v4-flash");

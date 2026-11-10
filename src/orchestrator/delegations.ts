@@ -1009,6 +1009,50 @@ export class DelegationManager {
    * (delegation-ledger.ts). Same visibility and reconcile semantics as `list()`;
    * never marks delivery, ACK or notification.
    */
+  /**
+   * Host-recorded evidence of this session's finished workers, for the FLOW verify
+   * council, so a proof a worker already produced reaches the council even when
+   * main's own flow_verify evidence leaves it out. Measured (session 36185ebf61a8):
+   * the council raised F4 "byte-compare BOTH protected homes" in verify rounds 1,
+   * 3 and 4 although worker steady-teal-otter had run exactly that proof at 04:40;
+   * main's evidence (2.4-3.9k chars, capped at 4k) did not mention it in rounds 3
+   * and 4. Read-only: never marks delivery, ACK or notification.
+   */
+  async verifyWorkerEvidence(limit = VERIFY_EVIDENCE_JOBS): Promise<string> {
+    const items = await Promise.all((await this.jobPaths()).map((jobPath) => this.reconcile(jobPath)));
+    const done = items
+      .filter((item): item is StoredDelegation => item !== null)
+      .filter((item) => this.canAccess(item))
+      .filter((item) => item.kind !== "council" && !item.planReview && !item.planRevalidation)
+      .filter((item) => item.status !== "running" && Boolean(item.completedAt))
+      .sort((a, b) => (b.completedAt ?? "").localeCompare(a.completedAt ?? ""))
+      .slice(0, limit);
+    const blocks: string[] = [];
+    for (const record of done) {
+      let answer: string;
+      try {
+        answer = workerAnswer(await fs.readFile(record.outputPath, "utf8"));
+      } catch (err) {
+        logger.warn("orchestrator", "verify evidence: worker result unreadable", { id: record.id, error: String(err) });
+        answer = "(result unreadable)";
+      }
+      const tools = new Map<string, number>();
+      for (const a of record.toolArtifacts ?? []) tools.set(a.toolName, (tools.get(a.toolName) ?? 0) + 1);
+      const runs = (record.hostReview?.toolEvidence ?? [])
+        .filter((e) => e.tool === "verification_run")
+        .map((e) => (e.exitCode === undefined ? "not executed" : `exit=${e.exitCode}`));
+      blocks.push(
+        [
+          `- ${record.id} [${record.agent}, ${record.status}, completed ${record.completedAt}] ${record.description}`,
+          ...(tools.size ? [`  tools: ${[...tools].map(([t, n]) => `${t}x${n}`).join(", ")}`] : []),
+          ...(runs.length ? [`  verification_run: ${runs.join(", ")}`] : []),
+          `  answer: ${excerpt(answer, VERIFY_EVIDENCE_EXCERPT).replace(/\n/g, "\n    ")}`,
+        ].join("\n"),
+      );
+    }
+    return blocks.join("\n");
+  }
+
   async ledgerSnapshot(): Promise<DelegationLedgerEntry[]> {
     const items = await Promise.all((await this.jobPaths()).map((jobPath) => this.reconcile(jobPath)));
     return items
@@ -2332,6 +2376,24 @@ export function pageResultText(id: string, output: string, offset = 0, maxChars?
       ? `; next page: delegation_read(${JSON.stringify({ id, offset: end, ...(maxChars === undefined ? {} : { maxChars: Math.min(24_000, Math.max(256, Math.floor(maxChars))) }) })})`
       : "; end of result";
   return `[result chars ${start}-${end} of ${output.length}${next}]\n${output.slice(start, end)}`;
+}
+
+const VERIFY_EVIDENCE_JOBS = 12;
+const VERIFY_EVIDENCE_EXCERPT = 1200;
+
+/** The worker's own answer: after the header separator, before the host proof block. */
+function workerAnswer(output: string): string {
+  const sep = output.indexOf("\n---\n");
+  const body = sep >= 0 ? output.slice(sep + 5) : output;
+  const proof = body.lastIndexOf("\n## Host review evidence\n");
+  return (proof >= 0 ? body.slice(0, proof) : body).trim();
+}
+
+/** Head and tail of a long text: workers state their conclusion first or last. */
+function excerpt(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const half = Math.floor(max / 2);
+  return `${text.slice(0, half)}\n...[${text.length - 2 * half} chars omitted]...\n${text.slice(-half)}`;
 }
 
 const MODEL_VIEW_MANIFEST_IDS = 40;

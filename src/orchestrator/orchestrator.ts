@@ -430,6 +430,8 @@ function createTools(
     }) => Promise<ToolResult>;
     startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
     readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+    /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
+    verifyWorkerEvidence?: () => Promise<string>;
     planReviewBudget?: PlanReviewBudget;
     listDelegations?: () => Promise<ToolResult>;
     killDelegation?: (id: string) => Promise<ToolResult>;
@@ -451,6 +453,7 @@ function createTools(
     startCouncil: _opts?.startCouncil,
     startPlanReview: _opts?.startPlanReview,
     readPlanReview: _opts?.readPlanReview,
+    verifyWorkerEvidence: _opts?.verifyWorkerEvidence,
     planReviewBudget: _opts?.planReviewBudget,
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
@@ -4907,6 +4910,7 @@ export class Agent {
           planReviewBudget: self.requestPlanReviewBudget(),
           startPlanReview: (input, signal) => self.startPlanReview(input, signal),
           readPlanReview: (input) => self.readPlanReview(input),
+          verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
         });
         return filterExecutionTools(native, native, self.executionRole);
       },
@@ -6095,6 +6099,7 @@ export class Agent {
       startCouncil: (input) => self.startCouncil(input),
       startPlanReview: (input, signal) => self.startPlanReview(input, signal),
       readPlanReview: (input) => self.readPlanReview(input),
+      verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => {

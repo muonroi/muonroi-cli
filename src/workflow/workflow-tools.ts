@@ -47,6 +47,8 @@ export interface FlowWorkflowToolOpts extends AsyncPlanReviewHost {
   planReviewBudget?: PlanReviewBudget;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
+  /** Host-recorded evidence of this session's finished workers, handed to the verify council. */
+  verifyWorkerEvidence?: () => Promise<string>;
 }
 
 function json(data: unknown): string {
@@ -627,12 +629,20 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
       if (passed && depth !== "quick") {
         try {
           const diff = readImplementationDiff(cwd);
+          let hostEvidence = "";
+          try {
+            hostEvidence = (await opts.verifyWorkerEvidence?.()) ?? "";
+          } catch (err) {
+            // The council still runs on main's evidence; a missing host block is logged, not fatal.
+            console.error(`[flow] verify-council host worker evidence unavailable: ${(err as Error).message}`);
+          }
           const council = await runVerifyCouncil({
             cwd,
             sessionModelId,
             depth,
             evidence: input.evidence?.trim(),
             diff,
+            hostEvidence,
             abortSignal,
             runPerspectiveFn: runTask
               ? verifyRunPerspectiveFn((request) => runTask(request, abortSignal), sessionModelId)

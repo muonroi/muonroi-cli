@@ -1147,6 +1147,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           startCouncil: deps.startCouncil,
           startPlanReview: deps.startPlanReview,
           readPlanReview: deps.readPlanReview,
+          verifyWorkerEvidence: deps.verifyWorkerEvidence,
           listDelegations: () => deps.listDelegations(),
           killDelegation: (id) => deps.killDelegation(id),
           modelId: turnModelId,

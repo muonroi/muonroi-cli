@@ -214,6 +214,32 @@ describe("completion notice carries the saved result", () => {
     expect(fs.readFileSync(record.outputPath, "utf8")).toBe(saved);
   });
 
+  it("verifyWorkerEvidence lists finished workers newest first with a head+tail answer excerpt, never councils", async () => {
+    const older = writeJob("proof-worker", { description: "E2E dual-home byte-compare proof" });
+    await completeDelegation(older, "Both homes byte-identical before/after: PROOF-SENTINEL");
+    const newer = writeJob("long-worker", { description: "Implement core" });
+    await saveDelegationToolResult(newer, "call_a", "bash", {}, "ok");
+    await saveDelegationToolResult(newer, "call_b", "bash", {}, "ok");
+    await completeDelegation(newer, `HEAD-SENTINEL ${"m".repeat(3000)} TAIL-SENTINEL`);
+    const council = writeJob("plan-council", { agent: "council", kind: "council" });
+    await completeDelegation(council, "COUNCIL-BODY");
+    writeJob("still-running");
+
+    const block = await manager.verifyWorkerEvidence();
+    expect(block).toContain("proof-worker [general, complete");
+    expect(block).toContain("E2E dual-home byte-compare proof");
+    expect(block).toContain("PROOF-SENTINEL");
+    expect(block).toContain("tools: bashx2");
+    expect(block).toContain("HEAD-SENTINEL");
+    expect(block).toContain("TAIL-SENTINEL");
+    expect(block).toMatch(/chars omitted/);
+    expect(block.indexOf("long-worker")).toBeLessThan(block.indexOf("proof-worker"));
+    expect(block).not.toContain("plan-council");
+    expect(block).not.toContain("still-running");
+    // Read-only: listing evidence does not deliver or acknowledge anything.
+    expect(stored(older).deliveredVersion).toBeUndefined();
+  });
+
   it("leaves a result without host proof untouched", () => {
     const record = { id: "plain" } as unknown as StoredDelegation;
     expect(resultModelView(record, "plain body")).toBe("plain body");

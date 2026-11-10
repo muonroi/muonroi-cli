@@ -97,6 +97,8 @@ export interface TurnRunnerDepsBase {
   startCouncil?(input: { topic: string; reason: string; context: string; outputContract: string }): Promise<ToolResult>;
   startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
   readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+  /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
+  verifyWorkerEvidence?: () => Promise<string>;
   listDelegations(): Promise<ToolResult>;
   killDelegation(id: string): Promise<ToolResult>;
 
