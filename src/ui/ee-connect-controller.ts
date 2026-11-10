@@ -11,9 +11,16 @@
 
 import type { ExperienceConfig } from "../ee/auth.js";
 import { loadEEAuthToken, probeEEHealth, writeExperienceConfig } from "../ee/auth.js";
+import {
+  type LocalBrainDeps,
+  type LocalBrainSetupResult,
+  type SetupLocalBrainOptions,
+  defaultLocalBrainDeps,
+  setupLocalBrain,
+} from "../ee/local-brain.js";
 import { EE_HOSTED_URL, EE_LOCAL_URL, recordEeConnected } from "../ee/ee-connect.js";
 
-export type EeConnectActionId = "hosted" | "local" | "how" | "not-now";
+export type EeConnectActionId = "hosted" | "local" | "setup-local" | "how" | "not-now";
 
 export interface EeConnectAction {
   id: EeConnectActionId;
@@ -33,6 +40,11 @@ export function buildEeConnectActions(): EeConnectAction[] {
       id: "local",
       label: "Connect local brain",
       hint: `Auto-detects a brain at ${EE_LOCAL_URL} and connects with one keypress`,
+    },
+    {
+      id: "setup-local",
+      label: "Set up local brain",
+      hint: `Provisions, starts, and connects a local brain at ${EE_LOCAL_URL} automatically`,
     },
     {
       id: "how",
@@ -62,9 +74,18 @@ export const EE_HOW_IT_WORKS_LINES: readonly string[] = [
 
 export interface EeConnectDeps {
   probeHealth: (baseUrl: string, token?: string) => Promise<{ ok: boolean; detail: string }>;
-  writeConfig: (patch: Partial<ExperienceConfig>) => Promise<void>;
-  reloadAuth: () => Promise<unknown>;
+  /**
+   * Merge a patch into ~/.experience/config.json. `opts.home` is optional so the
+   * hosted/local one-keypress pipelines keep writing the real home, and is
+   * REQUIRED whenever the local-brain pipeline forwards its resolved home —
+   * `writeExperienceConfig` has no env override, so a missing `{ home }` would
+   * silently address the developer's real ~/.experience (src/ee/auth.ts:71-74).
+   */
+  writeConfig: (patch: Partial<ExperienceConfig>, opts?: { home?: string }) => Promise<void>;
+  /** Reload the in-memory auth cache. `home` is the home the config was written to. */
+  reloadAuth: (home?: string) => Promise<unknown>;
   recordConnected: () => void;
+  setupLocalBrain?: (deps: LocalBrainDeps, opts?: SetupLocalBrainOptions) => Promise<LocalBrainSetupResult>;
 }
 
 export type EeConnectResult = { ok: true; detail: string } | { ok: false; error: string };
@@ -116,12 +137,57 @@ export async function connectLocalEE(deps: EeConnectDeps): Promise<EeConnectResu
   return { ok: true, detail: health.detail };
 }
 
-/** Production dependency wiring for the connect pipelines. */
+/**
+ * "Setup local" pipeline: call the injected setupLocalBrain pipeline. It
+ * handles probe/spawn/connect in one keypress and returns the same shape as
+ * the other pipelines so the UI can treat them uniformly.
+ *
+ * `brainDeps` is built by SPREADING `defaultLocalBrainDeps()` and overriding
+ * only the four UI-owned seams (src/ee/local-brain.ts:30 — the default factory
+ * is the only place in that module allowed to touch the real machine). Hand-
+ * rolling the environment seams instead was a live bug: `resolveUserHome`
+ * returning "" made setupLocalBrain bail out at src/ee/local-brain.ts:362-369
+ * with "No home directory was supplied", and `pathExists: () => false` rejected
+ * every candidate server root, so the production "Set up local brain" action
+ * could never succeed.
+ *
+ * `setupLocalBrain` honours `opts.localUrl` over `deps.localUrl`
+ * (src/ee/local-brain.ts:347), so `defaultLocalBrainDeps().localUrl` is the
+ * correct fallback to leave in place.
+ */
+export async function connectSetupLocalEE(
+  deps: EeConnectDeps,
+  opts: SetupLocalBrainOptions = {},
+): Promise<EeConnectResult> {
+  if (!deps.setupLocalBrain) {
+    return { ok: false, error: "Local brain setup is not wired (setupLocalBrain dep is missing)." };
+  }
+  const brainDeps: LocalBrainDeps = {
+    ...defaultLocalBrainDeps(),
+    probeHealth: deps.probeHealth,
+    writeConfig: (patch, writeOpts) => deps.writeConfig(patch, writeOpts),
+    reloadAuth: (home) => deps.reloadAuth(home),
+    recordConnected: deps.recordConnected,
+  };
+  const result = await deps.setupLocalBrain(brainDeps, opts);
+  if (result.ok) {
+    return { ok: true, detail: result.detail };
+  }
+  return { ok: false, error: result.error };
+}
+
+/**
+ * Production dependency wiring for the connect pipelines.
+ */
 export function defaultEeConnectDeps(): EeConnectDeps {
   return {
     probeHealth: (baseUrl, token) => probeEEHealth(baseUrl, token, { quiet: true }),
-    writeConfig: writeExperienceConfig,
-    reloadAuth: () => loadEEAuthToken(),
+    // `home` is forwarded only when the local-brain pipeline supplies one; the
+    // hosted/local pipelines call writeConfig with a single argument, so
+    // writeExperienceConfig resolves the real ~/.experience as before.
+    writeConfig: (patch, opts) => writeExperienceConfig(patch, opts),
+    reloadAuth: (home) => loadEEAuthToken(home ? { home } : undefined),
     recordConnected: recordEeConnected,
+    setupLocalBrain: (deps, opts) => setupLocalBrain(deps, opts),
   };
 }

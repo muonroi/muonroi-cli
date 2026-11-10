@@ -66,10 +66,11 @@ describe("EE connect card E2E", () => {
     expect(card?.isModal).toBe(true);
   });
 
-  it("offers hosted / local / how-it-works / not-now actions", async () => {
+  it("offers hosted / setup-local / local / how-it-works / not-now actions", async () => {
     const actions = driver.queryAll("id*=ee-connect-action-");
-    expect(actions.length).toBe(4);
+    expect(actions.length).toBe(5);
     expect(driver.query("id=ee-connect-action-hosted")).not.toBeNull();
+    expect(driver.query("id=ee-connect-action-setup-local")).not.toBeNull();
     expect(driver.query("id=ee-connect-action-local")).not.toBeNull();
   });
 

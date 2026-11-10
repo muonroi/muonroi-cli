@@ -313,6 +313,7 @@ import {
   buildEeConnectActions,
   connectHostedEE,
   connectLocalEE,
+  connectSetupLocalEE,
   defaultEeConnectDeps,
 } from "./ee-connect-controller.js";
 import { subscribeLspSetup } from "../lsp/lsp-setup-bus.js";
@@ -1987,6 +1988,21 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       case "not-now":
         dismissEeConnectCard(true);
+        return;
+      case "setup-local":
+        setEeConnectMode("validating");
+        setEeConnectError(null);
+        void (async () => {
+          const result = await connectSetupLocalEE(defaultEeConnectDeps());
+          if (result.ok) {
+            statusBarStore.setState({ ee_status: "ok" });
+            pushToast("info", "Local Experience Engine connected — recall is live for this session.");
+            dismissEeConnectCard(false);
+          } else {
+            setEeConnectError(result.error);
+            setEeConnectMode("actions");
+          }
+        })();
         return;
     }
   }, [dismissEeConnectCard, pushToast]);
