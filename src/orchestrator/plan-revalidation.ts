@@ -186,12 +186,21 @@ export function assertPlanRevalidationEvidence(jobPath: string, record: StoredDe
     );
   }
   const evidence = proof.toolEvidence ?? [];
-  if (
-    evidence.some(
-      (e) => e.tool === "verification_run" && (!e.success || (e.exitCode !== undefined && e.exitCode !== 0)),
-    )
-  ) {
-    throw new Error("plan_revalidation_refused: Executed verification failed; a model pass cannot override it.");
+  // Only a run that EXECUTED can fail. verification_run records `exitCode` from
+  // the runner's "exit=<n>" line (null = ran but was killed/crashed); a call the
+  // tool rejected before running anything — a nonexistent file
+  // ("workspace_scope_refused: ENOENT"), a non-test target ("Invalid test
+  // file") — has no exit code and proves nothing either way. Counting those as
+  // "Executed verification failed" deadlocked session 36185ebf61a8: four
+  // revalidations whose executed runs all exited 0 were refused, unchanged
+  // inputs could not launch a fresh verifier, and main forced execute.
+  const failedRun = evidence.find(
+    (e) => e.tool === "verification_run" && e.exitCode !== undefined && (e.exitCode !== 0 || !e.success),
+  );
+  if (failedRun) {
+    throw new Error(
+      `plan_revalidation_refused: Executed verification failed (exit=${failedRun.exitCode}); a model pass cannot override it.`,
+    );
   }
   const captures = record.toolArtifacts.map((entry) => {
     if (!/^[a-f0-9]{64}-[a-f0-9]{64}\.json$/.test(entry.fileName))

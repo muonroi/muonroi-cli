@@ -152,7 +152,14 @@ describe("durable nonblocking root Flow plan review", () => {
     };
     return { root, budget, source, input, inline, original };
   }
-  async function finishVerification(value = "pass", captured = true, failedTest = false, index = 1, output?: string) {
+  async function finishVerification(
+    value = "pass",
+    captured = true,
+    failedTest = false,
+    index = 1,
+    output?: string,
+    extraEvidence: ReviewToolEvidence[] = [],
+  ) {
     const file = planningArtifact(cwd, "PLAN.md");
     const input = { file_path: file };
     const actual = readFile(file, cwd);
@@ -172,6 +179,7 @@ describe("durable nonblocking root Flow plan review", () => {
       : [];
     if (captured) await saveDelegationToolResult(jobPath(index), "independent-plan-read", "read_file", input, actual);
     if (failedTest) evidence.push({ ...evidence[0]!, tool: "verification_run", success: false, exitCode: 1 });
+    evidence.push(...extraEvidence);
     await completeDelegation(
       jobPath(index),
       output ??
@@ -184,6 +192,62 @@ describe("durable nonblocking root Flow plan review", () => {
     );
     return loadDelegation(jobPath(index));
   }
+
+  // Session 36185ebf61a8: four revalidations whose EXECUTED runs all exited 0 were refused
+  // "Executed verification failed" because the verifier had also made calls the tool rejected
+  // before running anything (a nonexistent test file, a non-test script) — no exitCode.
+  const runEntry = (over: Partial<ReviewToolEvidence>): ReviewToolEvidence => ({
+    tool: "verification_run",
+    success: true,
+    scope: "workspace",
+    resolvedPaths: [],
+    input: {},
+    outputDigest: "0".repeat(64),
+    completedAt: new Date().toISOString(),
+    ...over,
+  });
+  async function completeWith(extra: ReviewToolEvidence[]) {
+    const { root, input } = await staleCouncil();
+    await root.flow_plan_review!.execute!(input, context);
+    const fresh = await finishVerification("pass", true, false, 1, undefined, extra);
+    await readForMain(fresh.id, 1);
+    return JSON.parse(
+      (await root.flow_plan_review!.execute!(
+        {
+          action: "complete",
+          jobId: fresh.id,
+          resultVersion: fresh.resultVersion,
+          assessment: "Independent current-plan read; executed runs exited 0",
+          decisions: (await mainDecisions()).map((item: object) => ({ ...item, decision: "resolved" })),
+        },
+        context,
+      )) as string,
+    );
+  }
+
+  it("a verification_run the tool rejected before running (no exit code) does not refuse an executed pass", async () => {
+    const done = await completeWith([
+      runEntry({ success: false, scope: "unknown", outputPreview: "workspace_scope_refused: ENOENT: no such file" }),
+      runEntry({
+        success: false,
+        outputPreview: "Invalid test file: scripts/x.ts. Options, directories and shell commands are not accepted.",
+      }),
+      runEntry({ success: true, exitCode: 0, outputPreview: "Local verification runner=vitest exit=0" }),
+    ]);
+    expect(done.planVerified).toBe(true);
+  });
+
+  it("an executed verification_run that failed still refuses, naming its exit code", async () => {
+    const done = await completeWith([runEntry({ success: false, exitCode: 1, outputPreview: "exit=1" })]);
+    expect(done.ok).toBe(false);
+    expect(done.message).toContain("Executed verification failed (exit=1)");
+  });
+
+  it("an executed run killed without an exit code (exit=null) is a failure, not a rejected input", async () => {
+    const done = await completeWith([runEntry({ success: false, exitCode: null, outputPreview: "exit=null" })]);
+    expect(done.ok).toBe(false);
+    expect(done.message).toContain("Executed verification failed (exit=null)");
+  });
 
   it.each([
     "reject",
