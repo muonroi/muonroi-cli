@@ -35,6 +35,7 @@ import { promises as fs } from "node:fs";
 import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { logger } from "../utils/logger.js";
 import type { ExperienceConfig } from "./auth.js";
 import { probeEEHealth, writeExperienceConfig } from "./auth.js";
 import { EE_LOCAL_URL, recordEeConnected } from "./ee-connect.js";
@@ -187,7 +188,12 @@ export function defaultLocalBrainDeps(): LocalBrainDeps {
     requireResolve: (spec) => {
       try {
         return createRequire(import.meta.url).resolve(spec);
-      } catch {
+      } catch (err) {
+        // Not installed in this module graph: an expected miss, logged for diagnosis.
+        logger.debug("ee", "local brain: module-graph resolve missed", {
+          spec,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return null;
       }
     },
@@ -202,7 +208,10 @@ export function defaultLocalBrainDeps(): LocalBrainDeps {
         });
         const root = String(stdout).trim();
         return root.length > 0 ? root : null;
-      } catch {
+      } catch (err) {
+        logger.debug("ee", "local brain: `npm root -g` failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
         return null;
       }
     },
@@ -210,7 +219,11 @@ export function defaultLocalBrainDeps(): LocalBrainDeps {
       try {
         await fs.access(path.join(candidate, "server.js"));
         return true;
-      } catch {
+      } catch (err) {
+        logger.debug("ee", "local brain: candidate root has no server.js", {
+          candidate,
+          error: err instanceof Error ? err.message : String(err),
+        });
         return false;
       }
     },
@@ -278,8 +291,11 @@ export async function resolveLocalBrainPackageRoot(deps: LocalBrainDeps = {}): P
     const resolved = deps.requireResolve?.(`${LOCAL_BRAIN_PACKAGE_SPEC}/server.js`);
     const fromRequire = await rootHasEntry(deps, resolved ? path.dirname(resolved) : null);
     if (fromRequire) return fromRequire;
-  } catch {
+  } catch (err) {
     // A resolver that throws is "not installed", not a crash.
+    logger.debug("ee", "local brain: package resolver threw", {
+      error: err instanceof Error ? err.message : String(err),
+    });
   }
 
   const candidates = [...globalCandidateRoots(deps), ...(deps.globalPackageRoots?.() ?? [])];
@@ -433,6 +449,16 @@ export async function setupLocalBrain(
           );
         }
         const spawnDeps = opts.spawn ?? deps.spawn;
+        // The child was stopped: drop its tracking file, or the next setup/stop
+        // sees a stale entry for a brain that no longer exists (measured
+        // 2026-11-10: a crashed child left local-brain.json and killLocalBrain
+        // then answered "stale").
+        if (killed) {
+          const unlink = spawnDeps?.unlink ?? ((p: string) => fs.unlink(p));
+          await unlink(started.pidfilePath).catch((err: unknown) => {
+            console.error(`[ee/local-brain] left the stale pidfile ${started.pidfilePath} behind: ${errText(err)}`);
+          });
+        }
         const tail = spawnDeps?.readLogTail
           ? await spawnDeps.readLogTail(started.logPath)
           : await readLocalBrainLogTail(started.logPath);

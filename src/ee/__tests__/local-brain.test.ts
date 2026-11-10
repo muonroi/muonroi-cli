@@ -303,11 +303,18 @@ describe("setupLocalBrain", () => {
 
   it("kills the child and reports the log when /health never becomes ok", async () => {
     const { harness, deps } = fresh();
+    const unlinked: string[] = [];
     // healthyUrls stays empty ⇒ every probe fails. `sleep` advances the injected
     // clock so the loop reaches the deadline without sleeping in wall time.
     const result = await setupLocalBrain(
       {
         ...deps,
+        spawn: {
+          ...deps.spawn,
+          unlink: async (p: string) => {
+            unlinked.push(p);
+          },
+        },
         sleep: async () => {
           fakeNow += 200;
         },
@@ -318,6 +325,8 @@ describe("setupLocalBrain", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(harness.child.killCalls).toBe(1);
+    // The stopped child's tracking file is removed, so the next setup/stop is not handed a stale entry.
+    expect(unlinked).toContain(localBrainPidfilePath(harness.home));
     expect(result.error).toContain("brain: listening");
     expect(result.error).toContain(localBrainLogPath(harness.home));
     expect(harness.writeConfigCalls).toHaveLength(0);

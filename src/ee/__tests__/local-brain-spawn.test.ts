@@ -153,7 +153,8 @@ function makeSpawnDeps(harness: Harness): Partial<LocalBrainSpawnDeps> {
 function makeKillDeps(harness: Harness, overrides: Partial<LocalBrainKillDeps> = {}): Partial<LocalBrainKillDeps> {
   return {
     platform: "linux",
-    isAlive: () => true,
+    // Alive until signalled, like a real brain that exits on SIGTERM.
+    isAlive: () => harness.child.killCalls === 0,
     commandLineOf: async () => `node ${join("/opt/ee", "server.js")}`,
     portOwnerPid: async () => harness.child.pid,
     signalProcess: () => {
@@ -164,6 +165,10 @@ function makeKillDeps(harness: Harness, overrides: Partial<LocalBrainKillDeps> =
       if (content === undefined) throw new Error(`ENOENT: ${filePath}`);
       return content;
     },
+    unlink: async (filePath) => {
+      harness.written.delete(filePath);
+    },
+    sleep: async () => {},
     now: () => 1_700_000_000_000,
     ...overrides,
   };
@@ -417,6 +422,61 @@ describe("killLocalBrain (F2: verify before signalling)", () => {
 
     expect(result).toEqual({ ok: true, pid: 4242, port: 34567, logPath: localBrainLogPath(harness.home) });
     expect(harness.child.killCalls).toBe(1);
+    // Confirmed gone -> the tracking file is removed, so the next setup starts clean.
+    expect(harness.written.has(localBrainPidfilePath(harness.home))).toBe(false);
+  });
+
+  // 2026-11-10: on win32 the old path returned ok:true while the brain kept serving /health.
+  it("reports still-running (and keeps the pidfile) when the brain survives the signal", async () => {
+    await trackBrain();
+    let clock = 1_700_000_000_000;
+    const result = await killLocalBrain({
+      home: harness.home,
+      deps: makeKillDeps(harness, {
+        isAlive: () => true,
+        now: () => clock,
+        sleep: async (ms) => {
+          clock += ms;
+        },
+      }),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.reason).toBe("still-running");
+      expect(result.error).toContain("still running after 5000 ms");
+    }
+    expect(harness.written.has(localBrainPidfilePath(harness.home))).toBe(true);
+  });
+
+  it("awaits an asynchronous signal before checking that the brain is gone", async () => {
+    await trackBrain();
+    let delivered = false;
+    const result = await killLocalBrain({
+      home: harness.home,
+      deps: makeKillDeps(harness, {
+        signalProcess: async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          delivered = true;
+        },
+        isAlive: () => !delivered,
+      }),
+    });
+    expect(result.ok).toBe(true);
+    expect(delivered).toBe(true);
+  });
+
+  it("reports signal-failed when the signal itself throws", async () => {
+    await trackBrain();
+    const result = await killLocalBrain({
+      home: harness.home,
+      deps: makeKillDeps(harness, {
+        signalProcess: async () => {
+          throw new Error("taskkill /pid 4242 failed: Access is denied.");
+        },
+      }),
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.error).toContain("Access is denied");
   });
 
   it("refuses when the pidfile is missing", async () => {

@@ -33,6 +33,7 @@ import { spawn as nodeSpawn } from "node:child_process";
 import { closeSync, promises as fs, mkdirSync, openSync } from "node:fs";
 import * as path from "node:path";
 import { resolveSpawnTarget } from "../lsp/spawn-target.js";
+import { logger } from "../utils/logger.js";
 
 /**
  * The one resolvable package spec the local brain is looked up under. It is the
@@ -420,9 +421,15 @@ export interface LocalBrainKillDeps {
   commandLineOf: (pid: number) => Promise<string | null>;
   /** Pid currently LISTENING on `port`, or null when the host will not tell us. */
   portOwnerPid: (port: number) => Promise<number | null>;
-  /** Actually signal. Only ever called after verification passes. */
-  signalProcess: (pid: number) => void;
+  /**
+   * Actually signal. Only ever called after verification passes. Resolves once the
+   * signal has been DELIVERED (win32: taskkill has exited), not merely requested.
+   */
+  signalProcess: (pid: number) => void | Promise<void>;
   readFile: (filePath: string) => Promise<string>;
+  /** Remove the pidfile once the brain is confirmed gone. */
+  unlink: (filePath: string) => Promise<void>;
+  sleep: (ms: number) => Promise<void>;
   now: () => number;
 }
 
@@ -434,7 +441,8 @@ export type LocalBrainKillRefusal =
   | "port-mismatch"
   | "cmdline-unknown"
   | "cmdline-mismatch"
-  | "signal-failed";
+  | "signal-failed"
+  | "still-running";
 
 export type KillLocalBrainResult =
   | { ok: true; pid: number; port: number; logPath: string }
@@ -459,7 +467,9 @@ async function execText(command: string, args: string[]): Promise<string | null>
   try {
     const { stdout } = await run(command, args, { windowsHide: true, timeout: 5000, maxBuffer: 1 << 20 });
     return String(stdout);
-  } catch {
+  } catch (err) {
+    // The caller treats null as "the host will not tell us" and refuses to signal.
+    logger.debug("ee", "local brain: host query failed", { command, args, error: errText(err) });
     return null;
   }
 }
@@ -509,11 +519,22 @@ function defaultPortOwnerPid(port: number): Promise<number | null> {
   });
 }
 
-function defaultSignalProcess(pid: number): void {
+const KILL_EXIT_TIMEOUT_MS = 5000;
+const KILL_EXIT_POLL_MS = 100;
+
+async function defaultSignalProcess(pid: number): Promise<void> {
   if (process.platform === "win32") {
-    // Same shape as src/hooks/command-runner.ts: /T takes the detached tree,
-    // /F because a process holding a listening socket ignores a gentle request.
-    nodeSpawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" }).unref();
+    // /T takes the detached tree, /F because a process holding a listening socket
+    // ignores a gentle request. Awaited: a detached+unref'd taskkill was lost when
+    // the caller exited first, leaving the brain running.
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    try {
+      await promisify(execFile)("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, timeout: 10_000 });
+    } catch (err) {
+      const stderr = String((err as { stderr?: unknown }).stderr ?? "").trim();
+      throw new Error(`taskkill /pid ${pid} failed: ${stderr || errText(err)}`);
+    }
     return;
   }
   process.kill(pid, "SIGTERM");
@@ -527,6 +548,8 @@ export function defaultLocalBrainKillDeps(): LocalBrainKillDeps {
     portOwnerPid: defaultPortOwnerPid,
     signalProcess: defaultSignalProcess,
     readFile: async (filePath) => await fs.readFile(filePath, "utf8"),
+    unlink: async (filePath) => await fs.unlink(filePath),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     now: () => Date.now(),
   };
 }
@@ -549,13 +572,16 @@ export async function readLocalBrainPidfile(
   let raw: string;
   try {
     raw = await resolved.readFile(filePath);
-  } catch {
+  } catch (err) {
+    // No pidfile is the normal "nothing tracked" case.
+    logger.debug("ee", "local brain: no readable pidfile", { filePath, error: errText(err) });
     return null;
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (err) {
+    logger.warn("ee", "local brain: pidfile is not valid JSON; ignoring it", { filePath, error: errText(err) });
     return null;
   }
   if (!isPidfileShape(parsed)) return null;
@@ -658,7 +684,7 @@ export async function killLocalBrain(opts: {
   }
 
   try {
-    deps.signalProcess(entry.pid);
+    await deps.signalProcess(entry.pid);
   } catch (err) {
     return {
       ok: false,
@@ -667,5 +693,27 @@ export async function killLocalBrain(opts: {
       error: `Verified pid ${entry.pid} as the local brain but could not signal it: ${errText(err)}`,
     };
   }
+  // "ok" means the brain is GONE, not that a signal was requested. Measured
+  // 2026-11-10: on win32 the old path spawned taskkill detached + unref and
+  // returned ok:true at once; the caller exited, taskkill never ran, and the
+  // brain (pid 23644) kept answering /health on its port.
+  const deadline = deps.now() + KILL_EXIT_TIMEOUT_MS;
+  while (deps.isAlive(entry.pid)) {
+    if (deps.now() >= deadline)
+      return {
+        ok: false,
+        reason: "still-running",
+        pid: entry.pid,
+        error:
+          `Signalled the local brain (pid ${entry.pid}, port ${entry.port}) but it was still running after ` +
+          `${KILL_EXIT_TIMEOUT_MS} ms. Its pidfile ${pidfilePath} was kept.`,
+      };
+    await deps.sleep(KILL_EXIT_POLL_MS);
+  }
+  await deps.unlink(pidfilePath).catch((err: unknown) => {
+    console.error(
+      `[ee/local-brain-spawn] brain pid ${entry.pid} stopped but its pidfile ${pidfilePath} remains: ${errText(err)}`,
+    );
+  });
   return { ok: true, pid: entry.pid, port: entry.port, logPath: entry.logPath };
 }
