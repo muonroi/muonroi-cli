@@ -45,6 +45,12 @@
  *                           AUTO_CONTINUE_TEXT up to n times (default 0). The baseline had a human
  *                           who sent 37 steering messages ("bắt đầu làm theo recommend của bạn",
  *                           "bạn có toàn quyền…"); the count used is reported in the output.
+ *   --resume-session <id>   resume an existing run instead of starting one: launch the CLI with
+ *                           --session <id> in --cwd <dir> (the kept clone of the earlier run) and
+ *                           send --resume-text (default "/ideal resume"). --budget-usd then counts
+ *                           only spend made after this launch (the session already spent the rest).
+ *   --cwd <dir>             working directory for --resume-session
+ *   --resume-text <text>    what to send once the TUI is ready (default "/ideal resume")
  *   --out <file>            also write {baseline, replay, comparison} JSON
  *   --keep                  keep the temp clone/home for inspection
  */
@@ -90,6 +96,9 @@ const { values: opt } = parseArgs({
     "quiet-sec": { type: "string", default: "90" },
     "auto-continue": { type: "string", default: "0" },
     out: { type: "string" },
+    "resume-session": { type: "string" },
+    cwd: { type: "string" },
+    "resume-text": { type: "string", default: "/ideal resume" },
     keep: { type: "boolean", default: false },
   },
 });
@@ -112,6 +121,9 @@ const AUTO_CONTINUE_TEXT =
   "Bạn có toàn quyền quyết định — cứ làm theo đề xuất của bạn và tiếp tục cho đến khi hoàn thành.";
 if (!(budgetUsd > 0) || !(maxWallMs > 0) || !(quietMs > 0))
   fail("--budget-usd, --max-wall-min, --quiet-sec must be > 0");
+const resumeSession = opt["resume-session"];
+if (resumeSession && !opt.cwd) fail("--resume-session needs --cwd <dir> (the kept clone of the earlier run)");
+if (resumeSession && (opt.prompt || opt.greenfield)) fail("--resume-session excludes --prompt and --greenfield");
 
 const repoRoot = fileURLToPath(new URL("../..", import.meta.url));
 const baselineHome = opt["baseline-home"] ?? process.env.MUONROI_CLI_HOME ?? join(homedir(), ".muonroi-cli");
@@ -291,11 +303,17 @@ const startedAt = Date.now();
 
 async function main(): Promise<void> {
   // --prompt runs an arbitrary task: no baseline session, no comparison.
-  const baseline = opt.prompt ? undefined : readBaseline();
-  const prompt = opt.prompt ?? baseline!.prompt;
-  const root = mkdtempSync(join(tmpdir(), opt.prompt ? "task-run-" : "tcis-replay-"));
+  const baseline = opt.prompt || resumeSession ? undefined : readBaseline();
+  const prompt = resumeSession ? opt["resume-text"]! : (opt.prompt ?? baseline!.prompt);
+  const root = resumeSession
+    ? resolve(opt.cwd!, "..")
+    : mkdtempSync(join(tmpdir(), opt.prompt ? "task-run-" : "tcis-replay-"));
   let cwd: string;
-  if (opt.greenfield) {
+  if (resumeSession) {
+    cwd = resolve(opt.cwd!);
+    if (!existsSync(cwd)) fail(`--cwd ${cwd} does not exist`);
+    log(`resuming session ${resumeSession} in ${cwd}`);
+  } else if (opt.greenfield) {
     cwd = join(root, "repo");
     mkdirSync(cwd, { recursive: true });
     git(["init", "--quiet"], cwd);
@@ -332,6 +350,7 @@ async function main(): Promise<void> {
   if (opt.model) args.push("-m", opt.model);
   // --permission safe|auto-edit|yolo overrides the user setting for this run (safe exercises approval cards).
   if (opt.permission) args.push("--permission", opt.permission);
+  if (resumeSession) args.push("--session", resumeSession);
   log(`launching CLI (${mock ? `mock ${mock}` : "LIVE"}) in ${cwd}`);
   const { proc, inWrite, outRead } = await spawnAgentTui(args, { spawnOpts: { env, cwd } });
 
@@ -384,12 +403,17 @@ async function main(): Promise<void> {
   // moment later. Measuring quiet from the last UI frame alone killed run
   // a2a6d27eb5ca right as its last worker finished, before the wake-up turn.
   let lastWorkerSeenAt = Date.now();
+  let spendAtLaunch: number | undefined;
   for (;;) {
     await new Promise((r) => setTimeout(r, 5_000));
     ids = findSessions(runDb, cwd);
+    if (resumeSession && !ids.includes(resumeSession)) ids = [resumeSession, ...ids];
     const idSet = new Set(ids);
     const stored = sumStored(runDb, ids);
-    const spend = stored.usd + workerSpend(runHome, idSet);
+    const totalSpend = stored.usd + workerSpend(runHome, idSet);
+    // Resume: the budget covers only what this launch spends (the session already spent the rest).
+    spendAtLaunch ??= totalSpend;
+    const spend = resumeSession ? totalSpend - spendAtLaunch : totalSpend;
     const running = runningWorkers(runHome, idSet);
     const elapsed = Date.now() - startedAt;
     if (spend > budgetUsd) {
