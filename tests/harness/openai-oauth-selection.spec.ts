@@ -40,7 +40,9 @@ describe("OpenAI OAuth completes the provider selection intent", { retry: 0 }, (
       cwd: home,
       env: {
         OPENAI_API_KEY: "",
-        MUONROI_CLI_HOME: home,
+        // The settings the spec seeds/reads live in <home>/.muonroi-cli; since every
+        // store honours MUONROI_CLI_HOME (266c7dc2) it must name that dir, not <home>.
+        MUONROI_CLI_HOME: join(home, ".muonroi-cli"),
         MUONROI_AUTH_DIR: join(home, "auth"),
         MUONROI_ENV_FILE: join(home, ".env"),
         MUONROI_OAUTH_FIXTURE_CANCEL: action === "cancel" ? "1" : "0",
