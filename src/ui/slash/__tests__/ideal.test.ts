@@ -121,16 +121,24 @@ describe("/ideal slash parser", () => {
       "test",
       "--",
       "--watch=false",
-      "--new",
       "works",
     ]);
     expect(r.subcommand).toBe("start");
-    expect(r.idea).toBe(
-      "make setup simple. Done when bunx tsc --noEmit passes and npm test -- --watch=false --new works",
-    );
+    expect(r.warnings.filter((w) => w.startsWith("error"))).toEqual([]);
+    expect(r.idea).toBe("make setup simple. Done when bunx tsc --noEmit passes and npm test -- --watch=false works");
     expect(r.flags.forceCouncil).toBe(true);
-    // A flag after the idea is part of the idea, not a mode switch.
-    expect(r.flags.mode).toBeUndefined();
+  });
+
+  it("/ideal's own flags still work AFTER the idea (the harness form) next to unknown quoted ones", () => {
+    const r = parseIdealArgs(["build", "a", "counter", "--max-sprints", "1", "--force-council", "--noEmit"]);
+    expect(r.subcommand).toBe("start");
+    expect(r.idea).toBe("build a counter --noEmit");
+    expect(r.flags.forceCouncil).toBe(true);
+    expect(r.flags.maxSprints).toBe(1);
+    const eq = parseIdealArgs(["--done-threshold=0.8", "idea", "--stack", "bun"]);
+    expect(eq.flags.doneThreshold).toBe(0.8);
+    expect(eq.flags.stack).toBe("bun");
+    expect(eq.idea).toBe("idea");
   });
 
   it("--force-council appears in --help text", () => {
