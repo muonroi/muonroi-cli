@@ -8,7 +8,7 @@ import {
   NO_DIFF_DELIVERABLE_SECTION,
   VERIFY_PERSPECTIVES,
 } from "../verify-council-prompts.js";
-import { renderVerifyGateAxes, VERIFY_GATE_DIMENSIONS } from "../verify-gate-vocabulary.js";
+import { renderVerifyGateAxes, renderVerifyGateRules, VERIFY_GATE_DIMENSIONS } from "../verify-gate-vocabulary.js";
 
 /**
  * Parity lock for the verify twin gate (PR 2). The interactive verify debate and
@@ -114,5 +114,27 @@ describe("verify-gate parity — interactive debate vs headless perspective", ()
     for (const p of VERIFY_PERSPECTIVES)
       expect(buildVerifyPerspectivePrompt(p, withHost)).toContain("steady-teal-otter");
     expect(buildVerifyDebateTopic(BUNDLE)).not.toContain("### Host-recorded worker evidence");
+  });
+
+  // Session 26516fe0c62e: count-only verification passed a conversion that escaped identifiers
+  // (`tenant\_id`) and left entities inside code spans; verify #2 failed on an out-of-scope notes file.
+  it("both verify paths carry the transformation-fidelity and concern-scope rules", () => {
+    const rules = renderVerifyGateRules();
+    expect(rules).toContain("Transformation deliverables");
+    expect(rules).toContain("NOT sufficient evidence by themselves");
+    expect(rules).toContain("sampled passages of the SOURCE appear in the OUTPUT with equivalent normalized text");
+    expect(rules).toContain("escaping, entities and identifier spelling preserved");
+    expect(rules).toContain("do not approve on counts alone");
+    expect(rules).toContain("outside the deliverable and the done-criteria");
+    expect(rules).toContain('severity "advisory"');
+    expect(rules).toContain("a claim in the supplied evidence is false");
+    expect(buildVerifyDebateTopic(BUNDLE)).toContain(rules);
+    for (const p of VERIFY_PERSPECTIVES) expect(buildVerifyPerspectivePrompt(p, BUNDLE), p.id).toContain(rules);
+  });
+
+  it("the rules name no task, file type, language, model or provider (generic by construction)", () => {
+    const rules = renderVerifyGateRules().toLowerCase();
+    for (const word of ["confluence", "html", "markdown", "mcp", "anthropic", "openai", "deepseek"])
+      expect(rules, word).not.toContain(word);
   });
 });

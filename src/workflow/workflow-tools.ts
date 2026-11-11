@@ -603,7 +603,7 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
   tools.flow_verify = dynamicTool({
     description:
       opts.executionRole === "orchestrator"
-        ? "Record the verification outcome of the whole plan. passed=true needs evidence from an executed check: dispatch an independent verify worker, then summarise its result here (cite its job id); your own reading is not evidence. At standard/heavy depth the verify council adjudicates goal achievement and its verdict overrides passed. A recorded pass (VERIFY.md verdict: pass) is what lets context_load accept root_status=complete."
+        ? "Record the verification outcome of the whole plan. passed=true needs evidence from an executed check: dispatch an independent verify worker, then summarise its result here (cite its job id); your own reading is not evidence. When the goal transforms an input (convert/migrate/port/extract), the evidence must include a source-vs-output comparison of sampled passages (escaping, entities, identifiers), not only counts. At standard/heavy depth the verify council adjudicates goal achievement and its verdict overrides passed. A recorded pass (VERIFY.md verdict: pass) is what lets context_load accept root_status=complete."
         : "Mark verify phase complete after tests/self-verify. Requires evidence when passed=true.",
     inputSchema: jsonSchema({
       type: "object",

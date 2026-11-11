@@ -1,7 +1,7 @@
 import { renderCouncilContextBlock } from "./council-context.js";
 import { VERDICT_OUTPUT_CONTRACT } from "./verdict-schema.js";
 import type { VerifyContextBundle } from "./verify-context.js";
-import { renderVerifyGateAxes, type VerifyGateDimensionId } from "./verify-gate-vocabulary.js";
+import { renderVerifyGateAxes, renderVerifyGateRules, type VerifyGateDimensionId } from "./verify-gate-vocabulary.js";
 
 export type VerifyPerspectiveId = "acceptance" | "correctness" | "regression" | "security";
 
@@ -106,6 +106,8 @@ export function buildVerifyPerspectivePrompt(p: VerifyPerspective, bundle: Verif
     // verify-gate paths judge the implementation against identical criteria.
     renderVerifyGateAxes(),
     "",
+    renderVerifyGateRules(),
+    "",
     renderBundle(bundle),
     "",
     VERDICT_OUTPUT_CONTRACT,
@@ -121,6 +123,8 @@ export function buildVerifyDebateTopic(bundle: VerifyContextBundle): string {
     // Shared gate axes (single source with the headless perspective review) so
     // both verify-gate paths judge the implementation against identical criteria.
     renderVerifyGateAxes(),
+    "",
+    renderVerifyGateRules(),
     "",
     renderBundle(bundle),
     "",
