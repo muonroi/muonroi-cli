@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative, sep } from "node:path";
+import { isAbsolute, join, posix, relative, sep } from "node:path";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
 import type { ExecutionRole } from "../orchestrator/orchestration-policy.js";
-import { canonicalize, isInside } from "../tools/write-scope.js";
+import { canonicalize } from "../tools/write-scope.js";
 import type { TaskRequest, ToolResult } from "../types/index.js";
 import type { AsyncPlanReviewHost, CompletedPlanReview } from "./async-plan-review.js";
 import { ensurePlanningWorkspace } from "./config-bridge.js";
@@ -78,17 +78,20 @@ function verifyRunPerspectiveFn(
  * exclude. Returns [] when the toplevel cannot be resolved.
  */
 export function flowStateExcludePathspecs(cwd: string): string[] {
-  let top: string;
+  // cwd's location inside the repo as git spells it ("" at the top, "sub/" below). Every root is
+  // measured from cwd and re-anchored on this prefix; git's absolute toplevel is NEVER compared with
+  // a node path: the two spell the same directory differently (macOS /var vs /private/var, the
+  // Windows runner's 8.3 RUNNER~1 vs runneradmin), which made every root look outside the repo and
+  // dropped all excludes (ci-matrix macOS + windows, 2026-11-11, implementation-diff.test.ts).
+  let prefix: string;
   try {
-    top = canonicalize(
-      execFileSync("git", ["rev-parse", "--show-toplevel"], {
-        cwd,
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      }).trim(),
-    );
+    prefix = execFileSync("git", ["rev-parse", "--show-prefix"], {
+      cwd,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
   } catch (err) {
-    console.error(`[flow] verify-council git toplevel lookup failed: ${(err as Error).message}`);
+    console.error(`[flow] verify-council git prefix lookup failed: ${(err as Error).message}`);
     return [];
   }
   const roots = new Set<string>();
@@ -98,13 +101,15 @@ export function flowStateExcludePathspecs(cwd: string): string[] {
     console.error(`[flow] verify-council planning root lookup failed: ${(err as Error).message}`);
   }
   roots.add(join(cwd, ".muonroi-flow"));
-  roots.add(join(top, ".muonroi-flow"));
-  const excludes = new Set<string>();
+  const base = canonicalize(cwd);
+  const excludes = new Set<string>([":(top,exclude).muonroi-flow"]);
   for (const root of roots) {
-    const canonical = canonicalize(root);
-    // Outside the repo (or the repo itself): nothing in the diff can live there.
-    if (canonical === top || !isInside(top, canonical)) continue;
-    excludes.add(`:(top,exclude)${relative(top, canonical).split(sep).join("/")}`);
+    const rel = relative(base, canonicalize(root));
+    if (isAbsolute(rel)) continue; // another drive: outside the repo
+    const fromTop = posix.normalize(prefix + rel.split(sep).join("/"));
+    // The repo itself, or outside it: nothing in the diff can live there.
+    if (fromTop === "." || fromTop === ".." || fromTop.startsWith("../")) continue;
+    excludes.add(`:(top,exclude)${fromTop}`);
   }
   return [...excludes];
 }

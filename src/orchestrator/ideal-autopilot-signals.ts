@@ -124,12 +124,20 @@ export async function workspaceFingerprint(cwd: string): Promise<string> {
       "--",
       ".",
     ]);
+    // cwd's location inside the repo, as git spells it ("" at the top, "sub/" below).
+    // Host-owned dirs are judged on the path relative to cwd computed from this
+    // prefix, NOT relative(cwd, join(top, path)): git prints top as a REAL path, so
+    // on macOS (/var -> /private/var tmpdirs) that relative path began with "../.."
+    // and .planning/STATE.md counted as a workspace change (ci-matrix macOS,
+    // 2026-11-11, "ignores what the host and FLOW rewrite every turn").
+    const prefix = (await git(cwd, ["rev-parse", "--show-prefix"]))?.trim() ?? "";
     if (status !== null) {
       hash.update(`git|${head}\n`);
       const entries = status.split("\0").filter(Boolean).slice(0, MAX_ENTRIES);
       for (const entry of entries) {
         const path = entry.slice(3);
-        if (isHostOwned(relative(cwd, join(top, path)))) continue;
+        const fromCwd = prefix && path.startsWith(prefix) ? path.slice(prefix.length) : path;
+        if (isHostOwned(fromCwd)) continue;
         hash.update(`${entry.slice(0, 2)}|${path}|${stamp(join(top, path))}\n`);
       }
       return hash.digest("hex");

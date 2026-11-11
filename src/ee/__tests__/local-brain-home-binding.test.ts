@@ -38,6 +38,15 @@ import {
 
 const REAL_HOME = process.env.USERPROFILE || process.env.HOME || "";
 const REAL_EE_DIR = join(REAL_HOME, ".experience");
+const REAL_CONFIG = join(REAL_EE_DIR, "config.json");
+/**
+ * Byte content of the real ~/.experience/config.json, or null when absent. The
+ * test compares it before/after: "the real config was not touched" holds on any
+ * box. The former check assumed the dir existing implied the file existing —
+ * CI runners (ubuntu/macOS, 2026-11-11) have ~/.experience without config.json
+ * and failed with ENOENT on the read.
+ */
+const realConfigSnapshot = (): string | null => (existsSync(REAL_CONFIG) ? readFileSync(REAL_CONFIG, "utf8") : null);
 
 interface FakeChild {
   pid: number;
@@ -191,7 +200,7 @@ describe("F3 home binding — the REAL writeExperienceConfig", () => {
   });
 
   it("lands in the temp home and NOWHERE ELSE (real ~/.experience untouched)", async () => {
-    const realExistedBefore = existsSync(REAL_EE_DIR);
+    const realBefore = realConfigSnapshot();
 
     await writeExperienceConfig({ serverBaseUrl: "http://127.0.0.1:34567" }, { home });
 
@@ -204,13 +213,8 @@ describe("F3 home binding — the REAL writeExperienceConfig", () => {
     // And NOWHERE else: not the cwd (where a missing `{ home }` would have
     // written a RELATIVE `.experience/`), and not the real home.
     expect(existsSync(join(process.cwd(), ".experience", "config.json"))).toBe(false);
-    if (realExistedBefore) {
-      // The real config pre-dates this run; it must not have been rewritten.
-      const real = JSON.parse(readFileSync(join(REAL_EE_DIR, "config.json"), "utf8")) as ExperienceConfig;
-      expect(real.serverBaseUrl).not.toBe("http://127.0.0.1:34567");
-    } else {
-      expect(existsSync(REAL_EE_DIR)).toBe(false);
-    }
+    // The real config (present or absent) is byte-identical to before this run.
+    expect(realConfigSnapshot()).toBe(realBefore);
   });
 
   it("writeExperienceConfig has no env override — only the {home} arg relocates it", async () => {
@@ -275,8 +279,8 @@ describe("F3 home binding — setupLocalBrain threads one home everywhere", () =
     // exist" is unsatisfiable and would fail for reasons unrelated to the
     // binding under test — so capture it first and assert the STRONGER property
     // instead: whatever was there, the real config was NOT rewritten with this
-    // run's temp URL. Mirrors the sibling case above (realExistedBefore).
-    const realExistedBefore = existsSync(REAL_EE_DIR);
+    // run's temp URL. Mirrors the sibling case above (realConfigSnapshot).
+    const realBefore = realConfigSnapshot();
     const { harness, deps } = fresh();
     // Deliberately NOT injecting writeConfig: defaultLocalBrainDeps()'s
     // writeExperienceConfig runs for real, so the file must appear under the
@@ -312,13 +316,7 @@ describe("F3 home binding — setupLocalBrain threads one home everywhere", () =
     // existed on this box — was not rewritten with this run's temp URL. This is
     // the assertion that makes the test non-vacuous: if local-brain.ts dropped
     // the `{ home }` argument, the REAL config would now hold 34567 and fail.
-    const realConfig = join(REAL_EE_DIR, "config.json");
-    if (realExistedBefore) {
-      const real = JSON.parse(readFileSync(realConfig, "utf8")) as ExperienceConfig;
-      expect(real.serverBaseUrl).not.toBe("http://127.0.0.1:34567");
-    } else {
-      expect(existsSync(REAL_EE_DIR)).toBe(false);
-    }
+    expect(realConfigSnapshot()).toBe(realBefore);
   });
 
   it("the log and the pidfile live under the injected home, not the global one", () => {

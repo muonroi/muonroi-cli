@@ -31,7 +31,6 @@ import { type HarnessContext, spawnHarness } from "./helpers.js";
 import { loadDumpedRecordings } from "./recording.js";
 
 const MODEL = "deepseek-v4-flash";
-const CLASSIFY_QUICK = "generate, balanced, task, code, quick, local, english, clear";
 const APPROVE_VERDICT = `\`\`\`council-verdict\n${JSON.stringify({
   verdict: "approve",
   concerns: [],
@@ -52,6 +51,20 @@ const textRound = (text: string) => [
   { type: "stream-start", warnings: [] },
   { type: "text-start", id: "t" },
   { type: "text-delta", id: "t", delta: text },
+  { type: "text-end", id: "t" },
+  { type: "finish", finishReason: { unified: "stop", raw: undefined }, usage: usage(60, 4) },
+];
+
+/**
+ * A text round that streams for `deltas` chunks: with chunkDelayMs it keeps a host-started
+ * turn in flight long enough for typing to land INSIDE it on a slow runner, not after the host
+ * already started the next turn.
+ */
+const slowTextRound = (text: string, deltas: number) => [
+  { type: "stream-start", warnings: [] },
+  { type: "text-start", id: "t" },
+  { type: "text-delta", id: "t", delta: text },
+  ...Array.from({ length: deltas }, () => ({ type: "text-delta", id: "t", delta: "." })),
   { type: "text-end", id: "t" },
   { type: "finish", finishReason: { unified: "stop", raw: undefined }, usage: usage(60, 4) },
 ];
@@ -108,9 +121,11 @@ async function boot(
     JSON.stringify({
       // Every council LLM call (the verify council at standard depth) answers "approve".
       responses: [{ match: "*", text: APPROVE_VERDICT }],
-      classify: CLASSIFY_QUICK,
-      ...(opts.chunkDelayMs ? { chunkDelayMs: opts.chunkDelayMs } : {}),
+      // loadMockModelFromDir reads ONLY the `model` block: knobs placed beside it are ignored.
+      // `chunkDelayMs` sat at the top level here, so every turn streamed instantly (~0.2s) and
+      // "user wins" only passed when typing beat a host turn (harness run 42978447303).
       model: {
+        ...(opts.chunkDelayMs ? { chunkDelayMs: opts.chunkDelayMs } : {}),
         provider: "deepseek",
         modelId: MODEL,
         // The orchestrator's own calls follow the script; every other model call (the verify
@@ -294,11 +309,11 @@ describe("/ideal host autopilot", { retry: 0 }, () => {
     const run = await boot(
       [
         textRound("UW-TURN-1-DONE"),
-        textRound("UW-TURN-2-DONE"),
+        // The host-started turn the user types into: ~12s in flight at 600ms/chunk.
+        slowTextRound("UW-TURN-2-DONE", 20),
         textRound("UW-ANSWER-TO-THE-USER"),
         textRound("UW-SHOULD-NOT-RUN"),
       ],
-      // Slow chunks keep the host-started turn in flight long enough to type into it.
       { chunkDelayMs: 600, env: { MUONROI_IDEAL_AUTOPILOT_NO_PROGRESS: "9" } },
     );
 
