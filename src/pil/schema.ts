@@ -51,7 +51,7 @@ export const PipelineContextSchema = z.object({
   metrics: PipelineMetricsSchema.nullable(),
   layers: z.array(LayerResultSchema),
   // P2: optional context fields
-  gsdPhase: z.string().nullable().optional(),
+  flowPhase: z.string().nullable().optional(),
   resumeDigest: z.string().nullable().optional(),
   activeRunId: z.string().nullable().optional(),
   digestAgeMs: z.number().nullable().optional(),
@@ -76,6 +76,8 @@ export const PipelineContextSchema = z.object({
     )
     .optional(),
   fallbackReason: z.string().nullable().optional(),
+  fallbackPhase: z.string().nullable().optional(),
+  fallbackDurationMs: z.number().nonnegative().optional(),
   // Phase 2b: model-decided output deliverable consumed by layer4/layer6.
   deliverableKind: z.enum(["answer", "code", "report"]).nullable().optional(),
   // Direct-answer gate: true when deliverable=answer + high confidence + low complexity.
@@ -129,9 +131,9 @@ export const PilContextResponseSchema = z
     confidence: z.number().min(0).max(1),
     domain: z.string().nullable(),
 
-    // GSD routing hint
-    gsd_phase: z.enum(["discuss", "execute"]).nullable(),
-    gsd_route_source: z.enum(["ee", "preset", "none"]),
+    // FLOW routing hint
+    flow_phase: z.enum(["discuss", "execute"]).nullable(),
+    flow_route_source: z.enum(["ee", "preset", "none"]),
 
     // Experience retrieval
     t0_principles: z.array(ScoredText),

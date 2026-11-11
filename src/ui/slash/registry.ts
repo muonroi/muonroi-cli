@@ -31,6 +31,8 @@ export interface SlashContext {
    * must keep their `args.join(" ")` fallback.
    */
   argsText?: string;
+  getPermissionMode?: () => import("../../utils/permission-mode.js").PermissionMode;
+  setPermissionMode?: (mode: import("../../utils/permission-mode.js").PermissionMode) => Promise<number>;
 }
 
 export type SlashHandler = (args: string[], ctx: SlashContext) => Promise<string> | string;

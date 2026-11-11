@@ -65,6 +65,100 @@ afterEach(() => {
 });
 
 describe("DelegationManager sandbox propagation", () => {
+  it("launches in the explicit target workspace while preserving owner-scoped storage", async () => {
+    const home = makeTempDir("muonroi-target-home-");
+    const ownerCwd = makeTempDir("muonroi-owner-cwd-");
+    const targetCwd = makeTempDir("muonroi-target-cwd-");
+    const spawnMock = vi.fn(() => ({ pid: 2468, unref: vi.fn(), once: vi.fn() }));
+    const mod = await importDelegationsModule({ home, spawnMock });
+    const manager = new mod.DelegationManager(
+      () => ownerCwd,
+      () => "main-owner",
+    );
+    await manager.startTask(
+      { agent: "verify", cwd: targetCwd, description: "Assigned tests", prompt: "Run tests" },
+      { model: "fixture", sandboxMode: "off", maxToolRounds: 2, maxTokens: 100 },
+    );
+    expect(spawnMock).toHaveBeenCalledWith(
+      process.execPath,
+      expect.arrayContaining(["--directory", targetCwd]),
+      expect.objectContaining({ cwd: targetCwd }),
+    );
+    expect(readStoredDelegationRecord(home)).toMatchObject({
+      cwd: targetCwd,
+      parentSessionId: "main-owner",
+      sandboxMode: "off",
+    });
+  });
+
+  it("launches a native editing task with a durable receipt and delivers its result to the owner", async () => {
+    const home = makeTempDir("muonroi-native-task-home-");
+    const cwd = makeTempDir("muonroi-native-task-cwd-");
+    const spawnMock = vi.fn(() => ({ pid: 2468, unref: vi.fn(), once: vi.fn() }));
+    const mod = await importDelegationsModule({ home, spawnMock });
+    const manager = new mod.DelegationManager(
+      () => cwd,
+      () => "main-owner",
+    );
+    const receipt = await manager.startTask(
+      {
+        agent: "general",
+        description: "Implement",
+        prompt: "Edit the owned worktree",
+        maxToolRounds: 7,
+        modelId: "worker-model",
+      },
+      { model: "parent-model", sandboxMode: "off", maxToolRounds: 7, maxTokens: 100 },
+    );
+    expect(receipt.success).toBe(true);
+    expect(receipt.delegation).toMatchObject({ agent: "general", status: "running" });
+    const record = readStoredDelegationRecord(home) as unknown as import("./delegations").StoredDelegation;
+    expect(record).toMatchObject({
+      kind: "task",
+      agent: "general",
+      modelId: "worker-model",
+      parentSessionId: "main-owner",
+      maxToolRounds: 7,
+    });
+    await mod.completeDelegation(record.outputPath.replace(/\.md$/, ".json"), "WORKER_FINISHED");
+    expect(await manager.read(record.id)).toContain("WORKER_FINISHED");
+    expect(await manager.consumeNotifications()).toHaveLength(0);
+    expect(await manager.consumeNotifications()).toHaveLength(0);
+  });
+
+  it("keeps ordinary research delegation read-only", async () => {
+    const spawnMock = vi.fn();
+    const mod = await importDelegationsModule({ spawnMock });
+    const manager = new mod.DelegationManager(() => process.cwd());
+    const result = await manager.start(
+      { agent: "general", description: "Edit", prompt: "Edit" },
+      { model: "test-model", sandboxMode: "off", maxToolRounds: 2, maxTokens: 100 },
+    );
+    expect(result.success).toBe(false);
+    expect(result.output).toContain("read-only");
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("refuses nested native background tasks", async () => {
+    const previous = process.env.MUONROI_BACKGROUND_CHILD;
+    process.env.MUONROI_BACKGROUND_CHILD = "1";
+    try {
+      const spawnMock = vi.fn();
+      const mod = await importDelegationsModule({ spawnMock });
+      const manager = new mod.DelegationManager(() => process.cwd());
+      const result = await manager.startTask(
+        { agent: "general", description: "Edit", prompt: "Edit" },
+        { model: "test-model", sandboxMode: "off", maxToolRounds: 2, maxTokens: 100 },
+      );
+      expect(result.success).toBe(false);
+      expect(result.output).toContain("Nested");
+      expect(spawnMock).not.toHaveBeenCalled();
+    } finally {
+      if (previous === undefined) delete process.env.MUONROI_BACKGROUND_CHILD;
+      else process.env.MUONROI_BACKGROUND_CHILD = previous;
+    }
+  });
+
   it("stores a helper's job under main's project even when helper execution cwd differs", async () => {
     const home = makeTempDir("muonroi-delegation-home-");
     const mainCwd = makeTempDir("muonroi-delegation-main-");

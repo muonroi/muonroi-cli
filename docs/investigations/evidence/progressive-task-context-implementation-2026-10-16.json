@@ -1,0 +1,566 @@
+{
+  "recordedAt": "2026-10-16T04:53:34.038567+00:00",
+  "head": "2d33b8d9a557a8fec30ea4713d98b8469f8f5603",
+  "revisionScope": "Dirty working-tree snapshot; hashes identify executed source, not a committed release",
+  "verification": {
+    "tests": 173,
+    "testFiles": 19,
+    "buildExit": 0,
+    "whitespaceExit": 0,
+    "mainBoundary": "Actual compiled Agent -> MessageProcessor -> executeToolEngine -> SDK loop with mock model and isolated real SQLite; no paid provider calls",
+    "mainChecks": {
+      "mainHasThreeActualSdkRequests": true,
+      "mainStageChangesOnEachSdkRequest": true,
+      "priorStageGuidanceDoesNotAccumulate": true,
+      "repoInvariantPresentOnEveryRequest": true,
+      "mainRetainsHandoffFailureEvidence": true,
+      "canonicalUserTextHasNoInjectedTaskModule": true,
+      "preparedMeasurementsRecordActualStageAndHandoff": true,
+      "mainStageAndHandoffRestoreFromDurableTranscript": true,
+      "ordinaryNewTaskDoesNotReuseOldStage": true,
+      "mainFixtureDidNotReportExecutionError": true
+    },
+    "mainRequestCount": 3,
+    "mainPreparedMeasurements": [
+      {
+        "callId": "d9af5bf9-b911-4ec5-a83e-d32b5e10d0a5",
+        "stepNumber": 0,
+        "contextWindowTokens": 128000,
+        "reservedOutputTokens": 8000,
+        "contextStage": "orient",
+        "systemChars": 21623,
+        "messagesChars": 1958,
+        "historyChars": 1958,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 30996,
+        "toolsCount": 53,
+        "estimatedInputTokens": 12632,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12102,
+        "systemCustomChars": 150,
+        "systemSkillsChars": 0,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 345,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 0
+      },
+      {
+        "callId": "d9af5bf9-b911-4ec5-a83e-d32b5e10d0a5",
+        "stepNumber": 1,
+        "contextWindowTokens": 128000,
+        "reservedOutputTokens": 8000,
+        "contextStage": "research",
+        "systemChars": 21623,
+        "messagesChars": 3042,
+        "historyChars": 2265,
+        "toolResultsChars": 777,
+        "messagesCount": 3,
+        "toolsChars": 30996,
+        "toolsCount": 53,
+        "estimatedInputTokens": 12978,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12102,
+        "systemCustomChars": 150,
+        "systemSkillsChars": 0,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 548,
+        "taskHandoffChars": 37,
+        "taskContextRevision": 1
+      },
+      {
+        "callId": "d9af5bf9-b911-4ec5-a83e-d32b5e10d0a5",
+        "stepNumber": 2,
+        "contextWindowTokens": 128000,
+        "reservedOutputTokens": 8000,
+        "contextStage": "verify",
+        "systemChars": 21623,
+        "messagesChars": 3524,
+        "historyChars": 2451,
+        "toolResultsChars": 1073,
+        "messagesCount": 5,
+        "toolsChars": 30996,
+        "toolsCount": 53,
+        "estimatedInputTokens": 13189,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12102,
+        "systemCustomChars": 150,
+        "systemSkillsChars": 0,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 618,
+        "taskHandoffChars": 51,
+        "taskContextRevision": 2
+      }
+    ],
+    "nativeChecks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeSmokeAndPassiveLogPass": true
+    },
+    "nativeRunId": "69f35f6c-0eca-4314-9d02-5ba32267df89",
+    "nativeSummary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "comparison": {
+    "boundary": "Same compiled fixture and canonical history; includes actual projected stage text and added context_load schema. CLI token estimates, no paid provider calls.",
+    "measurements": {
+      "legacy-first-legacy": {
+        "systemChars": 48412,
+        "messagesChars": 74,
+        "historyChars": 74,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 23416,
+        "toolsCount": 42,
+        "estimatedInputTokens": 16966,
+        "systemContractChars": 1990,
+        "systemNativeChars": 13885,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 19951,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 0,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 0,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "legacy-outer-retry-legacy": {
+        "systemChars": 14576,
+        "messagesChars": 74,
+        "historyChars": 74,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 23416,
+        "toolsCount": 42,
+        "estimatedInputTokens": 8471,
+        "systemContractChars": 1990,
+        "systemNativeChars": 0,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 0,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 0,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 0,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-first-orient": {
+        "systemChars": 24547,
+        "messagesChars": 499,
+        "historyChars": 499,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10917,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 345,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 0,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-first-research": {
+        "systemChars": 24547,
+        "messagesChars": 614,
+        "historyChars": 614,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10938,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 460,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 1,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-first-plan": {
+        "systemChars": 24547,
+        "messagesChars": 604,
+        "historyChars": 604,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10935,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 450,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 2,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-first-implement": {
+        "systemChars": 24547,
+        "messagesChars": 587,
+        "historyChars": 587,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10936,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 433,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 3,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-first-verify": {
+        "systemChars": 24547,
+        "messagesChars": 670,
+        "historyChars": 670,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10955,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 516,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 4,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-outer-retry-orient": {
+        "systemChars": 24547,
+        "messagesChars": 499,
+        "historyChars": 499,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10917,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 345,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 5,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-outer-retry-research": {
+        "systemChars": 24547,
+        "messagesChars": 614,
+        "historyChars": 614,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10938,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 460,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 6,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-outer-retry-plan": {
+        "systemChars": 24547,
+        "messagesChars": 604,
+        "historyChars": 604,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10935,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 450,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 7,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-outer-retry-implement": {
+        "systemChars": 24547,
+        "messagesChars": 587,
+        "historyChars": 587,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10936,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 433,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 8,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      },
+      "progressive-outer-retry-verify": {
+        "systemChars": 24547,
+        "messagesChars": 670,
+        "historyChars": 670,
+        "toolResultsChars": 0,
+        "messagesCount": 1,
+        "toolsChars": 24229,
+        "toolsCount": 43,
+        "estimatedInputTokens": 10955,
+        "systemContractChars": 1990,
+        "systemNativeChars": 3437,
+        "systemModeChars": 12094,
+        "systemCustomChars": 168,
+        "systemSkillsChars": 6534,
+        "systemSubagentsChars": 0,
+        "taskContextChars": 516,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 9,
+        "retainsRepo": true,
+        "canonicalUnchanged": true
+      }
+    }
+  },
+  "limits": [
+    "No paid model quality/cost/latency experiment",
+    "Old reduced outer-retry can be smaller than progressive",
+    "No activeTools schema filtering",
+    "Batch path remains existing Phase-0 throwing stubs",
+    "No original DB/settings writes or user-process termination; fixtures isolated",
+    "No commit/push/deployment"
+  ],
+  "artifacts": [
+    {
+      "path": ".scratch/progressive-task-context/verify-main.mjs",
+      "bytes": 5565,
+      "sha256": "77f05ccd1af4e6dc6f93bdb67d134c8056ac3412cfb7795ce609f1a1e33b711b"
+    },
+    {
+      "path": ".scratch/progressive-task-context/main-result.json",
+      "bytes": 2958,
+      "sha256": "b3e27dfbf8fc4c1c76a5c53dc0981ee9e311d064d073421f16c17268e9f2c3a7"
+    },
+    {
+      "path": ".scratch/progressive-task-context/verify-native.mjs",
+      "bytes": 10270,
+      "sha256": "c9a91e835c6fc55eea98d2c954d881476198a1ca41e6bb4246f9e4f9a3d14614"
+    },
+    {
+      "path": ".scratch/progressive-task-context/native-result.json",
+      "bytes": 43088,
+      "sha256": "8204366bdf1a5c717b8830817aa6095b3d452f4aeb7f60254c0c6a1324c6c829"
+    },
+    {
+      "path": ".scratch/progressive-task-context/measure-requests.mjs",
+      "bytes": 2673,
+      "sha256": "93b8f9ce1a2f224fb87c2dec49bfe4561ffa2c29ee614667daba829dbc2e4b88"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/request-comparison.json",
+      "bytes": 7624,
+      "sha256": "33783d35684332e2677f694d75fa29a3c8ce22472aff02961328fe93e59f3963"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/request-comparison.log",
+      "bytes": 11318,
+      "sha256": "1951c207e0d58d6cdadc24c38b33cd4f59167fd911a6b381088aac532b1f2bde"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/red.log",
+      "bytes": 3214,
+      "sha256": "874dd3014fc16e9340cd40bd992b1ca65c02043f6a9ccdbf9e0677b5a87c04c4"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/tests.log",
+      "bytes": 1938,
+      "sha256": "f51b4bdc5ac77c6a982291430c2f658521d9ea2af9507b1da98a88b7f83ee6e4"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/build.log",
+      "bytes": 7498,
+      "sha256": "574659d14ca01a9dd6371a85e0eb063b90a4b19bcbb724c9115ee749cee0e79a"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/main.log",
+      "bytes": 3638,
+      "sha256": "3944ffc18a5f173df8ceda5be7591fced521fcfe3dd5f06781f96e0f1daeb2fd"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/native.log",
+      "bytes": 1320,
+      "sha256": "f4048830e7f9ea3e4066dae764786302961a63f8488fb965de292e6f28eb8284"
+    },
+    {
+      "path": ".scratch/progressive-task-context/implementation/diff-check.log",
+      "bytes": 15800,
+      "sha256": "ec2f10d51080608b4735bda40c6937af20b53c336fe49a29245ef2d0d0d5fd9c"
+    },
+    {
+      "path": "src/pil/context-modules.ts",
+      "bytes": 5799,
+      "sha256": "e78c05ff2823d0a067d11c2447b8eaae337372f0e53950d6cd6db7c271afe6f2"
+    },
+    {
+      "path": "src/orchestrator/task-context.ts",
+      "bytes": 5638,
+      "sha256": "8bfdcb8e203ba00fab4ad1ae60760ec0574f7f71e4e09713f46c9b0f6c3c12f1"
+    },
+    {
+      "path": "src/tools/context-load.ts",
+      "bytes": 3234,
+      "sha256": "a105943b88af144406cb83bf4976941898e68852dee3311812c19b158d362c13"
+    },
+    {
+      "path": "src/utils/skills.ts",
+      "bytes": 8922,
+      "sha256": "584d44414542118813ce8fc2bdc562969e15a604e92e54b31991f474c7abc1a9"
+    },
+    {
+      "path": "src/pil/native-capabilities-workbook.ts",
+      "bytes": 16313,
+      "sha256": "75516ac56715ef25323f435fbaac5f3ad7418a30f44eef04a29f4d6971f5f0e7"
+    },
+    {
+      "path": "src/orchestrator/prompts.ts",
+      "bytes": 53090,
+      "sha256": "f1a3939b3fca9a43aed2e0f1f404f2eb728df162c0ea6f80608f86d35c951cf5"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "bytes": 263689,
+      "sha256": "f701f6aa3d1dd420057a5b0a38b21d654eb296418e23f69f3e65c38bab2baea1"
+    },
+    {
+      "path": "src/orchestrator/message-processor.ts",
+      "bytes": 87650,
+      "sha256": "c174f25ef1d1b5fde4f342604918f1885768a4b9037fefce32ad4c103a9feaed"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "bytes": 71324,
+      "sha256": "b4d0273954503594220968a4ae7c06f89fc00481629b6fab6ca5c8f72e3d9242"
+    },
+    {
+      "path": "src/orchestrator/prompt-breakdown.ts",
+      "bytes": 3579,
+      "sha256": "17c45251114d754ed5b308498a7f3e51c7e9c88fa0d0cc0d6f30d2edeebfe64b"
+    },
+    {
+      "path": "src/cli/forensics-diagnostics.ts",
+      "bytes": 7885,
+      "sha256": "a904e05f6af350de83420aadcf775b29486569d5be82fc4e5408829cb315bd14"
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "bytes": 4173,
+      "sha256": "6f3293795d94fd915f184fcca5982b319c3538f0a15bdf7ee8b4aca60e555f54"
+    },
+    {
+      "path": "src/orchestrator/subagent-compactor.ts",
+      "bytes": 61282,
+      "sha256": "df057e3cb6456abbc6b46589fef0d45b1f28e41cecbb6a87c6eb5d69ddf71b35"
+    },
+    {
+      "path": "src/pil/cheap-model-playbook.ts",
+      "bytes": 8009,
+      "sha256": "ca50a2493e7357bc86a5c117a95fdee68876d3c6aa844a7009a1644cefc69023"
+    },
+    {
+      "path": "src/orchestrator/__tests__/task-context.test.ts",
+      "bytes": 4867,
+      "sha256": "933c76a522b6056d69e445fdeebce973dbba4df711c65660383f8c0b897245bc"
+    },
+    {
+      "path": "src/orchestrator/__tests__/progressive-prompt.test.ts",
+      "bytes": 2673,
+      "sha256": "7a844006c28ee16c2781975d5cf7c5419df9da8ccab7442ee8de711b2f5d9568"
+    },
+    {
+      "path": "src/tools/__tests__/context-load.test.ts",
+      "bytes": 2653,
+      "sha256": "c8466e37c8cea56242d7e7c6a5e8d584e2a07667d6e749abd0d4145253903036"
+    },
+    {
+      "path": "src/orchestrator/__tests__/stream-runner.test.ts",
+      "bytes": 21359,
+      "sha256": "3cb540eca4a2086851d264076cefd45a372c8cef44de73d8a5e7ada9608931db"
+    },
+    {
+      "path": "src/cli/cost-forensics-diagnostics.test.ts",
+      "bytes": 7130,
+      "sha256": "a660a322bb2f8299f691ffab68a1f84a6fbdc39f5c44b56286fbf8778302167c"
+    },
+    {
+      "path": "src/gsd/__tests__/mutation-gate.test.ts",
+      "bytes": 5098,
+      "sha256": "96a8f53631de007656cec71a2460d69a5f49ffdfa04a1a5f2d5e443e894f1825"
+    },
+    {
+      "path": "docs/investigations/progressive-task-context-implementation-2026-10-16.md",
+      "bytes": 8368,
+      "sha256": "fc99bb37103c8827097acee140239317d2f396031342249125b3709bf214457f"
+    },
+    {
+      "path": "docs/investigations/progressive-context-questions-2026-10-16.md",
+      "bytes": 5114,
+      "sha256": "d7f5e0c4839a720e390da68c432811576ac21030345bf49a86004ba28645492a"
+    }
+  ]
+}

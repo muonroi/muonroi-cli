@@ -9,10 +9,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 // council-usage.test.ts for the sibling recordCouncilProviderFailure.
 vi.mock("../../storage/index.js", () => ({ logInteraction: vi.fn() }));
 
-import { planningArtifact } from "../../gsd/paths.js";
-import { canExecute, readPlanVerifyVerdict, readState, setStateField } from "../../gsd/workflow-engine.js";
 import { logInteraction } from "../../storage/index.js";
 import type { StreamChunk } from "../../types/index.js";
+import { planningArtifact } from "../../workflow/paths.js";
+import { canExecute, readPlanVerifyVerdict, readState, setStateField } from "../../workflow/workflow-engine.js";
 import {
   buildPlannerPrompt,
   buildReviewPrompt,
@@ -910,9 +910,9 @@ describe("reviewOutcomeSignature", () => {
   });
 });
 
-// ── PLAN-VERIFY.md — the GSD mutation gate's actual read target ─────────────
+// ── PLAN-VERIFY.md — the FLOW mutation gate's actual read target ─────────────
 //
-// src/gsd/mutation-gate.ts hard-blocks every non-read-only tool call at heavy
+// src/workflow/mutation-gate.ts hard-blocks every non-read-only tool call at heavy
 // depth via canExecute(cwd, depth), which reads ONLY PLAN-VERIFY.md
 // (readPlanVerifyVerdict) — never PLAN-REVIEW.md and never the "Plan Verified"
 // STATE.md field runPlanReview also sets. Before this fix, a council-approved
@@ -920,7 +920,7 @@ describe("reviewOutcomeSignature", () => {
 // so canExecute kept returning "plan-verify pending" — every edit tool call in
 // the execution phase that follows would have been blocked at heavy depth,
 // even immediately after a unanimous panel approval.
-describe("runPlanReview — PLAN-VERIFY.md (the artifact the GSD mutation gate reads)", () => {
+describe("runPlanReview — PLAN-VERIFY.md (the artifact the FLOW mutation gate reads)", () => {
   let cwd: string;
 
   afterEach(() => {
@@ -948,7 +948,7 @@ describe("runPlanReview — PLAN-VERIFY.md (the artifact the GSD mutation gate r
     expect(existsSync(result.planVerifyPath!)).toBe(true);
     expect(readFileSync(result.planVerifyPath!, "utf8")).toMatch(/verdict:\s*pass/i);
 
-    // The exact function the mutation gate calls (src/gsd/mutation-gate.ts:43)
+    // The exact function the mutation gate calls (src/workflow/mutation-gate.ts:43)
     // — proves this is not just "a file with the right regex" but the real
     // integration point actually unlocking.
     expect(readPlanVerifyVerdict(cwd)).toBe("pass");

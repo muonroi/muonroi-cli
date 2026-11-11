@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
 import { deliberateCompact } from "../flow/compaction/index.js";
 import { writeScaffoldCheckpoint } from "../flow/scaffold-checkpoint.js";
-import { isContextRailEnabled, isCouncilSurfaceEnabled, isRoundGroupsEnabled } from "../gsd/flags.js";
+import { isContextRailEnabled, isCouncilSurfaceEnabled, isRoundGroupsEnabled } from "../workflow/flags.js";
 import { appendCrashLog, setActiveEeYield } from "../index.js";
 import { POPULAR_MCP_CATALOG } from "../mcp/catalog";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
@@ -91,9 +91,9 @@ import { ProductStatusCard } from "./cards/product-status-card.js";
 import { BtwOverlay, type BtwState } from "./components/btw-overlay.js";
 import { makePairKey, usePairSideMap } from "./components/bubble-layout.js";
 import { ContextRail, type ContextRailRow, type ContextRailStage } from "./components/context-rail.js";
+import { AgentRailActivities } from "./components/agent-rail-activities.js";
 import { buildStageDividerTitle, buildStageRows, deriveSprintStage, pushActivity } from "./components/sprint-stage.js";
 import { SprintStatusStrip } from "./components/sprint-status-strip.js";
-import { AgentRailActivities } from "./components/agent-rail-activities.js";
 import { CompactProgressCard } from "./components/compact-progress-card.js";
 import { CopyFlashBanner } from "./components/copy-flash-banner.js";
 import { CouncilDebatePill } from "./components/council-debate-pill.js";
@@ -140,6 +140,7 @@ import {
   watchlistStateFrom,
 } from "./components/council-watchlist.js";
 import { computeMcpRunInfo, MessageView } from "./components/message-view.js";
+import { internalActivityForDisplay, isInternalActivityTool } from "./utils/internal-activity.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -148,16 +149,9 @@ import {
 import { PromptBox } from "./components/prompt-box.js";
 import { useRolePalette } from "./components/role-palette.js";
 import { SessionHeader } from "./components/session-header.js";
-import { SessionTreeCard } from "./components/session-tree-card.js";
 import { Toast, type ToastLevel } from "./components/Toast.js";
 import { TaskListPanel } from "./components/task-list-panel.js";
-import {
-  DelegationTaskLine,
-  InlineTool,
-  ShimmerText,
-  SubagentActivity,
-  SubagentTaskLine,
-} from "./components/tool-result-views.js";
+import { DelegationTaskLine, InlineTool, ShimmerText, SubagentTaskLine } from "./components/tool-result-views.js";
 import { usePairQuoteBuffer } from "./components/use-pair-quote-buffer.js";
 import { useAgentEditor } from "./hooks/use-agent-editor.js";
 import { useMcpEditor } from "./hooks/use-mcp-editor.js";
@@ -179,7 +173,7 @@ import { ModelPickerModal } from "./modals/model-picker-modal.js";
 import { SandboxPickerModal } from "./modals/sandbox-picker-modal.js";
 import { SessionPickerModal } from "./modals/session-picker-modal.js";
 import { UpdateModal } from "./modals/update-modal.js";
-import { PaymentApprovalPanel, WalletPickerModal } from "./modals/wallet-picker-modal.js";
+import { PaymentApprovalPanel, WalletPickerModal, WorkerApprovalPanel } from "./modals/wallet-picker-modal.js";
 import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { JobsModal } from "./modals/jobs-modal.js";
@@ -608,6 +602,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     activeToast,
     activeToolCalls,
     agentRows,
+    agentActivities,
     agentRuntime,
     agentsEditorDraft,
     agentsEditorError,
@@ -670,7 +665,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     inputRef,
     isProcessing,
     isUpdating,
-    lastReasoningElapsedMs,
     liveTurnSourceLabel,
     mcpArgsRef,
     mcpCommandRef,
@@ -715,6 +709,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     pendingCouncilPreflight,
     pendingCouncilQuestion,
     pendingPaymentApproval,
+    workerApprovalScrollRef,
     planQuestions,
     pointToExistingForm,
     pqs,
@@ -734,7 +729,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     scheduleModalIndex,
     scheduleRows,
     scheduleSearchQuery,
-    agentActivities,
     jobRows,
     jobsModalIndex,
     jobsExpandedId,
@@ -748,7 +742,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
     sessionPickerIndex,
     sessionPickerList,
     sessionTitle,
-    sessionTree,
     showAgentsEditor,
     showAgentsModal,
     showApiKeyModal,
@@ -797,14 +790,9 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // True while a tool group is streaming its items. Gates the legacy inline
   // activeToolCalls list so a running tool isn't printed twice (see below).
   const hasActiveToolGroup = useMemo(
-    () => messages.some((m) => m.type === "tool_group" && m.toolGroup?.state === "active"),
+    () => messages.some((entry) => internalActivityForDisplay(entry)?.toolGroup?.state === "active"),
     [messages],
   );
-
-  // Roster of every sub-agent / background job spawned this session, for the
-  // rail — derived in use-app-logic from the transcript, in-flight calls and the
-  // live background-job snapshot (shared with the /jobs view).
-  const [selectedActivity, setSelectedActivity] = useState<string | null>(null);
 
   // Agent-mode input bridge: translate harness {op:"type"/"press"} commands into
   // synthetic OpenTUI keypresses (via the shared useAppContext().keyHandler) so
@@ -857,6 +845,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   // row at the bottom of the rail. Collapsed by default (that is the whole
   // point: they never change after the run starts); click the row to unfold.
   const [runConfigExpanded, setRunConfigExpanded] = useState(false);
+  const [selectedActivityId, setSelectedActivityId] = useState<string | null>(null);
   // 2C — bumped to re-baseline the "While you were away" band, which is how it
   // clears without also un-locking the transcript.
   const [watchlistCleared, setWatchlistCleared] = useState(0);
@@ -1090,6 +1079,16 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
   const councilTwoPane = councilSurfaceActive && councilLayout === "two-pane";
   const councilStripMode = councilSurfaceActive && councilLayout === "strip";
   const councilSurfaceRailWidth = resolveCouncilRailWidth(width);
+  const agentActivitiesNode = (
+    <AgentRailActivities
+      activities={agentActivities}
+      selected={selectedActivityId}
+      onSelect={setSelectedActivityId}
+      onOpenJobs={openJobsModal}
+      width={councilTwoPane ? councilSurfaceRailWidth : railWidth}
+      t={t}
+    />
+  );
   // Latest live phase status (state start|tick) drives the liveness meter.
   const liveCouncilStatus =
     [...councilStatuses].reverse().find((s) => s.state === "start" || s.state === "tick") ?? null;
@@ -1313,23 +1312,14 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
         hideRounds: !!sprintStage && sprintStage.stage !== "planning",
       })}
       detailNode={
-        councilOutcomeNode ||
-        sessionTree.length > 0 ||
         agentActivities.length > 0 ||
+        councilOutcomeNode ||
         productStatus ||
         councilStatuses.length > 0 ||
         councilInfoCards.length > 0 ? (
           <>
+            {agentActivitiesNode}
             {councilOutcomeNode}
-            <SessionTreeCard nodes={sessionTree} />
-            <AgentRailActivities
-              activities={agentActivities}
-              selected={selectedActivity}
-              onSelect={setSelectedActivity}
-              onOpenJobs={openJobsModal}
-              width={councilSurfaceRailWidth}
-              t={t}
-            />
             {councilDetailNode(councilSurfaceRailWidth)}
           </>
         ) : null
@@ -1453,31 +1443,34 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       // "ctrl+e expand").
                       let _lastAssistantIdx = -1;
                       for (let _i = messages.length - 1; _i >= 0; _i--) {
-                        if (messages[_i]?.type === "assistant") {
+                        if (internalActivityForDisplay(messages[_i]!)?.type === "assistant") {
                           _lastAssistantIdx = _i;
                           break;
                         }
                       }
-                      return messages.map((msg, i) => (
-                        // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
-                        <Semantic
-                          key={`sem-${msg.timestamp?.getTime?.() ?? i}-${i}`}
-                          id={`msg-${i}`}
-                          role="listitem"
-                          name={`${msg.type ?? "msg"}:${String(msg.content ?? "").slice(0, 40)}`}
-                        >
-                          <MessageView
-                            key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
-                            entry={msg}
-                            index={i}
-                            t={t}
-                            modeColor={modeInfo.color}
-                            expandedMessages={expandedMessages}
-                            mcpRun={mcpRuns[i]}
-                            isFinalAssistant={i === _lastAssistantIdx}
-                          />
-                        </Semantic>
-                      ));
+                      return messages.map((rawMsg, i) => {
+                        const msg = internalActivityForDisplay(rawMsg);
+                        return msg ? (
+                          // biome-ignore lint/suspicious/noArrayIndexKey: append-only message log; index is part of the stable semantic id
+                          <Semantic
+                            key={`sem-${msg.timestamp?.getTime?.() ?? i}-${i}`}
+                            id={`msg-${i}`}
+                            role="listitem"
+                            name={`${msg.type ?? "msg"}:${String(msg.content ?? "").slice(0, 40)}`}
+                          >
+                            <MessageView
+                              key={`${msg.timestamp?.getTime?.() ?? i}-${msg.type}-${msg.remoteKey ?? ""}-${String(msg.content ?? "").slice(0, 24)}`}
+                              entry={msg}
+                              index={i}
+                              t={t}
+                              modeColor={modeInfo.color}
+                              expandedMessages={expandedMessages}
+                              mcpRun={mcpRuns[i]}
+                              isFinalAssistant={i === _lastAssistantIdx}
+                            />
+                          </Semantic>
+                        ) : null;
+                      });
                     })()}
                     {/* taskListSnapshot moved below scrollbox — renders as a
                       fixed-bottom panel so agent text can never push it up. */}
@@ -1495,6 +1488,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       with no active turn) and for task/delegate, whose rich lines
                       carry agent + status the group's plain label does not. */}
                     {activeToolCalls
+                      .filter((tc) => !isInternalActivityTool(tc.function.name))
                       .filter(
                         (tc) => !hasActiveToolGroup || tc.function.name === "task" || tc.function.name === "delegate",
                       )
@@ -1521,7 +1515,6 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                           </InlineTool>
                         ),
                       )}
-                    {activeSubagent && <SubagentActivity t={t} status={activeSubagent} />}
                     {compactRun && (
                       <CompactProgressCard t={t} progress={compactRun.progress} startedAt={compactRun.startedAt} />
                     )}
@@ -1735,17 +1728,10 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                       anchor during the council debate phase — leaving the card
                       scrolled above the fold so the user had to scroll UP to
                       find it. See fix/tui-askcard-anchor. */}
-                    {/* Reasoning pill — Claude-style "💭 Thinking…" while a
-                      reasoning streak is active, then "💭 Thought for Ns"
-                      once the model emits text or a tool call. CoT body is
-                      discarded so we never re-render heavy markdown for it. */}
-                    {(reasoningActive || lastReasoningElapsedMs > 0) && (
+                    {/* Live reasoning disappears when the assistant starts replying. */}
+                    {reasoningActive && !streamContent && (
                       <box paddingLeft={3} marginTop={1} flexShrink={0} flexDirection="column">
-                        <text fg={t.textMuted}>
-                          {reasoningActive
-                            ? "[Thought] Thinking..."
-                            : `[Thought] Thought for ${(lastReasoningElapsedMs / 1000).toFixed(1)}s`}
-                        </text>
+                        <text fg={t.textMuted}>{"[Thought] Thinking..."}</text>
                         {streamReasoning ? (
                           <box
                             border={["left"]}
@@ -1754,20 +1740,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                             marginTop={1}
                             flexDirection="column"
                           >
-                            {reasoningActive ? (
-                              // While actively streaming, render only the last 3
-                              // non-empty lines as plain text to avoid Markdown
-                              // re-parse overhead every 150ms.
-                              <text fg={t.textMuted}>
-                                {streamReasoning
-                                  .split("\n")
-                                  .filter((l) => l.trim().length > 0)
-                                  .slice(-3)
-                                  .join(" · ")}
-                              </text>
-                            ) : (
-                              <Markdown content={streamReasoning} t={t} />
-                            )}
+                            <text fg={t.textMuted}>
+                              {streamReasoning
+                                .split("\n")
+                                .filter((l) => l.trim().length > 0)
+                                .slice(-3)
+                                .join(" · ")}
+                            </text>
                           </box>
                         ) : null}
                       </box>
@@ -1797,7 +1776,7 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         focused={modalKeyboardOwner === "plan-questions"}
                       />
                     )}
-                    {pendingPaymentApproval && (
+                    {pendingPaymentApproval && !pendingPaymentApproval.workerApproval && (
                       <PaymentApprovalPanel
                         t={t}
                         payment={pendingPaymentApproval}
@@ -1990,28 +1969,19 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                         ) : null
                       }
                     >
-                      <SessionTreeCard nodes={sessionTree} />
-                      <AgentRailActivities
-                        activities={agentActivities}
-                        selected={selectedActivity}
-                        onSelect={setSelectedActivity}
-                        onOpenJobs={openJobsModal}
-                        width={railWidth}
-                        t={t}
-                      />
+                      {agentActivitiesNode}
                       {renderCouncilMeta(railWidth, {
                         hideRounds: !!sprintStage && sprintStage.stage !== "planning",
                       })}
                     </ContextRail>
                   )}
             </box>
-            <box paddingLeft={2} paddingRight={2} flexShrink={0}>
-              <StatusBar />
-            </box>
-            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
-              <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
-              <box flexGrow={1} />
+            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexShrink={0}>
+              <StatusBar
+                width={width - 4}
+                cwd={agent.getCwd().replace(os.homedir(), "~")}
+                sandbox={sandboxMode === "shuru"}
+              />
             </box>
           </box>
         ) : (
@@ -2097,14 +2067,13 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
                 </text>
               </box>
             )}
-            <box paddingLeft={2} paddingRight={2} flexShrink={0}>
-              <StatusBar />
-            </box>
-            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexDirection="row" flexShrink={0}>
-              <text fg={t.textDim}>{agent.getCwd().replace(os.homedir(), "~")}</text>
-              {sandboxMode === "shuru" ? <text fg="#f97316">{" · sandbox"}</text> : null}
-              <box flexGrow={1} />
-              <text fg={t.textDim}>{`v${startupConfig.version}`}</text>
+            <box paddingLeft={2} paddingRight={2} paddingBottom={1} flexShrink={0}>
+              <StatusBar
+                width={width - 4}
+                cwd={agent.getCwd().replace(os.homedir(), "~")}
+                sandbox={sandboxMode === "shuru"}
+                version={startupConfig.version}
+              />
             </box>
           </>
         )}
@@ -2214,6 +2183,17 @@ export function App({ agent, startupConfig, initialMessage, onExit, onRelaunch }
             selectedIndex={scheduleModalIndex}
             searchQuery={scheduleSearchQuery}
             rows={scheduleRows}
+          />
+        )}
+        {pendingPaymentApproval?.workerApproval && (
+          <WorkerApprovalPanel
+            t={t}
+            width={width}
+            height={height}
+            request={pendingPaymentApproval.workerApproval}
+            selected={pendingPaymentApproval.selected}
+            focused={modalKeyboardOwner === "payment-approval"}
+            previewRef={workerApprovalScrollRef}
           />
         )}
         {showJobsModal && (

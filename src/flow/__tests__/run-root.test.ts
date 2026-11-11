@@ -16,8 +16,8 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { planningRoot } from "../../gsd/paths.js";
 import { setCommitRunRoot } from "../../orchestrator/auto-commit.js";
+import { planningRoot } from "../../workflow/paths.js";
 import { runAnchoredStateRoot } from "../run-root.js";
 import { ensureFlowDir } from "../scaffold.js";
 
@@ -92,7 +92,7 @@ describe("runAnchoredStateRoot", () => {
 });
 
 describe("F7 call sites — the resolvers a drifted cwd actually reaches", () => {
-  it("planningRoot resolves the GSD tree against the run root, not the drifted cwd", () => {
+  it("planningRoot resolves the FLOW tree against the run root, not the drifted cwd", () => {
     const root = repoRoot();
     setCommitRunRoot(root);
     // This is the exact shape of the stray: `<repo>/src/.muonroi-flow/planning`.

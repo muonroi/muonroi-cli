@@ -456,6 +456,12 @@ export async function runFloorCommand(
    * the verdict.
    */
   ecosystem?: string,
+  /**
+   * Caller cancellation (e.g. a cancelled worker's `run_gate`). Abort tree-kills
+   * the gate exactly like the timeout does and reports `spawnError: "aborted"`.
+   * Optional: the floor itself never cancels a gate.
+   */
+  signal?: AbortSignal,
 ): Promise<FloorCheck> {
   const started = Date.now();
   let stdout = "";
@@ -463,6 +469,18 @@ export async function runFloorCommand(
   let exitCode: number | null = null;
   let timedOut = false;
   let spawnError: string | undefined;
+  if (signal?.aborted) {
+    return {
+      kind,
+      command,
+      exitCode: null,
+      ok: false,
+      timedOut: false,
+      spawnError: "aborted",
+      outputTail: "",
+      elapsedMs: 0,
+    };
+  }
   // Read the scope ONCE, synchronously: the child's `data` events fire from
   // listeners whose async context is not guaranteed to carry the run scope.
   const silenceMode = isIdealRunUnlimited();
@@ -497,13 +515,30 @@ export async function runFloorCommand(
     let settled = false;
     let timer: ReturnType<typeof setTimeout>;
     let postKillTimer: ReturnType<typeof setTimeout> | undefined;
+    const onAbort = (): void => {
+      if (settled) return;
+      spawnError = "aborted";
+      clearTimeout(timer);
+      killProcessTree(child, "SIGKILL", "verify-floor");
+      postKillTimer = setTimeout(() => {
+        if (settled) return;
+        logger.warn(
+          "orchestrator",
+          `[verify-floor] aborted command "${command}" did not close its pipes ${POST_KILL_SETTLE_MS}ms after the tree kill — settling without it`,
+          { operation: "runFloorCommand", cwd, command },
+        );
+        finish();
+      }, POST_KILL_SETTLE_MS);
+    };
     const finish = (): void => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       if (postKillTimer) clearTimeout(postKillTimer);
+      signal?.removeEventListener("abort", onAbort);
       resolveRun();
     };
+    signal?.addEventListener("abort", onAbort, { once: true });
     const armTimer = (): void => {
       timer = setTimeout(() => {
         timedOut = true;
@@ -541,7 +576,7 @@ export async function runFloorCommand(
     const sink = (which: "out" | "err") => (buf: Buffer | string) => {
       // Proof of life. Re-armed BEFORE the capture cap returns early, so a
       // command that has already filled the buffer is still recognised as alive.
-      if (silenceMode && !settled && !timedOut) {
+      if (silenceMode && !settled && !timedOut && spawnError !== "aborted") {
         clearTimeout(timer);
         armTimer();
       }

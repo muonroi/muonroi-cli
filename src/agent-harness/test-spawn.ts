@@ -417,8 +417,31 @@ function spawnPosix(args: string[], opts: SpawnOptions): SpawnResult {
  * @param opts  Optional spawn and handshake options.
  */
 export async function spawnAgentTui(args: string[], opts: SpawnOptions = {}): Promise<SpawnResult> {
-  if (process.platform === "win32") {
-    return spawnWindows(args, opts);
-  }
-  return spawnPosix(args, opts);
+  const result = process.platform === "win32" ? await spawnWindows(args, opts) : spawnPosix(args, opts);
+  drainRenderOutput(result.proc);
+  return result;
+}
+
+/**
+ * Discard the child's stdout: it carries only OpenTUI's ANSI render output
+ * (frames, events and commands all ride the sidechannel), and nobody reads it.
+ *
+ * Left undrained it is a deadlock, not a leak. OpenTUI's `renderNative` writes
+ * each frame to stdout synchronously from native code, so once the pipe buffer
+ * is full the child's main thread blocks inside that write — no timers, no
+ * renders, no commands — while the process stays alive. Measured on Windows
+ * with a 1 s heartbeat timer in the child: after the fourth `/help` (each one a
+ * full-screen repaint of a longer transcript) the heartbeat never fired again,
+ * the in-bridge received neither the next Enter nor a later "Z", and the frame
+ * seq stayed put for 30 s. With stdout drained, nine `/help` + Enter in a row
+ * all submitted (tests/harness/input-races.spec.ts). That is the "Enter lost
+ * after the transcript overflows" report: the key was never lost, the child
+ * was stuck writing to a pipe no one emptied.
+ *
+ * `resume()` (flowing mode with no listener) discards the bytes. A caller that
+ * wants them can still attach a `data` listener; it receives everything from
+ * that point on.
+ */
+function drainRenderOutput(proc: ChildProcess): void {
+  proc.stdout?.resume();
 }

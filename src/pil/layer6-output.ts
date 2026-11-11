@@ -347,11 +347,11 @@ export function isCouncilPlanExecution(raw: string): boolean {
  *  1. `pipeline.ts` — forces `directAnswer:false, deliverableKind:"code"`.
  *  2. `tool-engine.resolveTurnMaxOutputTokens` — floors the output budget at the
  *     build tier. Without it a phase turn classified `analyze` is capped at
- *     4,096 output tokens; measured (2026-07-10, gsd-core migration) that meant
+ *     4,096 output tokens; measured (2026-07-10, flow-core migration) that meant
  *     the model narrated its plan, hit `finishReason:"length"` mid-word,
  *     produced ZERO code, and the turn wedged.
- *  3. `layer4-gsd.ts` — emits the "the plan is already reviewed, do NOT call
- *     gsd_discuss/gsd_plan/gsd_plan_review" directive. Without it a council
+ *  3. `layer4-flow.ts` — emits the "the plan is already reviewed, do NOT call
+ *     flow_discuss/flow_plan/flow_plan_review" directive. Without it a council
  *     phase turn at heavy tier is told to re-plan a plan four panelists just
  *     cross-reviewed, and mutation tools are BLOCKED until it does.
  *
@@ -391,7 +391,7 @@ export function isImplementationIntent(raw: string): boolean {
 const STRUCTURED_REPORT_RE =
   /\b(lists?|enumerate|table|report|audit|checklist|inventory|rank(?:ed|ing)?|prioriti[sz]e[ds]?|roadmap|step[-\s]?by[-\s]?step|milestones?|plan(?:s|ning)?)\b|liệt\s*kê|danh\s*sách|bảng|báo\s*cáo|kiểm\s*toán|rà\s*soát|lộ\s*trình|từng\s*bước|các\s*bước|kế\s*hoạch|xếp\s*hạng|ưu\s*tiên/i;
 
-// Question-shape detector — shared by Layer 4 (GSD directive selection) and the
+// Question-shape detector — shared by Layer 4 (FLOW directive selection) and the
 // narrow response-tool gate below. True when the prompt reads as a question or
 // explanatory request rather than an imperative deliverable. Interrogative words
 // only count at sentence start (so "list the steps" is NOT a question), plus
@@ -403,7 +403,7 @@ const QUESTION_SHAPE_RE =
 // entirely absent from QUESTION_SHAPE_RE above (no "?" and no leading
 // interrogative word). Live miss: session f6f7881a5fae — "bạn check xem dùng
 // được mcp muonroi-docs không nhé" ("can you check whether the muonroi-docs MCP
-// works?") was NOT seen as a question, so layer4-gsd emitted the STANDARD
+// works?") was NOT seen as a question, so layer4-flow emitted the STANDARD
 // "implement directly" directive and discovery fabricated a build outcome,
 // driving a 40-call code hunt instead of a one-line answer.
 // Two interrogative tails:
@@ -474,7 +474,7 @@ export async function layer6Output(ctx: PipelineContext): Promise<PipelineContex
     // Chitchat short-circuit: greetings/small-talk don't need OUTPUT RULES
     // suffixes — the model already produces a short reply for "hi" without
     // being told to. Aligns with L4/L5 chitchat skips so the fast-path stays
-    // clean end-to-end (no GSD, no context, no suffix, no MCP).
+    // clean end-to-end (no FLOW, no context, no suffix, no MCP).
     if (ctx.intentKind === "chitchat") {
       return {
         ...ctx,

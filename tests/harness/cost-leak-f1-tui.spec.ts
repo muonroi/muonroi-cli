@@ -35,7 +35,7 @@ import { getProviderOption, loadDumpedRecordings } from "./recording.js";
 // — the only thing that injects promptCacheKey — never runs. Getting a real
 // assertion here still needs the provider-id override threaded through
 // `--mock-llm` so the mock CLAIMS the openai provider while routing through
-// `resolveModelRuntime`, exactly as CLAUDE.md known-caveat #4 and the existing
+// `resolveModelRuntime`, exactly as docs/agent-harness/HARNESS-GUIDE.md known-caveat #4 and the existing
 // `scripts/.harness-skips-allow.json` entry already say.
 //
 // Skipping costs no coverage: the invariant (every round carries the SAME

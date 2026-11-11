@@ -1,0 +1,104 @@
+{
+  "measuredAt": "2026-10-16T07:04:35.634072+00:00",
+  "dirtyTree": true,
+  "checks": {
+    "tests": 61,
+    "testFiles": 6,
+    "mainControls": 8,
+    "nativeControls": 15,
+    "selfverifyPassed": 2,
+    "selfverifyTotal": 2
+  },
+  "artifacts": [
+    {
+      "path": ".scratch/runtime-explore-recall-output/probe-ee.mjs",
+      "sha256": "8dcf382665017ee0640875800b94c647dd9924150dfc19861b4457a4430dcded",
+      "bytes": 1089
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/ee-metadata.json",
+      "sha256": "c4c46e7fa12e054685562a9b53e22ecb4a64fbd9da7634e97d2a3ee2094e2e62",
+      "bytes": 314
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/verify-main.mjs",
+      "sha256": "d2dad80a097212d89163afebe935cb96b5044dbef3a5ed75b3f75f7afc118b0e",
+      "bytes": 5615
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/main-result.json",
+      "sha256": "92c81539963ea46dbd7a9d7a682a64abe97ad47810194902f2d46a0fc83f23d0",
+      "bytes": 824
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/verify-native.mjs",
+      "sha256": "c9a91e835c6fc55eea98d2c954d881476198a1ca41e6bb4246f9e4f9a3d14614",
+      "bytes": 10270
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/native-result.json",
+      "sha256": "89e7b3a9e4410fa398ea74c709fac644051f621c30bc3141e8ac246a61992de0",
+      "bytes": 43089
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/gate-red.log",
+      "sha256": "33795409ed54ff33b7888431a78499f2b8cc0b9bc46a577efdbd1385b7651c72",
+      "bytes": 3944
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/tests.log",
+      "sha256": "0fea8eba1b8a324d31bdc6e4f2f42bc4fc9d156406f0b78dedf081d7f4e477c7",
+      "bytes": 1930
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/build.log",
+      "sha256": "ae7a7cdd03ae80adfc27b0c0d0ee4312560a8456a8a489d421bcc970fa84516f",
+      "bytes": 7520
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/main.log",
+      "sha256": "c477e4e587bd12ee37c9f06f5b7d5d7fea1b164f6c5d1fff5da59dd93354fbb7",
+      "bytes": 3210
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/native.log",
+      "sha256": "858c68238079b73d066245970a40602b3eb560f84ae8f373459b9ea9336030ae",
+      "bytes": 1320
+    },
+    {
+      "path": ".scratch/runtime-explore-recall-output/diff-check.log",
+      "sha256": "26291f6852c962f321eb205f71da16ceb861cce171c3fb8ca039984dffebfef8",
+      "bytes": 15818
+    },
+    {
+      "path": "src/gsd/mutation-gate.ts",
+      "sha256": "c9d438c8157481b8b4e9b6b1b9c9855545fefe665b39ebe1f3f011f4f532b720",
+      "bytes": 4422
+    },
+    {
+      "path": "src/gsd/__tests__/mutation-gate.test.ts",
+      "sha256": "fcae2dcc02e00a5fea2a7c00f1fe9d8b557667f5633547bd6be1a305d9215fc0",
+      "bytes": 5947
+    },
+    {
+      "path": "src/ee/search.ts",
+      "sha256": "6b24e7310c85505a2bd1a11b3dc868512d220f36e243b3ffa521c69b768935c9",
+      "bytes": 18527
+    },
+    {
+      "path": "src/ee/recall-scope.test.ts",
+      "sha256": "a9ed119a1a2fc638c6e1a60657f88d45dc724591178eef55cf014279cad71617",
+      "bytes": 2958
+    },
+    {
+      "path": "src/orchestrator/__tests__/stream-runner.test.ts",
+      "sha256": "3c97fbfea9a4936403c24d809aa37ab392bb39c8af96a57b2097373a6195d7b4",
+      "bytes": 23142
+    },
+    {
+      "path": "docs/investigations/runtime-explore-recall-output-2026-10-16.md",
+      "sha256": "f7b218a9add2187cdcad67585d00f68593ec00e80591c0d6c72d8afd9b0cf960",
+      "bytes": 6119
+    }
+  ]
+}

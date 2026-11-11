@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { getMcpKey } from "../mcp-keychain.js";
 
 // Mock the keychain so getMcpKey returns a deterministic value.
 vi.mock("../mcp-keychain.js", () => ({
@@ -80,7 +81,9 @@ describe("buildMcpToolSet — env hydration from keychain", () => {
         args: ["-y", "@modelcontextprotocol/server-filesystem", "."],
       },
     ]);
-    // No env injected for unknown server ids.
-    expect(capturedTransports[0].env).toBeUndefined();
+    // Transport identity/default env is allowed; unrelated credentials are not.
+    expect(capturedTransports).toHaveLength(1);
+    expect(getMcpKey).not.toHaveBeenCalled();
+    expect(capturedTransports[0].env).not.toHaveProperty("TAVILY_API_KEY");
   });
 });

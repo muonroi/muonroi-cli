@@ -202,6 +202,18 @@ class ReliableProviderCapabilities implements ProviderCapabilities {
   }
 }
 
+/** OpenAI-compatible transports serialize this catalog-gated option to reasoning_effort. */
+class CompatibleEffortProviderCapabilities extends ReliableProviderCapabilities {
+  override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
+    const model = ctx.model;
+    if (!model?.provider || model.supportsReasoningEffort !== true) return undefined;
+    const reasoningEffort = ctx.minimizeReasoning
+      ? "low"
+      : (ctx.reasoningEffort ?? model.defaultReasoningEffort ?? "medium");
+    return { [model.provider]: { reasoningEffort } };
+  }
+}
+
 /**
  * F1: derive a stable OpenAI prompt-cache key from the session id.
  * Identical hash logic as runtime.ts:computePromptCacheKey — kept here to
@@ -362,7 +374,9 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
  */
 /**
  * Z.ai — the coding endpoint (`/api/coding/paas/v4`) force-enables thinking
- * server-side for every GLM it hosts, and exposes no reasoning_effort knob. Two
+ * server-side for the legacy models measured below, which had no declared
+ * reasoning-effort knob. Current catalog-supported models also inherit effort
+ * serialization; unsupported rows continue to omit it. Two
  * consequences, both measured live on 2026-07-27:
  *
  *   - time-to-first-byte is **10–11 s** (glm-4.7 and glm-4.5-air; full response
@@ -372,28 +386,29 @@ class OllamaProviderCapabilities extends ReliableProviderCapabilities {
  *
  * That gap silently killed the PIL classifier on every z.ai turn: its per-attempt
  * ceiling is 8 s, so the call aborted before the first byte (`parts={start,abort}`,
- * zero deltas) → intent-detection FAIL → all six PIL layers skipped, and the GSD
+ * zero deltas) → intent-detection FAIL → all six PIL layers skipped, and the FLOW
  * complexity assessor left with no depth. Deterministic, not flaky.
  *
  * So honor `minimizeReasoning` here: a format-only call gets thinking switched
  * off rather than waiting out a CoT whose content is thrown away. Normal turns
  * (no flag) keep thinking — that is where GLM's reasoning actually earns its keep.
  */
-class ZaiProviderCapabilities extends ReliableProviderCapabilities {
+class ZaiProviderCapabilities extends CompatibleEffortProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("zai");
   }
 
   override buildProviderOptions(ctx: BuildProviderOptionsCtx): Record<string, unknown> | undefined {
-    if (ctx.minimizeReasoning) return { zai: { thinking: { type: "disabled" } } };
-    return undefined;
+    const effort = super.buildProviderOptions(ctx);
+    if (ctx.minimizeReasoning) return mergeProviderOptions(effort, { zai: { thinking: { type: "disabled" } } });
+    return effort;
   }
 }
 
 /**
  * OpenCode Go — defaults are reliable; only the console URL differs.
  */
-class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
+class OpenCodeGoProviderCapabilities extends CompatibleEffortProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("opencode-go");
   }
@@ -413,8 +428,18 @@ class OpenCodeGoProviderCapabilities extends ReliableProviderCapabilities {
  * Provider-wide by default because every StepFun model measured so far leaks;
  * `catalog.json` can set `emits_native_tool_call_markup: false` per model to
  * disarm it once StepFun ships a fix, without touching this file.
+ *
+ * Reasoning control: StepFun documents `reasoning_effort` low/medium/high for
+ * its reasoning models and NO way to switch thinking off. The inherited
+ * catalog-gated effort path is therefore the whole knob — `minimizeReasoning`
+ * maps to `"low"`. Probed live 2026-11-05 on `/step_plan/v1` against
+ * step-3.7-flash: `low` is applied (prompt_tokens 471 -> 476, mean completion
+ * 990 -> 740 tokens over 4 samples each); `reasoning_effort:"none"`,
+ * `thinking:{type:"disabled"}` and `enable_thinking:false` are accepted with
+ * HTTP 200 but ignored (prompt_tokens unchanged, reasoning still emitted), so
+ * none of them is sent.
  */
-class StepFunProviderCapabilities extends ReliableProviderCapabilities {
+class StepFunProviderCapabilities extends CompatibleEffortProviderCapabilities {
   override consoleSignupURL(): string {
     return consoleUrlFor("stepfun");
   }
@@ -564,7 +589,7 @@ export const DEFAULT_REASONING_OUTPUT_BUDGET_TOKENS = 8192;
  * candidate model and failing `/ideal` spec synthesis outright.
  *
  * A client CANNOT predict how long a model will think, and StepFun exposes no
- * effort knob (`supports_effort: false`). So the only budget that guarantees
+ * way to turn thinking off (`reasoning_effort: "low"` only shortens it). So the only budget that guarantees
  * the visible answer gets a chance to be emitted is the model's own declared
  * maximum. `max_tokens` is a CEILING, not a reservation — unused tokens are
  * never billed — so raising it costs nothing when the model stops early, while

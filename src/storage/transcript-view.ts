@@ -1,11 +1,18 @@
 import type { ModelMessage } from "ai";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction";
+import { applyPersistedShrink, type PersistedShrinkSpec } from "../orchestrator/compaction-budget";
 
 export interface PersistedCompaction {
   firstKeptSeq: number;
   summary: string;
   tokensBefore: number;
   createdAt: Date;
+  /**
+   * Retained-set decisions of the live compaction (dropped rows, budget level).
+   * Absent on rows written before the spec existed and on compactions that did
+   * not run the host budget pass (manual /compact, sub-session absorb).
+   */
+  shrink?: PersistedShrinkSpec;
 }
 
 export interface LoadedTranscriptState {
@@ -15,11 +22,21 @@ export interface LoadedTranscriptState {
   compaction: PersistedCompaction | null;
 }
 
+export interface EffectiveTranscriptOptions {
+  /**
+   * Apply the compaction's persisted shrink spec (default). The model-facing
+   * history needs it; display surfaces that show the canonical suffix pass
+   * false so the user still sees every row.
+   */
+  applyShrink?: boolean;
+}
+
 export function buildEffectiveTranscript(
   messages: ModelMessage[],
   seqs: number[],
   timestamps: Date[],
   compaction: PersistedCompaction | null,
+  options: EffectiveTranscriptOptions = {},
 ): LoadedTranscriptState {
   if (!compaction) {
     return {
@@ -40,9 +57,17 @@ export function buildEffectiveTranscript(
     keptIndex -= 1;
   }
 
-  const keptMessages = messages.slice(keptIndex);
-  const keptSeqs = seqs.slice(keptIndex);
-  const keptTimestamps = timestamps.slice(keptIndex);
+  let keptMessages = messages.slice(keptIndex);
+  let keptSeqs = seqs.slice(keptIndex);
+  let keptTimestamps = timestamps.slice(keptIndex);
+
+  if (compaction.shrink && options.applyShrink !== false) {
+    const view = applyPersistedShrink(keptMessages, keptSeqs, compaction.shrink);
+    const shrunkSeqs = view.indices.map((i) => keptSeqs[i]!);
+    keptTimestamps = view.indices.map((i) => keptTimestamps[i]!);
+    keptSeqs = shrunkSeqs;
+    keptMessages = view.messages;
+  }
 
   return {
     messages: [createCompactionSummaryMessage(compaction.summary), ...keptMessages],

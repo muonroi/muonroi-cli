@@ -1,0 +1,151 @@
+{
+  "recordedAt": "2026-10-16T03:31:45.094332+00:00",
+  "scope": "Dirty working tree; compiled isolated controls and mock native TUI, no paid provider replay",
+  "baseline": {
+    "safeVisible": false,
+    "yoloVisible": false,
+    "staticPrefixEqual": true,
+    "contractChars": 1998,
+    "nativeChars": 13149
+  },
+  "verification": {
+    "tests": 104,
+    "testFiles": 10,
+    "buildExit": 0,
+    "compiledBoundary": "Actual compiled prompt assembly/cache relocation and approval predicates; no paid model or user-setting writes",
+    "compiledChecks": {
+      "allActualPolicyModesVisible": true,
+      "modeChangesDoNotPoisonCachedPrefix": true,
+      "priorPromptSnapshotRemainsUnchanged": true,
+      "reducedToolTurnRetainsActualPolicy": true,
+      "missingModeIsUnavailableNotInvented": true,
+      "sandboxSnapshotMatchesBashInstance": true,
+      "snapshotDoesNotGrantAuthorization": true,
+      "nonClaudeRelocationRetainsPolicySnapshot": true,
+      "childWithoutPolicyDoesNotClaimParentMode": true,
+      "safeStillRequiresApprovalForFilesAndShell": true,
+      "autoEditExistingApprovalRulesRetained": true,
+      "yoloDoesNotRemoveIndependentCatastrophicGuard": true,
+      "verificationGuidanceChoosesBySurface": true
+    },
+    "compiledMeasurements": {
+      "contractChars": 1988,
+      "nativeChars": 13883,
+      "policySnapshotChars": 162,
+      "sandboxMode": "off"
+    },
+    "nativeChecks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeSmokeAndPassiveLogPass": true
+    },
+    "nativeRunId": "9167d7a2-66ca-4ec8-82dd-f14530e61477",
+    "nativeSummary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "whitespaceExit": 0
+  },
+  "artifacts": [
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/baseline.json",
+      "bytes": 128,
+      "sha256": "f6f4220e37003a872ca11a3a76e42023f09e15d0ad29f35b8d8b2f9365b8db50"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/baseline-tests.log",
+      "bytes": 1924,
+      "sha256": "1b6916691cb19e7198e5b65d39c1c0bb6d64c750ed6c474b8f4ea02e68fb8a61"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/red.log",
+      "bytes": 8204,
+      "sha256": "b5eb4fb4e824b95f7987ce835c65ab00fd438fbc642562ac40d9817ef180d62c"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/build-red.log",
+      "bytes": 7864,
+      "sha256": "4a8d54c0907eda35aaba8fcfe1126491a68a576403dab78143e9809431e96442"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/tests.log",
+      "bytes": 1956,
+      "sha256": "5edc523cf038e124c5dac78470560f921ace662ba920ba272ddce478dd3ca68b"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/build.log",
+      "bytes": 7498,
+      "sha256": "938ae0458ab81538dd67778cee9611b2f4f7ec063614b8ca31abebc2772295fa"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/compiled-result.json",
+      "bytes": 1023,
+      "sha256": "11e8f3a6b393a6bb7665d8299123a2fa8e4eb3fd5762e3521c67eddd3fc375fe"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/native-result.json",
+      "bytes": 40795,
+      "sha256": "bcfc500e641f2cc100724f43c85bbdd70353ee0c25e707cd68e59d4cccfb734d"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/verify.mjs",
+      "bytes": 5189,
+      "sha256": "a928baf25bdbc3e85554d8531ef7e1108281737515ddb82e346695502ddc47f9"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/verify-native.mjs",
+      "bytes": 10270,
+      "sha256": "c9a91e835c6fc55eea98d2c954d881476198a1ca41e6bb4246f9e4f9a3d14614"
+    },
+    {
+      "path": ".scratch/runtime-permission-verification-guidance/diff-check.log",
+      "bytes": 15800,
+      "sha256": "ec2f10d51080608b4735bda40c6937af20b53c336fe49a29245ef2d0d0d5fd9c"
+    },
+    {
+      "path": "src/orchestrator/prompts.ts",
+      "bytes": 52252,
+      "sha256": "c22ea1216ff9d636a8a50dcf907096a3bc98329533fda87659a6dbad0ee25522"
+    },
+    {
+      "path": "src/orchestrator/message-processor.ts",
+      "bytes": 87625,
+      "sha256": "ee539fe6d9795acd0aa7bab67162a1f086093c66c552ccae72a1edebdfe5ff12"
+    },
+    {
+      "path": "src/orchestrator/orchestrator.ts",
+      "bytes": 245778,
+      "sha256": "81ecfb72b8c5d5387d1b9c1d6f7e86bd8601c22b80364aef697c62f81890c9f7"
+    },
+    {
+      "path": "src/orchestrator/__tests__/runtime-permission-context.test.ts",
+      "bytes": 1841,
+      "sha256": "c095831d14fbd909bce38186f2c9b6b655b56f2ae667ef9c6ac7a035245f4731"
+    },
+    {
+      "path": "src/pil/agent-operating-contract.ts",
+      "bytes": 5068,
+      "sha256": "305b5a440669b1a3fb8a961a2abadc2cecdad490d648afde480ac43ec191ab58"
+    },
+    {
+      "path": "src/pil/native-capabilities-workbook.ts",
+      "bytes": 16178,
+      "sha256": "b1a515604aa08b2d22709285db26f945ac0884d6b33c944e6237e570e8ba7525"
+    }
+  ]
+}

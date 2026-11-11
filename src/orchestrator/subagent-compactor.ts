@@ -49,6 +49,8 @@
  */
 
 import type { ModelMessage } from "ai";
+import { readEEContextReceipt } from "../ee/native-context.js";
+import { logger } from "../utils/logger.js";
 
 export interface SubAgentCompactorOptions {
   /** Cumulative message-content char count above which compaction kicks in. */
@@ -158,6 +160,23 @@ export interface SubAgentCompactorOptions {
    * compacting pass with the same ids — consumers must be idempotent.
    */
   onElide?: (toolCallIds: string[]) => void;
+  /**
+   * Ceiling pressure — stub EVERY older tool result, ignoring the keep-verbatim
+   * preferences (isHighValueToolResult, keepToolIds, focus terms). Those are
+   * preferences; the hard input ceiling is not. Set only by
+   * `fitSubAgentMessagesToCeiling`. Full content is still handed to
+   * `persistArtifact`, so retrieve_tool_result can rehydrate it.
+   */
+  forceElide?: boolean;
+  /**
+   * Ceiling pressure — also strip reasoning from assistant messages INSIDE the
+   * kept tail, except the most recent assistant message (provider thinking
+   * replay — e.g. Anthropic signed thinking — needs the latest tool-use turn's
+   * reasoning intact). `"all"` strips that one too — the last resort when the
+   * latest reasoning alone keeps a request over the ceiling. Set only by
+   * `fitSubAgentMessagesToCeiling`.
+   */
+  stripTailReasoning?: boolean | "all";
 }
 
 /** O2 — floor for the tail-budget keepLast shrink; never break the live step's
@@ -255,7 +274,7 @@ export const HIGH_VALUE_MCP_PREFIXES = ["mcp_muonroi-docs__"] as const;
 /**
  * Heuristic: keep full (no stub) for high-signal tool results.
  * Signals: allowlist tool + (error/todo/plan/keyfile/large output or explicit keep list).
- * Brief inline per GSD-quick + evidence-first.
+ * Brief inline per FLOW-quick + evidence-first.
  */
 export function isHighValueToolResult(
   toolName: string,
@@ -269,6 +288,8 @@ export function isHighValueToolResult(
   // Always preserve terminal response tools — this is the agent's own delivered
   // work/findings. Truncating it causes the agent to think it lost its answer.
   if (name.startsWith("respond_")) return true;
+  // A short worker handoff is already the summary, not disposable tool noise.
+  if (name === "delegation_read" && preview.length <= 12_000) return true;
 
   // Plan context bias (user-halt + "tiếp tục" resume): keep plan text verbatim so
   // compaction does not drop the APPROVED PLAN the user just approved.
@@ -313,6 +334,8 @@ interface ResolvedOpts {
   focusNote: string | null;
   focusTerms: string[];
   onElide?: (toolCallIds: string[]) => void;
+  forceElide: boolean;
+  stripTailReasoning: boolean | "all";
 }
 
 function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
@@ -334,6 +357,8 @@ function resolveOpts(o: SubAgentCompactorOptions | undefined): ResolvedOpts {
     focusNote: focus,
     focusTerms: extractFocusTerms(focus),
     onElide: o?.onElide,
+    forceElide: o?.forceElide === true,
+    stripTailReasoning: o?.stripTailReasoning === "all" ? "all" : o?.stripTailReasoning === true,
   };
 }
 
@@ -495,6 +520,16 @@ interface ToolResultPartLike {
  * extracting space.
  */
 const STUB_RE = /elided by (sub-agent|top-level) compactor|\[dup of /;
+
+/** Recognize compacted output envelopes without matching prose that merely mentions them. */
+export function isCompactedToolOutput(output: unknown): boolean {
+  const value = output && typeof output === "object" && "value" in output ? output.value : output;
+  return (
+    typeof value === "string" &&
+    /^\[(?:earlier tool_result for tool=|elided [^\]\r\n]+\]|dup of |Delegation handoff receipt;)/.test(value)
+  );
+}
+
 function isStubbedToolResult(msg: ModelMessage): boolean {
   if (msg.role !== "tool" || !Array.isArray(msg.content)) return false;
   for (const part of msg.content as ReadonlyArray<Record<string, unknown>>) {
@@ -573,6 +608,7 @@ function rewriteOlderToolMessage(
   ) => void,
   focusNote?: string | null,
   focusTerms: readonly string[] = [],
+  force = false,
 ): ModelMessage {
   if (!isToolResultMessage(msg) || !Array.isArray(msg.content)) return msg;
   const rewritten = (msg.content as ReadonlyArray<Record<string, unknown>>).map((part) => {
@@ -581,13 +617,64 @@ function rewriteOlderToolMessage(
     const rawPreview = extractOutputPreview(tr.output);
     const fullLen = rawPreview.length;
     const toolCallId = tr.toolCallId;
+    // Keep the task-owned scope pointer, not an unbounded recalled lesson.
+    if (tr.toolName === "ee_query" && readEEContextReceipt(rawPreview)) {
+      const header = rawPreview.split("\n", 1)[0]!;
+      if (fullLen <= 3000) return part;
+      try {
+        persistArtifact?.(toolCallId, tr.toolName, rawPreview, "native-ee-context");
+      } catch (error) {
+        logger.file("warn", "ee", "EE recall artifact retention failed", {
+          toolCallId,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      return {
+        ...part,
+        output: {
+          type: "text",
+          value: `${header}\n[Earlier EE lessons omitted; retrieve_tool_result(tool_call_id=${JSON.stringify(toolCallId)}) for the full result.]`,
+        },
+      };
+    }
+    // Bounded task-stage/handoff receipts are the durable resume pointer, not raw logs.
+    if (tr.toolName === "context_load" && fullLen <= 3000 && rawPreview.includes('"kind":"task-context/v1"'))
+      return part;
+    if (tr.toolName === "context_load" && fullLen <= 10000 && rawPreview.includes('"kind":"working-context/v1"'))
+      return part;
     // Idea 1 + 3: high-value or explicit KEEP_TOOL_IDS → keep verbatim (no stub).
-    if (isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
+    // Under ceiling pressure (`force`) these preferences yield: the result is
+    // stubbed and its full content persisted for retrieve_tool_result.
+    if (!force && isHighValueToolResult(tr.toolName, rawPreview, keepToolIds, toolCallId)) {
       return part; // preserve full original output
+    }
+    if (tr.toolName === "delegation_read") {
+      let retained = false;
+      try {
+        persistArtifact?.(
+          toolCallId,
+          tr.toolName,
+          rawPreview,
+          "delegation-log-compacted",
+          "Worker result with durable references",
+        );
+        retained = persistArtifact !== undefined;
+      } catch (err) {
+        console.error(
+          `[compactor] Failed to retain delegation artifact ${toolCallId}: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const receipt =
+        `[Delegation handoff receipt; ${retained ? "long log retained outside context" : "Artifact retention unconfirmed; retry delegation_read with the jobId below"}]\n${rawPreview.slice(0, 3_000)}\n` +
+        (retained
+          ? `[Full evidence: retrieve_tool_result(tool_call_id="${toolCallId}"); preserve jobId/resultVersion when acknowledging.]\n`
+          : "") +
+        rawPreview.slice(-800);
+      return { ...part, output: { type: "text", value: receipt } };
     }
     // C1 — the main-context agent named this content as must-survive. Exact
     // substring containment only (see extractFocusTerms): keep it verbatim.
-    if (previewMatchesFocus(rawPreview, focusTerms) || previewMatchesFocus(tr.toolName, focusTerms)) {
+    if (!force && (previewMatchesFocus(rawPreview, focusTerms) || previewMatchesFocus(tr.toolName, focusTerms))) {
       return part;
     }
     const preview = rawPreview.slice(0, previewChars).replace(/\s+/g, " ").trim();
@@ -600,8 +687,13 @@ function rewriteOlderToolMessage(
     if (persistArtifact && fullLen > 200) {
       try {
         persistArtifact(toolCallId, tr.toolName, rawPreview, "elided-by-compactor", summary);
-      } catch {
-        /* fail-open */
+      } catch (err) {
+        // Fail-open: the stub still goes out; only rehydration of this id is lost.
+        logger.file("warn", "orchestrator", "Compactor artifact persist failed", {
+          toolCallId,
+          toolName: tr.toolName,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     return {
@@ -724,11 +816,24 @@ export function compactSubAgentMessages(
   // SDK is preserved — only the CONTENT of each part is rewritten, never the
   // structure or count.
   let firstUserSeen = false;
+  let lastAssistantIndex = -1;
+  if (resolved.stripTailReasoning === true) {
+    for (let i = processedMessages.length - 1; i >= 0; i--) {
+      if (processedMessages[i]?.role === "assistant") {
+        lastAssistantIndex = i;
+        break;
+      }
+    }
+  }
   const out: ModelMessage[] = [];
   for (let i = 0; i < processedMessages.length; i++) {
     const msg = processedMessages[i]!;
     if (i >= keepFrom) {
-      out.push(msg);
+      out.push(
+        resolved.stripTailReasoning && msg.role === "assistant" && i !== lastAssistantIndex
+          ? stripAssistantReasoning(msg)
+          : msg,
+      );
       continue;
     }
     if (msg.role === "system") {
@@ -761,6 +866,7 @@ export function compactSubAgentMessages(
           resolved.persistArtifact,
           resolved.focusNote,
           resolved.focusTerms,
+          resolved.forceElide,
         ),
       );
       continue;
@@ -781,6 +887,75 @@ export function compactSubAgentMessages(
   }
   reportElidedToolResults(messages, out, resolved.onElide);
   return out;
+}
+
+export interface CeilingFitResult {
+  messages: ModelMessage[];
+  /** 0 = already under budget (input returned by identity); 1-3 = pressure level applied. */
+  level: number;
+  estBefore: number;
+  estAfter: number;
+  /** False when even the strongest level could not get under budget; the gate stays the backstop. */
+  fitted: boolean;
+}
+
+/**
+ * Bring a worker's per-step prompt under the metered gate's hard input ceiling
+ * BEFORE the request is sent, instead of letting the gate throw and fail the job.
+ *
+ * Why: the ordinary B3 pass is tuned for cost, not for the ceiling, and two of
+ * its preferences are unbounded in size — `isHighValueToolResult` keeps any
+ * read/grep/bash output mentioning "error|fail|done|..." verbatim at ANY length,
+ * and the kept tail's reasoning is never stripped. Job gentle-violet-panda
+ * (session 4edc02516a92, a test-fixing worker) had 28 of its 41 tool results,
+ * 228,496 of 251,267 chars, classified keep-verbatim, and its last request
+ * hit est 105,939 > 100,000 tokens (history 205,525 + tool_results 174,244 chars).
+ *
+ * `measureTokens` must count in the gate's own units (callers use the gate's
+ * `analyzePrompt` over system + messages). Levels, weakest first:
+ *   1. stub every older tool result regardless of keep-verbatim preferences,
+ *      strip reasoning everywhere except the most recent assistant message;
+ *   2. as 1 with a single verbatim tool turn;
+ *   3. as 2, also stripping the most recent reasoning (only reached when the
+ *      request would otherwise certainly be refused by the gate).
+ * Full content of everything stubbed goes to `persistArtifact`. The gate itself
+ * is untouched: when nothing fits, the smallest view is returned with
+ * `fitted:false` and the gate's throw still bounds the call.
+ */
+export function fitSubAgentMessagesToCeiling(
+  messages: ReadonlyArray<ModelMessage>,
+  opts: {
+    budgetTokens: number;
+    measureTokens: (messages: ReadonlyArray<ModelMessage>) => number;
+    compactor?: SubAgentCompactorOptions;
+  },
+): CeilingFitResult {
+  const estBefore = opts.measureTokens(messages);
+  if (!(opts.budgetTokens > 0) || estBefore <= opts.budgetTokens)
+    return { messages: messages as ModelMessage[], level: 0, estBefore, estAfter: estBefore, fitted: true };
+  const baseKeep = Math.max(1, opts.compactor?.keepLastTurns ?? SUBAGENT_COMPACT_DEFAULT_KEEP_LAST);
+  const levels: Array<{ keep: number; tailReasoning: true | "all" }> = [
+    { keep: baseKeep, tailReasoning: true },
+    { keep: 1, tailReasoning: true },
+    { keep: 1, tailReasoning: "all" },
+  ];
+  let best: CeilingFitResult | null = null;
+  for (let i = 0; i < levels.length; i++) {
+    const compacted = compactSubAgentMessages(messages, {
+      ...opts.compactor,
+      thresholdChars: 0,
+      keepLastTurns: levels[i]!.keep,
+      stripOldReasoning: true,
+      stripTailReasoning: levels[i]!.tailReasoning,
+      forceElide: true,
+      // The tail budget would re-shrink keepLast on its own schedule; the levels above own it here.
+      tailBudgetChars: 0,
+    });
+    const estAfter = opts.measureTokens(compacted);
+    best = { messages: compacted, level: i + 1, estBefore, estAfter, fitted: estAfter <= opts.budgetTokens };
+    if (best.fitted) break;
+  }
+  return best!;
 }
 
 /**
@@ -933,9 +1108,13 @@ export const MIN_ELIDE_ARGS_CHARS = 256;
  * this value in an object turned the failing request 200, and injecting a bare
  * string into a passing request turned it 400).
  */
-export function buildElidedArgsInput(sz: number): Record<string, unknown> {
+export function buildElidedArgsInput(sz: number, toolCallId?: string): Record<string, unknown> {
+  const recovery =
+    toolCallId && toolCallId.length <= 256
+      ? ` Recover captured args with retrieve_tool_result(${JSON.stringify({ tool_call_id: toolCallId, view: "arguments" })}); never execute this marker.`
+      : "";
   return {
-    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]`,
+    [ELIDED_NOTE_KEY]: `${ELIDED_ARGS_PREFIX} by sub-agent compactor — ${sz} chars; consult the matching tool_result for what came back]${recovery}`,
   };
 }
 
@@ -1076,7 +1255,9 @@ function stripAssistantToolCallArgs(msg: ModelMessage): ModelMessage {
     // its own, and every marker written is one more exemplar of a shape the
     // model demonstrably imitates. See MIN_ELIDE_ARGS_CHARS for the measurement.
     if (sz < MIN_ELIDE_ARGS_CHARS) return part;
-    const elided = buildElidedArgsInput(sz);
+    // Recovery hints add bytes to the base marker measured above; the existing
+    // no-inflation guard measures that actual size and keeps the input if cheaper.
+    const elided = buildElidedArgsInput(sz, typeof part.toolCallId === "string" ? part.toolCallId : undefined);
     // F10 — structural no-inflation guard. MIN_ELIDE_ARGS_CHARS already sits far
     // above the marker's serialised length, so this never fires today. It exists
     // so that "an elision must never make a call bigger" is enforced by

@@ -1,0 +1,92 @@
+{
+  "createdAt": "2026-10-16T03:05:15.178236+00:00",
+  "workspace": "D:\\sources\\Core\\muonroi-cli",
+  "tests": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\elision-durable-evidence-fts\\accepted-tests.log",
+    "bytes": 1940,
+    "sha256": "24aed4bf405f4a310904aef1c388ead9710aae10db8e85eb6703ebebb5f7e721",
+    "summaryLines": [
+      "Test Files  20 passed (20)",
+      "Tests  177 passed (177)",
+      "Start at  09:58:41",
+      "Duration  21.30s (transform 2.78s, setup 360ms, import 14.33s, tests 2.83s, environment 2ms)"
+    ]
+  },
+  "storageRed": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\elision-durable-evidence-fts\\storage-red.log",
+    "bytes": 6248,
+    "sha256": "c99b4f1d31396c7df3f3b4198bc81e856d7ff80dc048bfa9e6004ee1346e132a",
+    "summaryLines": [
+      "Test Files  1 failed (1)",
+      "Tests  2 failed | 1 passed (3)",
+      "Start at  09:51:50",
+      "Duration  2.60s (transform 865ms, setup 62ms, import 2.02s, tests 176ms, environment 0ms)"
+    ]
+  },
+  "compiled": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\elision-durable-evidence-fts\\compiled-result.json",
+    "bytes": 821,
+    "sha256": "d245eaca750853b30d5ad603eebdb9361983c29c41b92bb48e82de3f6b9d3a08",
+    "checks": {
+      "actualCompactorProducesGuardedArgsMarker": true,
+      "markerNamesExactSourceAndReadOnlyRecovery": true,
+      "compactedAppendPreservesCapturedArgs": true,
+      "childRecoversParentArgsInBoundedPages": true,
+      "defaultResultViewStillReturnsOriginalOutput": true,
+      "argumentReadsRejectOtherSessionFamilies": true,
+      "markerOnlyArchiveReportsOriginalUnavailable": true,
+      "literalModeHandlesHyphensAndEmbeddedQuotes": true,
+      "defaultFtsStillSupportsOperators": true,
+      "rawSyntaxFailureGivesExplicitRecoveryWithoutFallback": true,
+      "recoveryDoesNotPermitMarkerExecution": true,
+      "capturedArgumentsSurviveDatabaseReopen": true
+    },
+    "pageCount": 2,
+    "outputLength": 11900,
+    "compactedChars": 1305
+  },
+  "native": {
+    "path": "D:\\sources\\Core\\muonroi-cli\\.scratch\\elision-durable-evidence-fts\\native-result.json",
+    "bytes": 40795,
+    "sha256": "ec6e5f744b13f51b6938350132711e25b07201ac8321b4ece8e4f6438644a5c4",
+    "runId": "c6ab00b0-755e-4e1e-b388-2e85782cd07f",
+    "checks": {
+      "compiledNativeFixtureSeedPasses": true,
+      "preparedTelemetryContainsOnlyNumbersAndReferences": true,
+      "nativeAndMcpShareSnapshotTotals": true,
+      "bothSiblingSessionsIncluded": true,
+      "rejected400VisibleWithoutAddingUsage": true,
+      "boundedJsonAndRedaction": true,
+      "newAndLegacyMeasurementsLabeled": true,
+      "nativeAndMcpExposeSnapshotKindCounts": true,
+      "componentNestingIsDisclosed": true,
+      "coverageDoesNotChangeAcrossPages": true,
+      "independentPaginationWorks": true,
+      "fixtureAdvancePasses": true,
+      "frozenCutoffExcludesLaterUsage": true,
+      "compiledPromptClaimsCorrected": true,
+      "nativeSmokeAndPassiveLogPass": true
+    },
+    "summary": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "usageProvenance": {
+    "sessionId": "fda543b0be14",
+    "familySessionCount": 2,
+    "unit": "tokens, not characters",
+    "currentFamily": [44, 2284505, 86047, 1892352, 984663, "2026-09-22T02:36:57.620Z", "2026-09-22T02:52:27.403Z"],
+    "quotedCutoff": "2026-09-22T02:38:59.567Z",
+    "familyAtQuotedCutoff": [15, 630939, 5477, 536960, 57690, "2026-09-22T02:36:57.620Z", "2026-09-22T02:38:53.479Z"],
+    "note": "Exact session, family, and cutoff must match before comparing historical totals. No original DB writes."
+  },
+  "limits": [
+    "No original user DB writes or paid-provider probes.",
+    "Already overwritten historical arguments cannot be reconstructed; missing originals are explicit.",
+    "Current fixtures do not prove all model behavior or power-loss safety."
+  ]
+}

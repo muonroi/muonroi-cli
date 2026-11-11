@@ -62,23 +62,29 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
 
   it("passes sandbox mode into background delegations — always 'off' (sandbox removed)", async () => {
     const { Agent } = await importAgentModule();
-    const agent = new Agent(undefined, undefined, undefined, undefined, {
+    const { getModelInfo } = await import("../models/registry.js");
+    const agent = new Agent("x".repeat(32), undefined, undefined, undefined, {
       persistSession: false,
       sandboxMode: "shuru", // accepted for back-compat but ignored
     });
+    const modelId = agent.getModel(); // Catalog-selected enabled model for this root's provider.
+    expect(getModelInfo(modelId)).toBeDefined();
     const startMock = vi.fn(async () => ({ success: true, output: "ok" }));
     (agent as unknown as { delegations: { start: typeof startMock } }).delegations.start = startMock;
 
-    await (agent as unknown as { runDelegation: (request: unknown) => Promise<unknown> }).runDelegation({
+    expect(agent.getExecutionRole()).toBe("orchestrator");
+    const result = await (agent as unknown as { runDelegation: (request: unknown) => Promise<unknown> }).runDelegation({
       agent: "explore",
+      modelId,
       description: "Inspect",
       prompt: "Look around",
     });
 
     // Sandbox removed: delegations always receive sandboxMode: "off".
+    expect(result).toMatchObject({ success: true });
     expect(startMock).toHaveBeenCalledWith(
-      expect.objectContaining({ agent: "explore" }),
-      expect.objectContaining({ sandboxMode: "off" }),
+      expect.objectContaining({ agent: "explore", modelId }),
+      expect.objectContaining({ sandboxMode: "off", permissionMode: "safe" }),
     );
   });
 
@@ -98,24 +104,30 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
 
   it("passes sandbox settings into background delegations", async () => {
     const { Agent } = await importAgentModule();
+    const { getModelInfo } = await import("../models/registry.js");
     const settings = { allowNet: true, allowedHosts: ["api.openai.com"] };
-    const agent = new Agent(undefined, undefined, undefined, undefined, {
+    const agent = new Agent("x".repeat(32), undefined, undefined, undefined, {
       persistSession: false,
       sandboxMode: "shuru",
       sandboxSettings: settings,
     });
+    const modelId = agent.getModel(); // Catalog-selected enabled model for this root's provider.
+    expect(getModelInfo(modelId)).toBeDefined();
     const startMock = vi.fn(async () => ({ success: true, output: "ok" }));
     (agent as unknown as { delegations: { start: typeof startMock } }).delegations.start = startMock;
 
-    await (agent as unknown as { runDelegation: (request: unknown) => Promise<unknown> }).runDelegation({
+    expect(agent.getExecutionRole()).toBe("orchestrator");
+    const result = await (agent as unknown as { runDelegation: (request: unknown) => Promise<unknown> }).runDelegation({
       agent: "explore",
+      modelId,
       description: "Inspect",
       prompt: "Look around",
     });
 
+    expect(result).toMatchObject({ success: true });
     expect(startMock).toHaveBeenCalledWith(
-      expect.objectContaining({ agent: "explore" }),
-      expect.objectContaining({ sandboxSettings: settings }),
+      expect.objectContaining({ agent: "explore", modelId }),
+      expect.objectContaining({ sandboxSettings: settings, sandboxMode: "off", permissionMode: "safe" }),
     );
   });
 });

@@ -13,6 +13,11 @@ import { Agent } from "../orchestrator.js";
 
 const mocks = vi.hoisted(() => ({ pipeline: vi.fn() }));
 vi.mock("../../pil/pipeline.js", () => ({ runPipeline: mocks.pipeline }));
+vi.mock("node:child_process", async (original) => ({
+  ...(await original<typeof import("node:child_process")>()),
+  // Keep the real durable council dispatch, without launching provider work.
+  spawn: vi.fn(() => ({ pid: process.pid, unref() {}, once() {} })),
+}));
 vi.mock("../../council/leader.js", async (original) => ({
   ...(await original<typeof import("../../council/leader.js")>()),
   getEffectiveCouncilRoleCount: () => 3,
@@ -29,7 +34,7 @@ const info: PipelineContext = {
   outputStyle: null,
   metrics: null,
   layers: [],
-  gsdAutoCouncil: true,
+  flowAutoCouncil: true,
   modelDepthTier: "heavy",
 };
 
@@ -43,13 +48,20 @@ describe("main streaming with optional background PIL", () => {
   ])("keeps main ownership when PIL is %s", async (scenario) => {
     const home = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-background-pil-"));
     const previousCwd = process.cwd();
-    const envKeys = ["HOME", "USERPROFILE", "MUONROI_EE_BASE_URL", "MUONROI_FORCE_ROUTING_CLASSIFY"];
+    const envKeys = [
+      "HOME",
+      "USERPROFILE",
+      "MUONROI_CLI_HOME",
+      "MUONROI_EE_BASE_URL",
+      "MUONROI_FORCE_ROUTING_CLASSIFY",
+    ];
     const previousEnv = Object.fromEntries(envKeys.map((key) => [key, process.env[key]]));
     fs.mkdirSync(path.join(home, ".muonroi-cli"));
     fs.writeFileSync(path.join(home, ".muonroi-cli", "settings.json"), JSON.stringify({ routerSubSessions: false }));
     process.chdir(home);
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    process.env.MUONROI_CLI_HOME = path.join(home, ".muonroi-cli");
     process.env.MUONROI_EE_BASE_URL = "http://127.0.0.1:1";
     delete process.env.MUONROI_FORCE_ROUTING_CLASSIFY;
     closeDatabase();
@@ -80,7 +92,15 @@ describe("main streaming with optional background PIL", () => {
                 toolCallStream({
                   toolCallId: "leader-control",
                   toolName: controlTool,
-                  input: controlTool === "convene_council" ? { reason: "Conflicting design tradeoffs" } : {},
+                  input:
+                    controlTool === "convene_council"
+                      ? {
+                          topic: "Design review",
+                          reason: "Conflicting design tradeoffs",
+                          context: raw,
+                          outputContract: "Return bounded advice with evidence",
+                        }
+                      : {},
                 }),
               ]
             : []),
@@ -119,7 +139,7 @@ describe("main streaming with optional background PIL", () => {
       expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
       expect(agent.getSessionId()).toBe(parentId);
       expect((agent as unknown as { abortController: unknown }).abortController).toBeNull();
-      expect(councilSpy).toHaveBeenCalledTimes(scenario === "leader council" ? 1 : 0);
+      expect(councilSpy).not.toHaveBeenCalled();
       if (scenario === "slow" || scenario === "never responds" || scenario === "leader council") {
         expect(pilSettled).toBe(false);
         if (resolvePil) {
@@ -142,8 +162,24 @@ describe("main streaming with optional background PIL", () => {
         expect(stored).toContain("SERVER_SUPPLEMENT");
         expect(JSON.stringify(calls[calls.length - 1].prompt)).toContain("SERVER_SUPPLEMENT");
       }
-      if (scenario === "leader council")
-        expect(JSON.stringify(calls[calls.length - 1].prompt)).toContain("COUNCIL_EVIDENCE");
+      if (scenario === "leader council") {
+        const lastPrompt = JSON.stringify(calls[calls.length - 1].prompt);
+        expect(lastPrompt).not.toContain("COUNCIL_EVIDENCE");
+        expect(lastPrompt).toContain("Delegation started:");
+        expect(lastPrompt).toContain("Agent: council");
+        const records = fs
+          .readdirSync(path.join(home, ".muonroi-cli", "delegations"), { recursive: true })
+          .map(String)
+          .filter((file) => file.endsWith(".json"))
+          .map((file) => JSON.parse(fs.readFileSync(path.join(home, ".muonroi-cli", "delegations", file), "utf8")));
+        expect(records).toHaveLength(1);
+        expect(records[0]).toMatchObject({
+          kind: "council",
+          status: "running",
+          parentSessionId: parentId,
+          council: { topic: "Design review", context: raw },
+        });
+      }
     } finally {
       councilSpy.mockRestore();
       streamSpy.mockRestore();

@@ -27,7 +27,7 @@ vi.mock("../../state/active-run.js", () => ({
 }));
 
 import type { SprintProgressSegment, StatusBarState } from "../../state/status-bar-store.js";
-import { renderSprintSegment, renderStatusBar } from "./index.js";
+import { footerSegments, renderSprintSegment, renderStatusBar } from "./index.js";
 
 function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
   return {
@@ -50,17 +50,20 @@ function makeState(overrides: Partial<StatusBarState> = {}): StatusBarState {
 }
 
 describe("StatusBar (renderStatusBar)", () => {
+  it.each(["fixed", "auto", "suggest"] as const)("shows the effective %s routing mode", (routing_mode) => {
+    const json = JSON.stringify(renderStatusBar(makeState({ routing_mode })));
+    expect(json).toContain("slot-routing-mode");
+    expect(json).toContain(routing_mode[0].toUpperCase() + routing_mode.slice(1));
+  });
   it("renders a row with data-testid status-bar", () => {
     const el = renderStatusBar(makeState({ provider: "anthropic", model: "claude-3-5-sonnet-latest" })) as any;
     expect(el.props["data-testid"]).toBe("status-bar");
   });
 
-  it("includes slot-provider-model, tier badge, slot-tokens, usd meter slots", () => {
+  it("includes model, current-run usage and a single spend meter", () => {
     const el = renderStatusBar(makeState({ provider: "anthropic", model: "opus", in_tokens: 10, out_tokens: 5 }));
     const json = JSON.stringify(el);
     expect(json).toContain("slot-provider-model");
-    // TierBadge/UsdMeter are function components -- verify by key presence in children
-    expect(json).toContain('"key":"tier"');
     expect(json).toContain("slot-tokens");
     expect(json).toContain('"key":"usd"');
   });
@@ -78,11 +81,10 @@ describe("StatusBar (renderStatusBar)", () => {
     expect(JSON.stringify(el)).toContain("openai/gpt-4o");
   });
 
-  it("renders all 5 slots + degraded when degraded=true", () => {
+  it("retains identity, usage and spend when degraded", () => {
     const el = renderStatusBar(makeState({ degraded: true }));
     const json = JSON.stringify(el);
     expect(json).toContain("slot-provider-model");
-    expect(json).toContain('"key":"tier"');
     expect(json).toContain("slot-tokens");
     expect(json).toContain('"key":"usd"');
     expect(json).toContain("slot-degraded");
@@ -91,8 +93,7 @@ describe("StatusBar (renderStatusBar)", () => {
   it("renders separators between slots", () => {
     const el = renderStatusBar(makeState());
     const json = JSON.stringify(el);
-    // Should have ' | ' separators
-    expect(json).toContain(" | ");
+    expect(json).toContain(" · ");
   });
 
   // B1: sprint progress segment tests
@@ -115,6 +116,38 @@ describe("StatusBar (renderStatusBar)", () => {
     expect(json).toContain("Sprint 2/5");
     expect(json).toContain("3/8 stories");
     expect(json).toContain("37.5%");
+  });
+});
+
+describe("footer priorities", () => {
+  const state = makeState({
+    provider: "fixture-provider",
+    model: "fixture-model",
+    permission_mode: "yolo",
+    routing_mode: "fixed",
+    ctx_pct: 13,
+    in_tokens: 5_200_000,
+    cache_read_tokens: 2_700_000,
+    out_tokens: 165400,
+    session_usd: 2.89,
+    compaction_summary: "8 cmp, 237.0K saved via fixture-helper ⚠ long session — consider /clear",
+  });
+  it("keeps context and cache distinct, including zero hits", () => {
+    const parts = footerSegments({ ...state, cache_read_tokens: 0 }, 80).secondary;
+    expect(parts.map((p) => p.text)).toEqual(["Context 13%", "Cache hit 0%"]);
+  });
+  it("hides auxiliary detail at 80 columns while retaining permission and degraded state", () => {
+    const parts = footerSegments({ ...state, degraded: true }, 80);
+    expect(parts.primary.map((p) => p.text)).toEqual(["DEGRADED", "Yolo"]);
+    expect(parts.secondary.map((p) => p.id)).toEqual(["context", "cache"]);
+  });
+  it("condenses compaction without displaying its helper as the owner or duplicating spend", () => {
+    const json = JSON.stringify(renderStatusBar(state, { width: 180, cwd: "D:/workspace" }));
+    expect(json).toContain("Compact 8 · Long session");
+    expect(json).not.toContain("fixture-helper");
+    expect(json).not.toContain("consider /clear");
+    expect(json.match(/session_usd/g)).toHaveLength(1);
+    expect(json).not.toContain("$2.89"); // spend belongs to the one UsdMeter component
   });
 });
 

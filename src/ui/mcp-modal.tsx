@@ -217,6 +217,8 @@ export function McpBrowserModal({
               <span style={{ fg: t.textMuted }}>{"edit  ·  "}</span>
               <span style={{ fg: t.primary }}>{"ctrl+a "}</span>
               <span style={{ fg: t.textMuted }}>{"add  ·  "}</span>
+              <span style={{ fg: t.primary }}>{"ctrl+o "}</span>
+              <span style={{ fg: t.textMuted }}>{"oauth  ·  "}</span>
               <span style={{ fg: t.primary }}>{"ctrl+x "}</span>
               <span style={{ fg: t.textMuted }}>{"delete"}</span>
             </text>

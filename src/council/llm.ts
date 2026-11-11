@@ -18,6 +18,7 @@ import { loadKeyForProvider, ProviderKeyMissingError } from "../providers/keycha
 import {
   createProviderFactoryAsync,
   detectProviderForModel,
+  hasProviderFactory,
   type ResolvedModelRuntime,
   resolveMaxOutputTokensParam,
   resolveModelRuntime,
@@ -75,6 +76,8 @@ import type {
  * is swallowed; unexpected errors propagate.
  */
 async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<void> {
+  // Keep the host's subscription/API selection and any bounded fallback latch.
+  if (hasProviderFactory(providerId)) return;
   let apiKey: string | undefined;
   try {
     apiKey = await loadKeyForProvider(providerId);
@@ -100,7 +103,7 @@ async function ensureCouncilFactoryUnbounded(providerId: ProviderId): Promise<vo
  * mutex) ran with NO bound at all — ahead of, and separate from, the deadline
  * signal `generate()`/`debate()`/`research()` combine further down via
  * `withTimeoutSignal`. A stuck refresh or a held mutex therefore hung the
- * ENTIRE call regardless of the caller's own deadline: e.g. the GSD
+ * ENTIRE call regardless of the caller's own deadline: e.g. the FLOW
  * complexity-assessor's `AbortSignal.timeout(PIL_GATE_DEADLINE_MS=2500)`
  * never even started ticking while this awaited.
  *
@@ -560,6 +563,8 @@ async function collectStreamText(args: {
   prepareStep?: (opts: { stepNumber: number; messages: readonly unknown[] }) => unknown;
   /** Called with the char length of every text/reasoning delta as it arrives. */
   onDelta?: (chars: number) => void;
+  /** Host-only durable capture, awaited before advancing the stream. */
+  onToolResult?: (result: import("./types.js").CouncilToolResult) => void | Promise<void>;
 }): Promise<{
   text: string;
   usage?: unknown;
@@ -594,8 +599,8 @@ async function collectStreamText(args: {
   let reasoningText = "";
   let usage: unknown;
   let finishReason: string | undefined;
-  const toolCalls: Array<{ toolName: string; input?: unknown; result?: unknown }> = [];
-  const byId = new Map<string, { toolName: string; input?: unknown; result?: unknown }>();
+  const toolCalls: Array<{ toolCallId: string; toolName: string; input?: unknown; result?: unknown }> = [];
+  const byId = new Map<string, (typeof toolCalls)[number]>();
   try {
     for await (const part of result.fullStream) {
       // Re-arm on EVERY chunk (including reasoning-delta and step boundaries):
@@ -619,7 +624,7 @@ async function collectStreamText(args: {
         }
         case "tool-call": {
           const p = part as { toolCallId: string; toolName: string; input?: unknown };
-          const tc = { toolName: p.toolName, input: p.input };
+          const tc = { toolCallId: p.toolCallId, toolName: p.toolName, input: p.input };
           byId.set(p.toolCallId, tc);
           toolCalls.push(tc);
           break;
@@ -627,7 +632,29 @@ async function collectStreamText(args: {
         case "tool-result": {
           const p = part as { toolCallId: string; output?: unknown };
           const tc = byId.get(p.toolCallId);
-          if (tc) tc.result = p.output;
+          if (tc) {
+            tc.result = p.output;
+            await args.onToolResult?.({
+              toolCallId: p.toolCallId,
+              toolName: tc.toolName,
+              input: tc.input,
+              output: p.output,
+            });
+          }
+          break;
+        }
+        case "tool-error": {
+          const p = part as { toolCallId: string; error: unknown };
+          const tc = byId.get(p.toolCallId);
+          if (tc) {
+            tc.result = { error: p.error instanceof Error ? p.error.message : String(p.error) };
+            await args.onToolResult?.({
+              toolCallId: p.toolCallId,
+              toolName: tc.toolName,
+              input: tc.input,
+              output: tc.result,
+            });
+          }
           break;
         }
         case "finish":
@@ -737,11 +764,28 @@ function recordCouncilProviderFailure(args: {
  */
 export const __testRecordCouncilProviderFailure = recordCouncilProviderFailure;
 
+/**
+ * The BashTool a council member's tools run on: a throwaway fork of the
+ * session's, never the session's own (see {@link BashTool.fork}).
+ *
+ * `workerScope: true` — a council member is a secondary agent on a machine it
+ * shares with the main session's dev servers and builds. workerScope refuses
+ * shell process termination (`taskkill`/`kill`/`pkill`/`Stop-Process`, build-
+ * server shutdown, `nuget locals --clear`, also nested through `bash -c`),
+ * which would act on PIDs the member does not own. Research reads and probes;
+ * it does not need process control, and workerScope leaves `cd`, builds and
+ * tests alone, so it costs no legitimate capability.
+ */
+function councilBashFork(bash: BashTool): BashTool {
+  return bash.fork({ workerScope: true });
+}
+
 export function createCouncilLLM(
   bash: BashTool,
   mode: AgentMode,
   sessionId: string | undefined,
   stats: CouncilStats,
+  onToolResult?: import("./types.js").CouncilToolEvidenceSink,
 ): CouncilLLM {
   // Stamp every subsequent breadcrumb with this session so a crash trail can be
   // tied back to the run in interaction_logs / usage_events.
@@ -1019,7 +1063,9 @@ export function createCouncilLLM(
       let mcpBundleForDebate: McpToolBundle | null = null;
       if (options?.enableVerificationTools) {
         try {
-          const builtins = createTools(bash, mode);
+          // Fork (not the session's tool): a council tool must never move the
+          // caller's BashTool cwd. See BashTool.fork and councilBashFork.
+          const builtins = createTools(councilBashFork(bash), mode);
           // Strict allowlist — NO bash/edit/write/task in debate verification.
           const ALLOWED = new Set(["grep", "read_file"]);
           const filtered: ToolSet = {};
@@ -1092,6 +1138,7 @@ export function createCouncilLLM(
                   // reasoning model runs near the 5-min ceiling, and the tick
                   // generator is not being pumped while Promise.all awaits.
                   onDelta: noteCouncilStreamDelta,
+                  onToolResult: onToolResult && ((result) => onToolResult({ ...result, modelId, phase: "debate" })),
                   ...(verificationTools && Object.keys(verificationTools).length > 0
                     ? {
                         tools: verificationTools,
@@ -1228,14 +1275,24 @@ export function createCouncilLLM(
       // must report the identical budget.
       const researchMaxOut = maxOutSpread(runtime, 4096);
 
-      const builtinTools = createTools(bash, mode);
+      // Per-call fork — research carries the FULL builtin set including bash, and
+      // a member's `cd` must not move the session's shared BashTool (session
+      // 7b2886c90a51: cwd_last ended in a sibling `probe/` project). Owned by this
+      // call: cleaned up in `finally` so its background processes die with it.
+      const researchBash = councilBashFork(bash);
+      const builtinTools = createTools(researchBash, mode);
 
       // CQ-03: Lazy MCP bundle per research call — fail-open so builtins remain available
       let mcpBundle: McpToolBundle | null = null;
       try {
         mcpBundle = await buildMcpToolSet(loadMcpServers());
-      } catch {
-        // MCP spawn failed — research continues with builtin tools only
+      } catch (err) {
+        // MCP spawn failed — research continues with builtin tools only, but a
+        // silent swallow hid which server failed and why. (No-Silent-Catch.)
+        console.error(
+          `[council/llm] research MCP tool discovery failed, continuing with builtins only: ${err instanceof Error ? err.message : String(err)}`,
+          { modelId, provider: providerId },
+        );
       }
 
       const mergedResearchTools: ToolSet = { ...builtinTools, ...(mcpBundle?.tools ?? {}) };
@@ -1314,6 +1371,7 @@ export function createCouncilLLM(
                     return t === undefined ? {} : { temperature: t };
                   })(),
                   onDelta: noteCouncilStreamDelta,
+                  onToolResult: onToolResult && ((result) => onToolResult({ ...result, modelId, phase: "research" })),
                   // maxRetries:0 is baked into collectStreamText. Visible retry
                   // (src/utils/visible-retry.ts) replaces the SDK's silent
                   // exponential backoff (2,4,8,16,32s) so a SiliconFlow 429 reads
@@ -1440,6 +1498,12 @@ export function createCouncilLLM(
         );
       } finally {
         await mcpBundle?.close().catch(() => {});
+        await researchBash.cleanup().catch((err: unknown) => {
+          console.error(
+            `[council/llm] research bash fork cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+            { modelId },
+          );
+        });
       }
     },
   };

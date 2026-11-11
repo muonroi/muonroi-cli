@@ -18,6 +18,9 @@ export const defaultRunner: Runner = {
     const { runSelfVerify } = await import("../self-qa/index.js");
     return runSelfVerify({
       baseRef: opts.since,
+      cwd: opts.cwd,
+      diffFilesOverride: opts.files,
+      mockLlmDir: opts.mockLlmDir,
       maxScenarios: opts.max,
       emitSpecs: opts.emit,
       specOutDir: opts.out,
@@ -27,7 +30,14 @@ export const defaultRunner: Runner = {
   async agentic(opts, log) {
     const { createLLMBrain, runAgenticLoop } = await import("../self-qa/agentic-loop.js");
     const brain = await createLLMBrain({ modelId: opts.llm });
-    return runAgenticLoop({ goal: opts.goal, brain, maxTurns: opts.turns ?? 20, mockLlmDir: opts.mockLlmDir, log });
+    return runAgenticLoop({
+      goal: opts.goal,
+      brain,
+      cwd: opts.cwd,
+      maxTurns: opts.turns ?? 20,
+      mockLlmDir: opts.mockLlmDir,
+      log,
+    });
   },
 };
 

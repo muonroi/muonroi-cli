@@ -212,10 +212,34 @@ export function parseIdealArgs(args: string[]): IdealParseResult {
     .option("--budget-tokens <N>", "ignored — /ideal has no token budget")
     .exitOverride(); // never call process.exit on parse error
 
+  // The idea is free-form prose that often QUOTES commands: "/ideal … bunx tsc
+  // --noEmit pass …" was rejected as "error: unknown option '--noEmit'" and the
+  // run never started (bench run ideal4-ee-local-20261110-081950, $0 in 10 min).
+  // So only /ideal's OWN flags are taken out — anywhere, since "/ideal <idea>
+  // --max-sprints 1 --force-council" is the established form (harness specs) —
+  // and every other token, `--`-prefixed or not, stays in the idea in order. The
+  // idea goes after `--`, so commander never reads it as options.
+  const known = new Map<string, boolean>(); // long flag -> takes a value
+  for (const o of program.options) if (o.long) known.set(o.long, o.required || o.optional);
+  const optionTokens: string[] = [];
+  const ideaTokens: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const token = args[i]!;
+    const eq = token.indexOf("=");
+    const name = token.startsWith("--") && eq > 0 ? token.slice(0, eq) : token;
+    const takesValue = known.get(name);
+    if (takesValue === undefined) {
+      ideaTokens.push(token);
+      continue;
+    }
+    optionTokens.push(token);
+    if (takesValue && eq < 0 && i + 1 < args.length) optionTokens.push(args[++i]!);
+  }
+
   // commander expects a leading argv with [node, script, ...args]; we synthesize.
   let parsed: ReturnType<typeof program.parse>;
   try {
-    parsed = program.parse(args, { from: "user" });
+    parsed = program.parse([...optionTokens, "--", ...ideaTokens], { from: "user" });
   } catch (err: any) {
     // Surface parse error as help-with-error so the slash handler returns text
     // rather than crashing the host process.

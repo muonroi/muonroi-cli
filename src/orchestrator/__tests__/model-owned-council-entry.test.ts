@@ -16,12 +16,16 @@ describe("leader owns council entry", () => {
     vi.spyOn(settings, "isAutoCouncilClarifyEnabled").mockReturnValue(false);
     let councils = 0;
     let leaderTurns = 0;
+    const startCouncil = vi.fn(async () => ({ success: true, output: "Unexpected background council" }));
     const controller = new AbortController();
     const deps = {
       messages: [],
       session: null,
+      executionRole: "orchestrator" as const,
+      bash: { getCwd: () => process.cwd() },
       modelId: "test-model",
       batchApi: true,
+      startCouncil,
       getAbortController: () => controller,
       setAbortController: () => {},
       councilManager: {
@@ -55,13 +59,14 @@ describe("leader owns council entry", () => {
         taskType: "plan",
         confidence: 1,
         complexityTier: "heavy",
-        gsdAutoCouncil: true,
+        flowAutoCouncil: true,
       },
       userModelMessage: { role: "user", content: "Review the architecture" },
     })) {
       /* drain */
     }
     expect(councils).toBe(0);
+    expect(startCouncil).not.toHaveBeenCalled();
     expect(leaderTurns).toBe(1);
   });
 });

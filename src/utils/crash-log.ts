@@ -17,9 +17,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { redactSecrets } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 
 /**
  * True while the interactive TUI owns the terminal. Read from the same
@@ -38,12 +38,12 @@ function isTuiActive(): boolean {
 
 /** Resolved per call so a test can point HOME at a temp dir. */
 function crashLogPath(): string {
-  return path.join(os.homedir(), ".muonroi-cli", "crash.log");
+  return path.join(muonroiHome(), "crash.log");
 }
 
 export function appendCrashLog(label: string, msg: string): void {
   try {
-    const dir = path.join(os.homedir(), ".muonroi-cli");
+    const dir = muonroiHome();
     // On a genuinely fresh HOME the directory does not exist yet, and
     // appendFileSync throws ENOENT — which the old bare catch swallowed, so the
     // FIRST crash a new user or agent ever hits was the one crash that left no

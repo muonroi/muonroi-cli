@@ -1,0 +1,459 @@
+{
+  "capturedAt": "2026-10-17T08:22:29.204550+00:00",
+  "deployment": {
+    "startedAt": "2026-10-17T08:18:15.425Z",
+    "old": "2187ba68b681a86a956b782859baa05908a9d221",
+    "revision": "cddb6fc1f07a461f640138059e44868801e4e1b0",
+    "backup": "/home/phila/.experience/config.json.generic-scope-backup-2026-10-17T08-18-15-424Z",
+    "node22Tests": "  type: 'test'\n  ...\n1..8\n# tests 8\n# suites 0\n# pass 8\n# fail 0\n# cancelled 0\n# skipped 0\n# todo 0\n# duration_ms 163.889061\n",
+    "service": "MainPID=1466551\nActiveState=active\n",
+    "onlyRemovedOneOffRegistration": true,
+    "patterns": [
+      "storyflow",
+      "storyflow_ui",
+      "quick-codex",
+      "experience-engine",
+      "muonroi-cli",
+      "muonroi-control-plane",
+      "muonroi-license-server",
+      "muonroi-building-block",
+      "muonroi-ui-engine"
+    ],
+    "installCommit": "cddb6fc1f07a",
+    "head": "cddb6fc1f07a461f640138059e44868801e4e1b0",
+    "clean": true,
+    "finishedAt": "2026-10-17T08:18:16.561Z"
+  },
+  "before": {
+    "startedAt": "2026-10-17T08:13:46.140Z",
+    "boundary": "Fresh native client and actual configured EE; genuine fresh local Git repo/marker project never registered; no lessons written or model generation",
+    "fixture": {
+      "base": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx",
+      "project": "probe-77c554f4-64f",
+      "gitRoot": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\checkout",
+      "nested": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\checkout\\src\\nested",
+      "nongitRoot": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\marker-e43140ea",
+      "nongitProject": "marker-e43140ea"
+    },
+    "requests": [
+      {
+        "status": 400,
+        "elapsedMs": 73,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+          "project": "probe-77c554f4-64f"
+        },
+        "project": null,
+        "strict": true,
+        "scope": null,
+        "count": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      },
+      {
+        "status": 400,
+        "elapsedMs": 42,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout/src/nested",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+          "project": "probe-77c554f4-64f"
+        },
+        "project": null,
+        "strict": true,
+        "scope": null,
+        "count": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      },
+      {
+        "status": 400,
+        "elapsedMs": 42,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea/src",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea",
+          "project": "marker-e43140ea"
+        },
+        "project": null,
+        "strict": true,
+        "scope": null,
+        "count": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      },
+      {
+        "status": 400,
+        "elapsedMs": 44,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/absent",
+        "repository": null,
+        "project": null,
+        "strict": true,
+        "scope": null,
+        "count": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      }
+    ],
+    "results": [
+      {
+        "label": "new-git-root",
+        "status": 400,
+        "project": null,
+        "count": null,
+        "verified": false,
+        "required": true
+      },
+      {
+        "label": "new-git-nested",
+        "status": 400,
+        "project": null,
+        "count": null,
+        "verified": false,
+        "required": true
+      },
+      {
+        "label": "new-marker-project",
+        "status": 400,
+        "project": null,
+        "count": null,
+        "verified": false,
+        "required": true
+      },
+      {
+        "label": "invalid-nonexistent-cwd",
+        "status": 400,
+        "project": null,
+        "count": null,
+        "verified": false,
+        "required": true
+      }
+    ],
+    "checks": {},
+    "finishedAt": "2026-10-17T08:13:46.364Z"
+  },
+  "after": {
+    "startedAt": "2026-10-17T08:18:59.081Z",
+    "boundary": "Fresh native client and actual configured EE; genuine fresh local Git repo/marker project never registered; no lessons written or model generation",
+    "fixture": {
+      "base": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx",
+      "project": "probe-77c554f4-64f",
+      "gitRoot": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\checkout",
+      "nested": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\checkout\\src\\nested",
+      "nongitRoot": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\marker-e43140ea",
+      "nongitProject": "marker-e43140ea",
+      "nestedSeparateRoot": "D:\\sources\\Core\\muonroi-cli\\.scratch\\ee-generic-scope\\nested-under-registered-parent",
+      "nestedSeparateProject": "nested-958a1bfd-683"
+    },
+    "requests": [
+      {
+        "status": 200,
+        "elapsedMs": 6663,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+          "project": "probe-77c554f4-64f"
+        },
+        "project": null,
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "probe-77c554f4-64f",
+          "policy": "project-only",
+          "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+          "repository": {
+            "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+            "project": "probe-77c554f4-64f"
+          }
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsedMs": 10072,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout/src/nested",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+          "project": "probe-77c554f4-64f"
+        },
+        "project": null,
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "probe-77c554f4-64f",
+          "policy": "project-only",
+          "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout/src/nested",
+          "repository": {
+            "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout",
+            "project": "probe-77c554f4-64f"
+          }
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsedMs": 4640,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea/src",
+        "repository": {
+          "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea",
+          "project": "marker-e43140ea"
+        },
+        "project": null,
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "marker-e43140ea",
+          "policy": "project-only",
+          "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea/src",
+          "repository": {
+            "root": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/marker-e43140ea",
+            "project": "marker-e43140ea"
+          }
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsedMs": 8582,
+        "cwd": "D:/sources/Core/muonroi-cli/.scratch/ee-generic-scope/nested-under-registered-parent",
+        "repository": {
+          "root": "D:/sources/Core/muonroi-cli/.scratch/ee-generic-scope/nested-under-registered-parent",
+          "project": "nested-958a1bfd-683"
+        },
+        "project": null,
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "nested-958a1bfd-683",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/muonroi-cli/.scratch/ee-generic-scope/nested-under-registered-parent",
+          "repository": {
+            "root": "D:/sources/Core/muonroi-cli/.scratch/ee-generic-scope/nested-under-registered-parent",
+            "project": "nested-958a1bfd-683"
+          }
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsedMs": 4612,
+        "cwd": "D:/sources/Core/extension/ai-dock",
+        "repository": {
+          "root": "D:/sources/Core/extension/ai-dock",
+          "project": "ai-dock"
+        },
+        "project": null,
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "ai-dock",
+          "policy": "project-only",
+          "cwd": "D:/sources/Core/extension/ai-dock",
+          "repository": {
+            "root": "D:/sources/Core/extension/ai-dock",
+            "project": "ai-dock"
+          }
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 200,
+        "elapsedMs": 9116,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout/src/nested",
+        "repository": null,
+        "project": "muonroi-cli",
+        "strict": true,
+        "scope": {
+          "strict": true,
+          "project": "muonroi-cli",
+          "policy": "project-only",
+          "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/checkout/src/nested"
+        },
+        "count": 0,
+        "error": null
+      },
+      {
+        "status": 400,
+        "elapsedMs": 40,
+        "cwd": "~/AppData/Local/Temp/ee-generic-live-lAiWzx/absent",
+        "repository": null,
+        "project": null,
+        "strict": true,
+        "scope": null,
+        "count": null,
+        "error": "Cannot resolve a concrete project for strict recall; pass project_slug from /api/projects"
+      }
+    ],
+    "results": [
+      {
+        "label": "new-git-root",
+        "status": 200,
+        "project": "probe-77c554f4-64f",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "new-git-nested",
+        "status": 200,
+        "project": "probe-77c554f4-64f",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "new-marker-project",
+        "status": 200,
+        "project": "marker-e43140ea",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "nested-separate-repo-under-cli",
+        "status": 200,
+        "project": "nested-958a1bfd-683",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "ai-dock-without-registration",
+        "status": 200,
+        "project": "ai-dock",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "explicit-cli-target",
+        "status": 200,
+        "project": "muonroi-cli",
+        "count": 0,
+        "verified": true,
+        "required": false
+      },
+      {
+        "label": "invalid-nonexistent-cwd",
+        "status": 400,
+        "project": null,
+        "count": null,
+        "verified": false,
+        "required": true
+      }
+    ],
+    "checks": {
+      "new-git-root": true,
+      "new-git-nested": true,
+      "new-marker-project": true,
+      "nested-separate-repo-under-cli": true,
+      "ai-dock-without-registration": true,
+      "explicit-cli-target": true,
+      "invalid-nonexistent-cwd": true,
+      "configuredHealth": true
+    },
+    "health": {
+      "ok": true,
+      "status": 200,
+      "check": "reachability",
+      "endpoint": "http://72.61.127.154:8082/health",
+      "recallReady": "not_checked",
+      "scope": {
+        "cwd": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\absent",
+        "source": "cwd"
+      },
+      "lastRecall": {
+        "state": "project_required",
+        "checkedAt": "2026-10-17T08:19:42.973Z",
+        "cwd": "C:\\Users\\phila\\AppData\\Local\\Temp\\ee-generic-live-lAiWzx\\absent"
+      }
+    },
+    "finishedAt": "2026-10-17T08:19:43.022Z"
+  },
+  "verification": {
+    "cli": {
+      "passed": 62,
+      "files": 6
+    },
+    "ee": {
+      "main": 535,
+      "runtimePassed": 534,
+      "runtimeSkipped": 9,
+      "tools": 111,
+      "failed": 0
+    },
+    "buildExit": 0,
+    "nativeControls": {
+      "settingsHomeIsIsolated": true,
+      "nativeFtsPreflight": true,
+      "completeProposalEnvelope": true,
+      "truncatedProposalRejected": true,
+      "ambiguousProposalRejected": true,
+      "lspStubHasRealPreviewGuidance": true,
+      "healthDoesNotClaimRecallReadiness": true,
+      "defaultProjectPinPreserved": true,
+      "routeStatusShowsPin": true,
+      "routeStatusDoesNotWrite": true,
+      "explicitSuggestKeepsBaselineSetting": true,
+      "autoUsesSameProviderCheaperTier": true,
+      "suggestKeepsBaselineAndReportsCandidate": true,
+      "cachedSuggestRechecksCap": true,
+      "liveTuiModeCommandAndStatus": true,
+      "nativeSelfverifyRebuiltMcpBootAndStatus": true
+    },
+    "selfverifyRun": "d2690cac-8f76-4df7-8468-4d0834d7e0c1",
+    "selfverify": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "limits": [
+    "No full CLI suite",
+    "No paid model generation",
+    "Existing user CLI not restarted",
+    "No latency/relevance improvement claim",
+    "Repository context is an authenticated client assertion, not remote filesystem verification"
+  ],
+  "sha256": {
+    "src/ee/project-identity.ts": "622c16ebef83ab28e43d1a557ded996fc3e6a57854dc456c46054f6f38045d05",
+    "src/ee/project-identity.test.ts": "8ec29cea89409aaebc5aa2667db77c08795d35681ff203d54540ba88b42672cd",
+    "src/ee/client.ts": "6750c972a8d48c1fa2a745c5e78bee04320def103e257ae38b55fac83875c075",
+    "src/ee/search.ts": "0a57f21322f33632c35051f3ee4f13a7a959c290a8d896d55012d0d0b4f80dc7",
+    "src/ee/types.ts": "490605690e0e3bdb16480875cabf4fb09cc66e207f5aa63d2b269eb78d853bb8",
+    "src/ee/recall-scope.test.ts": "6334aa943878f90f1e5478c269ae3da1a59d301c2712f453a29dd58bd094d761",
+    "src/tools/native-ee-context.test.ts": "11395cdffbb6141741a8a6bc3904cdee44a0f1710361fbab020f001e6ddcddc1",
+    "src/ui/utils/delegation-display.ts": "44c5baff65a3d237a65d708c6d2376135b41494fae46c9850953baabfa7f02a2",
+    "src/ui/utils/__tests__/delegation-display.test.ts": "5d7812f8d9eb4fd09f546112b2baab973002078cef36a16c3fd345a0cb332d90",
+    "src/ui/components/message-view.tsx": "b51ca142458b9421c46c9963ba94fa2d5b395f034ad40f91a138761da16ec247",
+    "src/ui/components/tool-result-views.tsx": "89bc1e275c7731db03eccaaf5558f631c9d54776646774fcf96ffb79f4b0d2c5",
+    "dist/src/ee/project-identity.js": "a05dc7e897ef6b7a2cf4905d650bb0e5fda057291d39625aa1021ef25938467a",
+    "dist/src/ee/client.js": "eec45aa8e2d199dfaec358b708ae1b5b431154982abe662eee35044ce58e68b8",
+    "dist/src/ee/search.js": "af73bdc07df30ff7517a7007157fd9acae884f3eec8d964992204b8d078d109a",
+    "docs/investigations/ee-generic-repository-scope-2026-10-17.md": "9cc07b2a004e1f97ab62fd6f7ccccdd995afc91fe11bdad1f88595021be597e0",
+    ".scratch/ee-generic-scope/deployment.json": "aa1889532a26d2648cd96f6cd787d8a1e121af425f1fdfb148061b093792f70d",
+    ".scratch/ee-generic-scope/live-before.json": "31016df82333241aeeca09fb009a0b8d579ddb3fc51d98fb8a9ea04f6f050612",
+    ".scratch/ee-generic-scope/live-after.json": "1d02f66d8ef62d1bc698b8fc35d7dc99f0b91952533191adc921c132d77e2fd9",
+    ".scratch/ee-generic-scope/cli-red.log": "8a77c1515efb1a6d152ccbc833a556f242f21233029a2fdfcc4669b0d56c2621",
+    ".scratch/ee-generic-scope/ee-red.log": "c856383ef5d5cf80fa403f15058e2424021d956dd92883ddabc768db39c1ce15",
+    ".scratch/ee-generic-scope/cli-accepted.log": "0a44850539be7cc3b549102044b7fa7f73f59a5525c46f4d4057c593ae36f2d3",
+    ".scratch/ee-generic-scope/ee-full-tests.log": "60c5e709d3eaa10fa8b5ad2cf4df6a2897b3a494a020fd7b3cf3fede9afaad74",
+    ".scratch/ee-generic-scope/ee-unit-tests.log": "0c527193983739e841b66c66cd925439c4af4196ad870aad8b8e6b0a16602ce0",
+    ".scratch/ee-generic-scope/ee-tools-tests.log": "d25c18f20364800e6b3269da84521a49b7bea1b7dee1f26537f7e0e3dd8a6339",
+    ".scratch/ee-generic-scope/build.log": "09257bdcfd2d53ddd675dc6528c8049727a49bf12ea220e45a3563ecbacc945e",
+    ".scratch/ee-generic-scope/compiled-controls.json": "5e372c79511dbbd434aed3d8b62c8f21129c57f82ad007d7531faba6a3960eae",
+    ".scratch/ee-generic-scope/live-probe.mjs": "e2f8d152517bff5e1e40ef2ce51b5e2bf5bcc6344be6f9c5ff2b470ec39339b6",
+    ".scratch/ee-generic-scope/deploy.mjs": "0d07e14ba3bd49930ad9d156b53ab58e75e1682017a1e59c1995eb651be3f9aa",
+    ".scratch/delegation-display/compiled-tui.json": "e1289c8fe9d9fcfef3fdf9d7ed1c5af00334a85dd001aea8951109f204f0a38b"
+  },
+  "eeSourceSha256": {
+    "api/handlers/knowledge.js": "6c00fd54e66b820156f0f533d610163f3b694da34e9b0bd5a702048ec7fbac36",
+    "lib/repository-context.js": "cb4d0dbe126aedd71cc015dd817d89050ee19c37f66ac74311c8f7bccdf174b4",
+    "tests/recall-strict-project.test.js": "4ee98d4154c430888a0b3d0b293e8a3f7fd664f1690372562c93d2bd0cc3024f",
+    "tests/repository-context.test.js": "cde7c3f43451e5610516e505d14c935bc69d332fdc43cf23208923228c01380f",
+    "docs/openapi.yaml": "6e7a11c8c92dbd280ab9bfd957f819416bbedd5269bf4b4922ecd067887871fa",
+    "REPO_DEEP_MAP.md": "393212255f07f55ad1512bc930ae27c7291e067513c2fec8794b120e6e7ecc1c"
+  }
+}

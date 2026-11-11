@@ -6,9 +6,9 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import lockfile from "proper-lockfile";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 /**
  * Optional cost-attribution metadata. Lets `usage report --by callsite|role|phase`
@@ -39,12 +39,12 @@ export interface ProductLedgerEntry extends CostMeta {
   provider: string;
 }
 
-function muonroiHome(homeOverride?: string): string {
-  return homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(homeOverride?: string): string {
+  return homeOverride ?? muonroiHome();
 }
 
 function getProductLedgerPath(productRunId: string, homeOverride?: string): string {
-  return path.join(muonroiHome(homeOverride), "usage", "products", `${productRunId}.jsonl`);
+  return path.join(resolveHome(homeOverride), "usage", "products", `${productRunId}.jsonl`);
 }
 
 async function ensureDirectory(filePath: string): Promise<void> {

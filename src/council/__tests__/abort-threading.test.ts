@@ -94,6 +94,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -140,6 +141,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -183,6 +185,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -219,6 +222,7 @@ describe("createCouncilLLM.generate — honours the parent abort signal", () => 
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -286,6 +290,7 @@ describe("planDebate — forwards signal to the direct generateObject attempt", 
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),

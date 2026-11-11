@@ -39,6 +39,7 @@ import {
   isHeadlessOutputFormat,
   renderHeadlessPrelude,
 } from "./headless/output";
+import { executeEventHooks } from "./hooks/index.js";
 import { loadCatalog, normalizeModelId } from "./models/registry.js";
 // Plan 00-07: boot-order modules — AbortContext + PendingCallsLog (TUI-01, TUI-03, TUI-04).
 import { createAbortContext } from "./orchestrator/abort.js";
@@ -59,10 +60,12 @@ import { loadConfig } from "./storage/config.js";
 import { loadUsage } from "./storage/usage-cap.js";
 import { startScheduleDaemon } from "./tools/schedule";
 import type { StreamChunk } from "./types/index.js";
+import { setCostLogAttribution } from "./usage/cost-log.js";
 import { processAtMentions } from "./utils/at-mentions.js";
 import { runScriptManagedUninstall } from "./utils/install-manager";
-import type { PermissionMode } from "./utils/permission-mode.js";
-import { getApiKey, getBaseURL, getCurrentModel, saveUserSettings } from "./utils/settings";
+import { logger } from "./utils/logger.js";
+import { type PermissionMode, parsePermissionMode } from "./utils/permission-mode.js";
+import { getApiKey, getBaseURL, getCurrentModel, loadUserSettings } from "./utils/settings";
 import { runUpdate } from "./utils/update-checker";
 import { reportRetryNotice, setRetryReporter } from "./utils/visible-retry.js";
 import { buildVerifyPrompt, getVerifyCliError } from "./verify/entrypoint";
@@ -623,9 +626,11 @@ async function startInteractive(
     // (plus a toast) so the driving agent resumes via tui.stop →
     // tui.start({ args: ["--session=<id>"] }). No-op teardown, no process.exit.
     const agentRt = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
-      | { emitEvent?: (e: unknown) => void }
+      | { emitEvent?: (e: unknown) => void; attachRenderer?: (r: unknown) => void }
       | undefined;
-    if (agentRt) {
+    // Normal interactive sessions install an emitEvent-only toast fallback.
+    // Only a real renderer-backed harness owns a driver that must be retained.
+    if (typeof agentRt?.attachRenderer === "function") {
       try {
         agentRt.emitEvent?.({ t: "event", kind: "resume-request", sessionId, ts: Date.now() });
         agentRt.emitEvent?.({
@@ -840,6 +845,8 @@ function collect(value: string, prev: string[]): string[] {
 async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
   let output = "";
   let agent: Agent | undefined;
+  let nativeTask: Awaited<ReturnType<typeof loadDelegation>> | undefined;
+  let success = false;
 
   // The child is detached with stdio ignored, so a `[retry] …` notice (the
   // metered gate's provider rate-limit backoff, or the retry below) written to
@@ -856,17 +863,40 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
 
   try {
     const delegation = await loadDelegation(jobPath);
+    // Worker spend reaches only the cost log (persistSession=false); tag it so
+    // `usage flow-metrics` attributes it exactly instead of by time window.
+    setCostLogAttribution({ parentSessionId: delegation.parentSessionId, delegationId: delegation.id });
+    if (delegation.kind === "task") {
+      nativeTask = delegation;
+      await executeEventHooks(
+        {
+          hook_event_name: "SubagentStart",
+          agent_type: delegation.agent,
+          description: delegation.description,
+          session_id: delegation.parentSessionId,
+          cwd: delegation.cwd,
+        },
+        delegation.cwd,
+      ).catch((err: unknown) => {
+        logger.warn("orchestrator", "Background SubagentStart hook failed", { error: String(err), jobPath });
+      });
+    }
 
-    const baseURL = stringOption(options.baseUrl) || getBaseURL();
-    const explicitModel = stringOption(options.model) || delegation.model;
+    const explicitModel = delegation.modelId || stringOption(options.model) || delegation.model;
     const model = explicitModel ? normalizeModelId(explicitModel) : undefined;
+    if (!model) throw new Error("Background worker model is missing; relaunch with an explicit catalog modelId.");
+    const workerProviderId = detectProviderForModel(model);
+    const baseURL = loadUserSettings().providers?.[workerProviderId]?.baseURL;
 
     // Resolve API key: explicit flag > legacy env/settings.apiKey > per-provider keychain
     // (matches the foreground flow — delegations were previously broken when the user
     // only had a per-provider key in the environment, e.g. deepseek.)
-    let apiKey = stringOption(options.apiKey) || getApiKey();
+    let apiKey =
+      process.env.MUONROI_BACKGROUND_PROVIDER === workerProviderId
+        ? process.env.MUONROI_BACKGROUND_API_KEY || undefined
+        : undefined;
     if (!apiKey) {
-      const modelForResolve = model ?? delegation.model ?? getCurrentModel("agent");
+      const modelForResolve = model;
       const keychainKey = await resolveKeyForModel(modelForResolve);
       if (keychainKey) {
         apiKey = keychainKey;
@@ -885,8 +915,75 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     agent = new Agent(apiKey, baseURL, model, maxToolRounds, {
       persistSession: false,
       batchApi: Boolean(delegation.batchApi ?? options.batchApi === true),
+      sandboxMode: delegation.sandboxMode,
+      sandboxSettings: delegation.sandboxSettings,
+      executionRole: delegation.kind === "council" ? "infrastructure" : "worker",
+      authMode:
+        process.env.MUONROI_BACKGROUND_PROVIDER === workerProviderId &&
+        process.env.MUONROI_BACKGROUND_AUTH_MODE === "api-key"
+          ? "api-key"
+          : undefined,
+      reasoningEffort: delegation.reasoningEffort,
+      permissionMode: delegation.permissionMode ?? "safe",
     });
     const childAgent = agent;
+    if (delegation.kind === "council") {
+      if (!delegation.council) throw new Error("Background council is missing its explicit brief.");
+      const brief = delegation.council;
+      let councilError = "";
+      let evidenceError: unknown;
+      for await (const chunk of childAgent.runCouncilV2(
+        `${brief.topic}\n\nReason: ${brief.reason}\n\nContext:\n${brief.context}`,
+        {
+          infrastructure: true,
+          skipClarification: true,
+          skipPil: true,
+          suppressPreDebateCards: true,
+          suppressPostDebate: true,
+          returnOnly: true,
+          synthesisOutputContract: brief.outputContract,
+          onCouncilRecord: async (record) => {
+            try {
+              const { saveDelegationCouncilTrace } = await import("./orchestrator/delegations.js");
+              await saveDelegationCouncilTrace(jobPath, record);
+            } catch (err) {
+              evidenceError = err;
+              logger.error("orchestrator", "Failed to persist detached council participant trace", {
+                jobPath,
+                error: String(err),
+              });
+              throw err;
+            }
+          },
+          onCouncilToolResult: async (result) => {
+            try {
+              const { saveDelegationToolResult } = await import("./orchestrator/delegations.js");
+              await saveDelegationToolResult(jobPath, result.toolCallId, result.toolName, result.input, result.output, {
+                modelId: result.modelId,
+                phase: result.phase,
+              });
+            } catch (err) {
+              evidenceError = err;
+              logger.error("orchestrator", "Failed to persist detached council tool evidence", {
+                jobPath,
+                toolCallId: result.toolCallId,
+                error: String(err),
+              });
+              throw err;
+            }
+          },
+        },
+      )) {
+        if (chunk.type === "error") councilError = chunk.content ?? "Council failed.";
+      }
+      output = childAgent.getCouncilSynthesis()?.trim() ?? "";
+      if (evidenceError) throw evidenceError;
+      if (councilError || !output)
+        throw new Error(councilError || "Council returned an empty synthesis; no advice was saved as successful.");
+      await completeDelegation(jobPath, output);
+      success = true;
+      return;
+    }
     // Same retry wrapper the foreground `task` tool uses (orchestrator runTask).
     // The child used to call runTaskRequest bare, so the transient errors it
     // re-throws (a 429 or a dropped socket before any output) ended the job on
@@ -900,11 +997,25 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
     }
     const result = await withStreamRetry(
       () =>
-        childAgent.runTaskRequest({
-          agent: delegation.agent,
-          description: delegation.description,
-          prompt: delegation.prompt,
-        }),
+        childAgent.runTaskRequest(
+          {
+            agent: delegation.agent,
+            description: delegation.description,
+            prompt: delegation.prompt,
+            maxToolRounds: delegation.maxToolRounds,
+            modelId: delegation.modelId,
+            reasoningEffort: delegation.reasoningEffort,
+            allowedMcpTools: delegation.allowedMcpTools,
+            writeScope: delegation.writeScope,
+            reviewOf: delegation.reviewOf,
+            artifactJobPath: jobPath,
+          },
+          (detail) => {
+            noteDelegationProgress(jobPath, detail).catch((err: unknown) => {
+              logger.warn("orchestrator", "Background task progress write failed", { error: String(err), jobPath });
+            });
+          },
+        ),
       {
         provider,
         onRetry: (info) =>
@@ -923,16 +1034,41 @@ async function runBackgroundDelegation(jobPath: string, options: CliOptions) {
       return;
     }
 
-    await completeDelegation(jobPath, output, result.task?.summary);
+    await completeDelegation(jobPath, output, result.task?.summary, result.reviewEvidence);
+    success = true;
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     try {
       await failDelegation(jobPath, msg, output, { failureKind: delegationFailureKind(err) });
-    } catch {
-      // Best effort — background tasks should fail silently if persistence is unavailable.
+    } catch (persistError: unknown) {
+      logger.error("orchestrator", "Failed to persist background task failure", {
+        jobPath,
+        error: String(persistError),
+      });
     }
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
+    if (nativeTask) {
+      for (const hook_event_name of ["SubagentStop", "TaskCompleted"] as const) {
+        await executeEventHooks(
+          {
+            hook_event_name,
+            agent_type: nativeTask.agent,
+            description: nativeTask.description,
+            success,
+            session_id: nativeTask.parentSessionId,
+            cwd: nativeTask.cwd,
+          },
+          nativeTask.cwd,
+        ).catch((err: unknown) => {
+          logger.warn("orchestrator", "Background task completion hook failed", {
+            error: String(err),
+            jobPath,
+            hook_event_name,
+          });
+        });
+      }
+    }
     setRetryReporter(null);
     await agent?.cleanup();
   }
@@ -964,9 +1100,18 @@ function resolveConfig(options: CliOptions) {
     // Persist to the env-store (per-provider) instead of plaintext settings.json.
     // Fire-and-forget: env-store write is sync; the key is also set in process.env so it
     // works for this run via `apiKey` above and the user can re-supply it next invocation.
-    void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch(() => {});
+    void persistApiKeyToKeychain(options.apiKey, stringOption(options.model)).catch((err: unknown) => {
+      logger.warn("cli", "persisting the --api-key to the env-store failed; it still applies to this run", {
+        operation: "persistApiKeyToKeychain",
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
   }
-  if (typeof options.model === "string") saveUserSettings({ defaultModel: normalizeModelId(options.model) });
+  // `-m/--model` applies to THIS run only. It used to be written to the user's
+  // defaultModel, so a one-off probe (`-p ... -m <model>`, 2026-11-09) silently
+  // switched the default to a model on a disabled provider and every later start
+  // in a repo without a project pin crashed. The persistent default is changed
+  // with /model in the TUI.
 
   return { apiKey, baseURL, model, maxToolRounds };
 }
@@ -995,9 +1140,13 @@ program
   .description("AI coding agent — built with Bun and OpenTUI")
   .version(packageJson.version)
   .argument("[message...]", "Initial message to send")
+  .addHelpText(
+    "after",
+    "\nIn-session features: /council and /ideal. Run `muonroi-cli features [council|ideal]` for entry points. Positional words are prompt text, not command discovery.",
+  )
   .option("-k, --api-key <key>", "API key")
   .option("-u, --base-url <url>", "API base URL")
-  .option("-m, --model <model>", "Model to use")
+  .option("-m, --model <model>", "Model to use for this run (not saved; change the default with /model)")
   .option("-d, --directory <dir>", "Working directory", process.cwd())
   .option("-p, --prompt <prompt>", "Run a single prompt headlessly")
   .option("--verify", "Run the built-in verify flow headlessly")
@@ -1008,8 +1157,8 @@ program
   .option("--batch-api", "Use xAI Batch API for model calls (async, lower cost)")
   .option(
     "--permission <mode>",
-    "Permission mode: safe (confirm all), auto-edit (auto-approve file ops), yolo (auto-approve all)",
-    "safe",
+    "Permission mode: safe, auto (auto-edit), yolo; overrides the saved user choice",
+    parsePermissionMode,
   )
   .option("-y, --yes", "Headless: auto-answer council askcards with their default option and approve preflights")
   .option("--council-answers <file>", "Headless: JSON file with scripted council answers per phase (FIFO)")
@@ -1027,6 +1176,8 @@ program
     "TEST SEAM: render a synthetic sprint-failed recovery card after boot (harness E2E only)",
   )
   .action(async (message: string[], options) => {
+    const { loadUserSettings: permissionSettings } = await import("./utils/settings.js");
+    options.permission = parsePermissionMode(options.permission ?? permissionSettings().permissionMode ?? "safe");
     // Agent-mode: start the sidechannel runtime BEFORE any TUI or model work.
     // The runtime is exposed on globalThis so the renderer wiring (Task 1.6c)
     // can pick it up without a direct import dependency.
@@ -1095,9 +1246,12 @@ program
         // Phase H3 — exfiltrate recordings to a file at exit so the parent
         // vitest spec can assert across the child-process boundary. Activated
         // only when MUONROI_MOCK_MODEL_DUMP is set; otherwise no-op.
-        const dumpPath = process.env.MUONROI_MOCK_MODEL_DUMP;
-        if (typeof dumpPath === "string" && dumpPath.length > 0) {
-          const { dumpRecordings } = await import("./agent-harness/mock-model.js");
+        const dumpBase = process.env.MUONROI_MOCK_MODEL_DUMP;
+        if (typeof dumpBase === "string" && dumpBase.length > 0) {
+          const { dumpRecordings, resolveMockDumpPath } = await import("./agent-harness/mock-model.js");
+          // A background worker inherits the parent's dump env; give it its own
+          // sibling file so it never overwrites the orchestrator's recording.
+          const dumpPath = resolveMockDumpPath(dumpBase, process.env, process.pid);
           let dumped = false;
           const doDump = (): void => {
             if (dumped) return;
@@ -1594,7 +1748,25 @@ keys
     await runChatKeySet(id as any, value);
   });
 
-const usage = program.command("usage").description("Inspect cost ledger and find spend bloat");
+program
+  .command("features")
+  .description("Discover TUI slash commands and native features without running them")
+  .argument("[feature]", "council | ideal")
+  .action(async (feature?: string) => {
+    const { featureGuide } = await import("./cli/features.js");
+    try {
+      console.log(featureGuide(feature));
+    } catch (error) {
+      program.error(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+const usage = program
+  .command("usage")
+  .description("Inspect cost ledger and find spend bloat")
+  .action(() => {
+    usage.outputHelp();
+  });
 
 usage
   .command("report")
@@ -1621,7 +1793,7 @@ usage
 
 usage
   .command("pil")
-  .description("Attribute system-prompt size growth to PIL layers (intent/personality/EE/GSD/context)")
+  .description("Attribute system-prompt size growth to PIL layers (intent/personality/EE/FLOW/context)")
   .option("--date <yyyy-mm-dd>", "Restrict to a single UTC date")
   .option("--top <n>", "Show top N largest prompts", "5")
   .option("--json", "Emit aggregated rows as JSON")
@@ -1644,6 +1816,35 @@ usage
     const { runCostForensics } = await import("./cli/cost-forensics.js");
     await runCostForensics({ prefix: sessionPrefix, json: opts.json });
   });
+
+usage
+  .command("flow-metrics <sessionPrefixes...>")
+  .description(
+    "Orchestrator efficiency for a session + its sub-sessions and worker jobs: time to first implementation write, delegations by purpose, plan-review rounds/verdicts, bookkeeping calls, worker failures, compactions, orchestrator vs worker cost. Read-only.",
+  )
+  .option("--json", "Emit the report as JSON")
+  .option("--home <dir>", "muonroi home holding delegations/ and usage/ (default ~/.muonroi-cli)")
+  .option("--db <path>", "Session database to read (default <home>/muonroi.db); opened read-only")
+  .option("--impl-ext <exts>", "Comma-separated extensions that count as implementation (e.g. .cs,.csproj)")
+  .option("--baseline <sessionPrefix>", "Also print a before/after table of each session against this baseline")
+  .action(
+    async (
+      sessionPrefixes: string[],
+      opts: { json?: boolean; home?: string; db?: string; implExt?: string; baseline?: string },
+    ) => {
+      const { runFlowMetrics } = await import("./cli/flow-metrics.js");
+      await runFlowMetrics(sessionPrefixes, {
+        json: opts.json,
+        baseline: opts.baseline,
+        home: opts.home,
+        db: opts.db,
+        implExtensions: opts.implExt
+          ?.split(",")
+          .map((e) => e.trim())
+          .filter(Boolean),
+      });
+    },
+  );
 
 usage
   .command("experience")
@@ -1678,6 +1879,24 @@ usage
   .action(async (opts: { compare?: string; json?: boolean }) => {
     const { runPerfRegression } = await import("./cli/usage-report.js");
     await runPerfRegression({ compare: opts.compare, json: opts.json });
+  });
+
+const ee = program.command("ee").description("Experience Engine brain helpers");
+ee.command("stop-local")
+  .description(
+    "Stop the local EE brain started by the connect card's 'Set up local brain' (verifies its pid, port and command line before signalling)",
+  )
+  .action(async () => {
+    const os = await import("node:os");
+    const { killLocalBrain } = await import("./ee/local-brain-spawn.js");
+    // Same home the setup used (defaultLocalBrainDeps().resolveUserHome = os.homedir()).
+    const result = await killLocalBrain({ home: os.homedir() });
+    if (result.ok) {
+      console.log(`Stopped the local EE brain (pid ${result.pid}, port ${result.port}).`);
+      return;
+    }
+    console.error(result.error);
+    process.exitCode = 1;
   });
 
 const mcp = program.command("mcp").description("Manage MCP server configuration");

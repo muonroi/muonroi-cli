@@ -1,7 +1,7 @@
 import { createHash } from "crypto";
 
 /**
- * Per-session guard that enforces "read before edit/overwrite" semantics
+ * Per-tool-registry guard that enforces "read before edit/overwrite" semantics
  * (mirrors Claude Code's safety rule). Prevents the LLM from blindly
  * overwriting files whose current content it has not seen — and from
  * stomping on changes another process made between read and write.
@@ -13,7 +13,8 @@ import { createHash } from "crypto";
  *
  * New-file creation is allowed without a prior read (there is nothing to
  * read). After every successful write/edit, the tracker is refreshed so
- * back-to-back edits in the same session keep working.
+ * back-to-back edits in the same tool run keep working. Rebuilding the tool
+ * registry creates a fresh tracker; earlier-turn reads are not restored here.
  */
 export interface ReadRecord {
   hash: string;
@@ -22,8 +23,8 @@ export interface ReadRecord {
 
 export class FileTracker {
   private records = new Map<string, ReadRecord>();
-  // Absolute paths the agent CREATED/MODIFIED via write_file/edit_file this
-  // session. Distinct from `records` (which also holds read-only files). The
+  // Absolute paths the agent CREATED/MODIFIED via write_file/edit_file in this
+  // tool run. Distinct from `records` (which also holds read-only files). The
   // git_commit tool stages exactly these so an agent commit never sweeps the
   // user's unrelated working-tree changes or files the agent merely read.
   private written = new Set<string>();
@@ -38,12 +39,12 @@ export class FileTracker {
     this.written.add(absolutePath);
   }
 
-  /** Absolute paths the agent created or modified via tools this session. */
+  /** Absolute paths the agent created or modified via this registry's tools. */
   writtenPaths(): string[] {
     return [...this.written];
   }
 
-  /** True if the file has been recorded as read this session. */
+  /** True if the file has been recorded as read by this registry. */
   hasRead(absolutePath: string): boolean {
     return this.records.has(absolutePath);
   }
@@ -57,7 +58,8 @@ export class FileTracker {
     if (!rec) {
       return (
         `File must be read first: ${absolutePath}. ` +
-        `Use the read_file tool to load the current content, then retry the edit/write.`
+        `Use read_file to load the current content in this tool run, then retry the edit/write. ` +
+        `Reads from earlier turns may no longer be registered.`
       );
     }
     if (rec.hash !== hashOf(currentContent)) {

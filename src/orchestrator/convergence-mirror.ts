@@ -320,7 +320,12 @@ export function buildConvergenceMirror(messages: MirrorMessage[], opts: Converge
   const minExplore = opts.minExploreForVerdict ?? 3;
   const maxChars = opts.maxNoteChars ?? 600;
 
-  const digests = collectToolCalls(messages);
+  // A prepared SDK context includes earlier user turns. Do not label their
+  // tools as work performed for the current message.
+  let turnStart = messages.length - 1;
+  while (turnStart >= 0 && messages[turnStart]?.role !== "user") turnStart--;
+  const turnMessages = turnStart >= 0 ? messages.slice(turnStart) : messages;
+  const digests = collectToolCalls(turnMessages);
   if (digests.length === 0) return ""; // nothing to mirror yet
 
   // Tally by tool name.
@@ -331,7 +336,7 @@ export function buildConvergenceMirror(messages: MirrorMessage[], opts: Converge
   }
 
   const overlap = conceptOverlap(digests);
-  const sizes = perStepOutputSizes(messages);
+  const sizes = perStepOutputSizes(turnMessages);
   const declining = isDeclining(sizes);
 
   // Verdict — computed, not capped. Engages only past minExplore queries so a

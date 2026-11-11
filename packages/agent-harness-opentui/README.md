@@ -42,7 +42,7 @@ const uninstall = installOpenTUIHarness({ registry, transport, fps: 60 });
 
 - [PROTOCOL.md](../../docs/agent-harness/PROTOCOL.md)
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md)
-- [Verification workflow](../../CLAUDE.md)
+- [Verification workflow](../../docs/agent-harness/HARNESS-GUIDE.md)
 
 ## Migration
 

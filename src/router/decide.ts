@@ -25,6 +25,7 @@ import {
   getRoutingPromoteMax,
   isCouncilMultiProviderPreferred,
   isProviderDisabled,
+  type RoutingMode,
 } from "../utils/settings.js";
 import { classify } from "./classifier/index.js";
 import { adjustPeakHourModel, getRoutedModelByTier } from "./peak-hour.js";
@@ -32,6 +33,11 @@ import { routerStore } from "./store.js";
 import type { RouteDecision } from "./types.js";
 
 export interface DecideOpts {
+  /** Explicit orchestration/worker selection: a spend cap refuses; it never substitutes a model. */
+  refuseModelSubstitution?: boolean;
+  /** Main policy, resolved by its caller. Absent preserves auxiliary routing. */
+  routingMode?: RoutingMode;
+  forcedReason?: string;
   tenantId: string;
   cwd: string;
   threshold?: number;
@@ -71,7 +77,7 @@ export interface DecideOpts {
     domain?: string | null;
     taskType?: string | null;
     confidence?: number;
-    gsdPhase?: string | null;
+    flowPhase?: string | null;
     activeRunId?: string | null;
     recentTurnsSummary?: string | null;
     projectSize?: "small" | "medium" | "large" | null;
@@ -128,7 +134,7 @@ function routeCacheKey(
   if (!pil?.domain && !pil?.taskType) return null;
   // The tier also depends on route history and the previous turn's outcome; a key
   // without them would replay a pre-failure decision and never escalate.
-  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.gsdPhase ?? ""}|${defaultModel ?? ""}|${defaultProvider ?? ""}|${evidence ?? ""}`;
+  return `${pil.domain ?? ""}|${pil.taskType ?? ""}|${pil.flowPhase ?? ""}|${defaultModel ?? ""}|${defaultProvider ?? ""}|${evidence ?? ""}`;
 }
 
 function getCachedRoute(key: string): RouteDecision | null {
@@ -377,10 +383,40 @@ function applyPromotionCap(dec: RouteDecision, defaultModel: string): RouteDecis
  */
 async function capCheck(
   dec: RouteDecision,
-  opts: { homeOverride?: string; defaultModel: string },
+  opts: Pick<
+    DecideOpts,
+    "homeOverride" | "defaultModel" | "defaultProvider" | "routingMode" | "refuseModelSubstitution"
+  >,
   exempt?: boolean,
 ): Promise<RouteDecision> {
   let current = exempt ? { ...dec } : applyPromotionCap({ ...dec }, opts.defaultModel);
+  if (opts.routingMode) {
+    current.routingMode = opts.routingMode;
+    // Explicit main modes never introduce another provider implicitly. Existing
+    // multi-provider opt-in and disabled-provider recovery remain independent.
+    if (
+      current.provider !== opts.defaultProvider &&
+      !isProviderDisabled(opts.defaultProvider as ProviderId) &&
+      !isCouncilMultiProviderPreferred()
+    ) {
+      current = {
+        ...current,
+        model: opts.defaultModel,
+        provider: opts.defaultProvider,
+        reason: `${current.reason} | provider-bound`,
+      };
+    }
+    if (opts.routingMode === "suggest") {
+      current = {
+        ...current,
+        suggestedModel: current.model,
+        suggestedReason: current.reason,
+        model: opts.defaultModel,
+        provider: opts.defaultProvider,
+        reason: "routing-mode-suggest",
+      };
+    }
+  }
   // `/ideal` has no spend limit (user decision): a turn it drives is never
   // downgraded or halted on the monthly cap. The reservation below is a dry run
   // (reserved and released in the same call), so skipping it leaks nothing, and
@@ -410,6 +446,15 @@ async function capCheck(
     });
 
     if (tok instanceof CapBreachError) {
+      if (opts.refuseModelSubstitution) {
+        return {
+          ...current,
+          model: "HALT",
+          tier: "degraded",
+          reason: `${current.reason} | requested-model-cap-refusal`,
+          cap_overridden: true,
+        };
+      }
       const step = downgradeChain(current.model, midstreamPolicy.currentPct());
       emitDowngrade({
         fromModel: current.model,
@@ -511,16 +556,21 @@ async function decideModel(prompt: string, opts: DecideOpts): Promise<RouteDecis
   // model, exactly like every other decision path — see forcedModel's doc
   // comment on DecideOpts. No cache (a fresh cap check every call), no
   // promotion-cap check (exempt: true — moot anyway, dec.model === defaultModel).
-  if (opts.forcedModel) {
-    const provider = detectProviderForModel(opts.forcedModel) ?? opts.defaultProvider;
+  if (opts.forcedModel || opts.routingMode === "fixed") {
+    const model = opts.forcedModel ?? opts.defaultModel;
+    const provider = detectProviderForModel(model) ?? opts.defaultProvider;
     const d: RouteDecision = {
       tier: "hot",
-      model: opts.forcedModel,
+      model,
       provider,
-      reason: "project-model-pin",
+      reason: opts.forcedReason ?? (opts.forcedModel ? "project-model-pin" : "routing-mode-fixed"),
       source: "project-pin",
     };
-    const checked = await capCheck(d, { homeOverride: opts.homeOverride, defaultModel: opts.forcedModel }, true);
+    const checked = await capCheck(
+      d,
+      { ...opts, defaultModel: model, defaultProvider: provider, routingMode: "fixed" },
+      true,
+    );
     routerStore.setState({
       tier: checked.tier,
       lastDecision: checked,
@@ -534,18 +584,21 @@ async function decideModel(prompt: string, opts: DecideOpts): Promise<RouteDecis
     opts.pil,
     opts.defaultModel,
     opts.defaultProvider,
-    `${recentFailures}|${opts.history?.floorTier ?? ""}|${opts.history?.suggestedTier ?? ""}`,
+    `${opts.routingMode ?? "legacy"}|${getRoutingPromoteMax()}|${getRoutingDemoteMin()}|${isCouncilMultiProviderPreferred()}|${recentFailures}|${opts.history?.floorTier ?? ""}|${opts.history?.suggestedTier ?? ""}`,
   );
   if (cacheKey) {
     const cached = getCachedRoute(cacheKey);
-    if (cached) {
+    if (cached && !isProviderDisabled(cached.provider as ProviderId)) {
+      // Cache the model choice, never a budget authorization. Suggest already
+      // contains its served baseline and candidate; do not project it twice.
+      const checked = await capCheck(cached, { ...opts, routingMode: undefined }, true);
       routerStore.setState({
-        tier: cached.tier,
-        lastDecision: cached,
-        taskHash: cached.taskHash ?? null,
-        source: cached.source ?? "cache",
+        tier: checked.tier,
+        lastDecision: checked,
+        taskHash: checked.taskHash ?? null,
+        source: checked.source ?? "cache",
       });
-      return cached;
+      return checked;
     }
   }
 

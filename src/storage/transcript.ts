@@ -1,5 +1,8 @@
 import type { ModelMessage } from "ai";
 import { getCompactionSummaryText } from "../orchestrator/compaction";
+import { isPersistedShrinkSpec, type PersistedShrinkSpec } from "../orchestrator/compaction-budget";
+import { isCompactedToolOutput, isCompactorElisionMarker } from "../orchestrator/subagent-compactor.js";
+import { WORKING_CONTEXT_TAG } from "../orchestrator/working-context.js";
 import { getResponseTaskType, isResponseTool } from "../pil/response-tools";
 import type { ChatEntry, ToolCall, ToolResult } from "../types/index";
 import { logger, redactSecrets } from "../utils/logger.js";
@@ -33,6 +36,7 @@ interface CompactionRow {
   summary: string;
   tokens_before: number;
   created_at: string;
+  shrink_json?: string | null;
 }
 
 interface EffectiveMessageRecord {
@@ -70,6 +74,7 @@ function sanitizeBase64InMessageJson(json: string): string {
  * the rendered view filters them out.
  */
 const INTERNAL_COUNCIL_MARKER_PREFIXES = [
+  `${WORKING_CONTEXT_TAG}\n`,
   "[Debate Transcript]",
   "[Council Round ",
   "[Council Outcome]",
@@ -289,20 +294,41 @@ function sanitizeToolCallPairing<
   return { ...state, messages: outMessages, seqs: outSeqs, timestamps: outTimestamps };
 }
 
+function parseShrinkSpec(row: CompactionRow): PersistedShrinkSpec | undefined {
+  if (!row.shrink_json) return undefined;
+  try {
+    const parsed: unknown = JSON.parse(row.shrink_json);
+    if (isPersistedShrinkSpec(parsed)) return parsed;
+    logger.warn("storage", "Ignoring malformed compaction shrink spec; history loads unshrunk", {
+      sessionId: row.session_id,
+      createdAt: row.created_at,
+    });
+  } catch (err) {
+    logger.warn("storage", "Ignoring unparseable compaction shrink spec; history loads unshrunk", {
+      sessionId: row.session_id,
+      createdAt: row.created_at,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+  return undefined;
+}
+
 function toPersistedCompaction(row: CompactionRow | undefined): PersistedCompaction | null {
   if (!row) return null;
+  const shrink = parseShrinkSpec(row);
   return {
     firstKeptSeq: row.first_kept_seq,
     summary: row.summary,
     tokensBefore: row.tokens_before,
     createdAt: new Date(row.created_at),
+    ...(shrink ? { shrink } : {}),
   };
 }
 
 export function loadLatestCompaction(sessionId: string): PersistedCompaction | null {
   const row = getDatabase()
     .prepare(`
-    SELECT session_id, first_kept_seq, summary, tokens_before, created_at
+    SELECT session_id, first_kept_seq, summary, tokens_before, created_at, shrink_json
     FROM compactions
     WHERE session_id = ?
     ORDER BY id DESC
@@ -316,8 +342,9 @@ export function loadLatestCompaction(sessionId: string): PersistedCompaction | n
 function buildEffectiveMessageRecords(sessionId: string): EffectiveMessageRecord[] {
   const rows = loadMessageRows(sessionId);
   const { messages, seqs, timestamps } = parseMessageRowsSafely(rows);
+  // Display surface: show the canonical suffix, not the model-facing shrunk view.
   const transcript = sanitizeToolCallPairing(
-    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId)),
+    buildEffectiveTranscript(messages, seqs, timestamps, loadLatestCompaction(sessionId), { applyShrink: false }),
   );
 
   return transcript.messages.map((message, index) => ({
@@ -545,6 +572,7 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
     // (loadStoredToolResults would keep only the last anyway, but forensics and
     // row counts must not silently double).
     const deleteToolResults = db.prepare(`DELETE FROM tool_results WHERE tool_call_row_id = ?`);
+    const hasToolResult = db.prepare(`SELECT 1 FROM tool_results WHERE tool_call_row_id = ? LIMIT 1`);
     const updateSession = db.prepare(`
       UPDATE sessions
       SET updated_at = ?
@@ -571,9 +599,13 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
             createdAt,
             createdAt,
           );
+          // Compacted model history is a view, not a replacement for captured evidence.
+          const captured = isCompactorElisionMarker(part.input)
+            ? (selectToolCall.get(sessionId, part.toolCallId) as StoredToolCallRow | undefined)
+            : undefined;
           updateToolCall.run(
-            part.toolName,
-            JSON.stringify(part.input ?? {}),
+            captured?.tool_name ?? part.toolName,
+            captured?.args_json ?? JSON.stringify(part.input ?? {}),
             "completed",
             createdAt,
             sessionId,
@@ -591,6 +623,8 @@ export function appendMessages(sessionId: string, messages: ModelMessage[]): num
             toolCall = selectToolCall.get(sessionId, part.toolCallId) as StoredToolCallRow | undefined;
           }
           if (!toolCall) continue;
+
+          if (isCompactedToolOutput(part.output) && hasToolResult.get(toolCall.id)) continue;
 
           const extracted = extractToolResultFromOutput(part.output);
           deleteToolResults.run(toolCall.id);
@@ -918,7 +952,13 @@ export function markToolCallErrored(sessionId: string, toolCallId: string, error
   }
 }
 
-export function appendCompaction(sessionId: string, firstKeptSeq: number, summary: string, tokensBefore: number): void {
+export function appendCompaction(
+  sessionId: string,
+  firstKeptSeq: number,
+  summary: string,
+  tokensBefore: number,
+  retainedContext?: string,
+): void {
   withTransaction((db) => {
     db.prepare(`
       INSERT INTO compactions (session_id, first_kept_seq, summary, tokens_before, created_at)
@@ -930,6 +970,24 @@ export function appendCompaction(sessionId: string, firstKeptSeq: number, summar
       SET updated_at = ?
       WHERE id = ?
     `).run(new Date().toISOString(), sessionId);
+    // Commit the host-selected working set with the compaction, not only in live memory.
+    if (retainedContext) appendSystemMessage(sessionId, retainedContext);
+  });
+}
+
+/**
+ * Attach the host budget pass's retained-set spec to the newest compaction row
+ * so a reload rebuilds the same bounded history (see PersistedShrinkSpec). The
+ * canonical message rows are not touched.
+ */
+export function setLatestCompactionShrink(sessionId: string, spec: PersistedShrinkSpec): void {
+  withTransaction((db) => {
+    db.prepare(`
+      UPDATE compactions
+      SET shrink_json = ?
+      WHERE session_id = ?
+      AND id = (SELECT MAX(id) FROM compactions WHERE session_id = ?)
+    `).run(JSON.stringify(spec), sessionId, sessionId);
   });
 }
 
@@ -992,7 +1050,15 @@ export function getSessionChain(sessionId: string): string[] {
     }
   }
 
-  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at
+  // 3. Sort chronologically by querying the database for all matched sessions ordered by created_at.
+  // created_at is a millisecond ISO string, so a parent and the child forked
+  // from it in the same millisecond TIE — and SQLite then returns them in its
+  // scan order (the random-hex primary key), putting the child FIRST about half
+  // the time. Every consumer treats chain[0] as the root (buildChatEntries skips
+  // index 0 when reconciling absorbed answers / helper receipts; the resume
+  // transcript concatenates in chain order), so the tie must break by insertion
+  // order: rowid is monotonic on this rowid table, and a child row is always
+  // INSERTed after its parent already exists (createSession, then linkChild).
   let chain: string[] = [];
   try {
     const placeholders = Array.from(allIds)
@@ -1000,9 +1066,9 @@ export function getSessionChain(sessionId: string): string[] {
       .join(",");
     const sortedRows = db
       .prepare(`
-      SELECT id FROM sessions 
-      WHERE id IN (${placeholders}) 
-      ORDER BY created_at ASC
+      SELECT id FROM sessions
+      WHERE id IN (${placeholders})
+      ORDER BY created_at ASC, rowid ASC
     `)
       .all(...Array.from(allIds)) as Array<{ id: string }>;
     chain = sortedRows.map((r) => r.id);
@@ -1124,7 +1190,12 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
           continue;
         }
         if (content) {
-          entries.push({ type: "user", content, timestamp });
+          entries.push({
+            type: "user",
+            content,
+            timestamp,
+            ...(message.providerOptions?.muonroi?.internalActivity === true ? { internal: true } : {}),
+          });
         }
         continue;
       }
@@ -1140,8 +1211,14 @@ export function buildChatEntries(sessionId: string): ChatEntry[] {
         if (content && !isInternalCouncilMarker(content) && !content.startsWith("[Helper receipt:")) {
           entries.push(
             summaryText !== null
-              ? { type: "assistant", content, timestamp, sourceLabel: "⋯ context checkpoint (auto-compacted)" }
-              : { type: "assistant", content, timestamp },
+              ? {
+                  type: "assistant",
+                  content,
+                  timestamp,
+                  internal: true,
+                  sourceLabel: "⋯ context checkpoint (auto-compacted)",
+                }
+              : { type: "assistant", content, timestamp, internal: true },
           );
         }
         continue;
@@ -1344,16 +1421,16 @@ function toFallbackToolCall(toolCallId: string, toolName: string): ToolCall {
 }
 
 /**
- * Did THIS session (or any session in its chain) actually drive a GSD workflow?
+ * Did THIS session (or any session in its chain) actually drive a FLOW workflow?
  *
- * The GSD task list is derived from `.planning/PLAN.md`, which belongs to the
+ * The FLOW task list is derived from `.planning/PLAN.md`, which belongs to the
  * WORKING DIRECTORY, not to a session — every session opened in a repo that
  * once had a plan would otherwise inherit it. That is exactly how resuming a
  * chat that never wrote a todo came back with a pinned checklist of someone
  * else's finished plan. Restoring it is only correct when this conversation is
  * the one running that workflow.
  */
-export function sessionUsedGsdWorkflow(sessionId: string): boolean {
+export function sessionUsedFlowWorkflow(sessionId: string): boolean {
   const chain = getSessionChain(sessionId);
   const db = getDatabase();
   for (const id of chain) {
@@ -1362,13 +1439,13 @@ export function sessionUsedGsdWorkflow(sessionId: string): boolean {
         .prepare(`
           SELECT 1 AS hit
           FROM tool_calls
-          WHERE session_id = ? AND tool_name LIKE 'gsd\\_%' ESCAPE '\\'
+          WHERE session_id = ? AND (tool_name LIKE 'flow\\_%' ESCAPE '\\' OR tool_name LIKE 'gsd\\_%' ESCAPE '\\')
           LIMIT 1
         `)
         .get(id) as { hit: number } | undefined;
       if (row) return true;
     } catch (err) {
-      logger.error("storage", "[transcript] sessionUsedGsdWorkflow query failed", {
+      logger.error("storage", "[transcript] sessionUsedFlowWorkflow query failed", {
         sessionId: id,
         message: (err as Error)?.message,
       });
@@ -1422,6 +1499,164 @@ export function persistApprovedPlan(sessionId: string, planText: string): void {
     `).run(sessionId, toolCallId, planText, now, now);
   } catch {
     /* best-effort persistence; never block the turn */
+  }
+}
+
+/** The `/ideal start` a session's orchestrator is coordinating (see orchestrator/ideal-coordination.ts). */
+export interface PersistedIdealRun {
+  goal: string;
+  /** ISO timestamp; every delegation started at or after it belongs to the run. */
+  startedAt: string;
+  /** Host autopilot state (orchestrator/ideal-autopilot.ts); absent on records written before it existed. */
+  autopilot?: PersistedAutopilot;
+}
+
+/** Why the host stopped starting turns by itself; orchestrator/ideal-autopilot.ts describes each. */
+export const AUTOPILOT_STOP_REASONS = [
+  "complete",
+  "budget_turns",
+  "budget_cost",
+  "budget_wall",
+  "no_progress",
+  "user_message",
+  "user_interrupt",
+  "user_abort",
+  "needs_human",
+  "autowake_off",
+  "error",
+] as const;
+export type AutopilotStopReason = (typeof AUTOPILOT_STOP_REASONS)[number];
+
+/** What the host last observed; progress is any difference between two of these. */
+export interface AutopilotSignals {
+  /** Fingerprint of the working tree (HEAD + every changed file's path/mtime/size). */
+  workspace: string;
+  /** Delegations of the run that were started / that reached a terminal status. */
+  delegationsStarted: number;
+  delegationsFinished: number;
+  /** FLOW phase | plan verified | implementation verification. */
+  flow: string;
+}
+
+export interface PersistedAutopilot {
+  status: "running" | "stopped";
+  /** ISO; start of the budget window. Reset by `/ideal start` and `/ideal resume`. */
+  armedAt: string;
+  /** Turns the host started itself in this budget window. */
+  turns: number;
+  /** Same, across every window of this run (resume keeps counting). */
+  totalTurns: number;
+  /** Consecutive turn ends with no host-observable progress. */
+  noProgressStreak: number;
+  /** Consecutive turns ended by a transient (watchdog) error; absent in records written before it existed = 0. */
+  transientErrorStreak?: number;
+  signals: AutopilotSignals;
+  /** USD spent in this window as of the last evaluation; null when unmeasurable. */
+  spentUsd: number | null;
+  stop?: { reason: AutopilotStopReason; detail: string; at: string };
+}
+
+function parseAutopilot(value: unknown): PersistedAutopilot | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const a = value as Partial<PersistedAutopilot>;
+  const sig = a.signals as Partial<AutopilotSignals> | undefined;
+  const stop = a.stop as Partial<NonNullable<PersistedAutopilot["stop"]>> | undefined;
+  const validStop =
+    stop === undefined ||
+    (typeof stop.detail === "string" &&
+      typeof stop.at === "string" &&
+      (AUTOPILOT_STOP_REASONS as readonly string[]).includes(stop.reason as string));
+  if (
+    (a.status !== "running" && a.status !== "stopped") ||
+    typeof a.armedAt !== "string" ||
+    !Number.isSafeInteger(a.turns) ||
+    !Number.isSafeInteger(a.totalTurns) ||
+    !Number.isSafeInteger(a.noProgressStreak) ||
+    !(a.transientErrorStreak === undefined || Number.isSafeInteger(a.transientErrorStreak)) ||
+    !sig ||
+    typeof sig.workspace !== "string" ||
+    !Number.isSafeInteger(sig.delegationsStarted) ||
+    !Number.isSafeInteger(sig.delegationsFinished) ||
+    typeof sig.flow !== "string" ||
+    !(a.spentUsd === null || typeof a.spentUsd === "number") ||
+    !validStop
+  )
+    return undefined;
+  return a as PersistedAutopilot;
+}
+
+const IDEAL_RUN_TOOL = "__ideal_run";
+
+/**
+ * Persist (or, with `null`, close) the session's `/ideal` run record, so
+ * `/ideal status` and `/ideal abort` still find the run after a CLI restart or
+ * `--session` resume. Keyed on the SESSION, never on the working directory:
+ * `.planning/` state belongs to the cwd and would leak into sessions that never
+ * started the run (project_cwd_owned_state_leaks_into_sessions).
+ *
+ * Stored as a synthetic tool_call row like `__approved_plan` above — no new
+ * table or migration; the newest row wins, and a `closed` row ends the run.
+ * Returns false (after logging) when the row could not be written.
+ */
+export function persistIdealRun(sessionId: string, run: PersistedIdealRun | null): boolean {
+  if (!sessionId) return false;
+  const now = new Date().toISOString();
+  const toolCallId = `ideal-run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  try {
+    getDatabase()
+      .prepare(`
+      INSERT INTO tool_calls (session_id, message_seq, tool_call_id, tool_name, args_json, status, started_at, completed_at)
+      VALUES (?, 0, ?, ?, ?, 'completed', ?, ?)
+    `)
+      .run(sessionId, toolCallId, IDEAL_RUN_TOOL, JSON.stringify(run ?? { closed: true }), now, now);
+    return true;
+  } catch (err) {
+    logger.error("storage", "Failed to persist /ideal run record", {
+      sessionId,
+      closing: run === null,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
+/** The session family's open `/ideal` run, or null when none was started or the last one was closed. */
+export function getLastIdealRun(sessionId: string): PersistedIdealRun | null {
+  const chain = getSessionChain(sessionId);
+  if (chain.length === 0) return null;
+  let argsJson: string | undefined;
+  try {
+    argsJson = (
+      getDatabase()
+        .prepare(`
+      SELECT args_json FROM tool_calls
+      WHERE tool_name = ? AND session_id IN (${chain.map(() => "?").join(",")})
+      ORDER BY id DESC
+      LIMIT 1
+    `)
+        .get(IDEAL_RUN_TOOL, ...chain) as { args_json: string } | undefined
+    )?.args_json;
+  } catch (err) {
+    logger.error("storage", "Failed to read /ideal run record", {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
+  if (!argsJson) return null;
+  try {
+    const parsed = JSON.parse(argsJson) as Partial<PersistedIdealRun> & { closed?: boolean };
+    if (parsed.closed || typeof parsed.goal !== "string" || typeof parsed.startedAt !== "string") return null;
+    const autopilot = parseAutopilot(parsed.autopilot);
+    if (parsed.autopilot !== undefined && !autopilot)
+      logger.warn("storage", "Unreadable /ideal autopilot state — treating the autopilot as not armed", { sessionId });
+    return { goal: parsed.goal, startedAt: parsed.startedAt, ...(autopilot ? { autopilot } : {}) };
+  } catch (err) {
+    logger.error("storage", "Unparseable /ideal run record — treating the run as absent", {
+      sessionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
   }
 }
 

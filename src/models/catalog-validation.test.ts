@@ -37,13 +37,11 @@ describe("catalog schema validation", () => {
     }
   });
 
-  it("includes every published StepFun model with its specialized billing metadata", () => {
+  it("includes supported StepFun models with their specialized billing metadata", () => {
     const models = safeValidateCatalog(realCatalog);
     const stepfun = models?.filter((model) => model.provider === "stepfun") ?? [];
 
     expect(stepfun.map((model) => model.id)).toEqual([
-      "step-3.5-flash",
-      "step-3.5-flash-2603",
       "step-3.7-flash",
       "step-5-preview",
       "stepaudio-2.5-chat",

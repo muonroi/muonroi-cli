@@ -1,9 +1,17 @@
 import type { ModelMessage } from "ai";
 import { isMetaAnalysisPrompt } from "../pil/layer6-output.js";
-import { resolveModelRuntime, resolveTemperatureParam, shouldDropParam } from "../providers/runtime.js";
+import { minimalReasoningProviderOptions } from "../providers/capabilities.js";
+import {
+  resolveMaxOutputTokensParam,
+  resolveModelRuntime,
+  resolveTemperatureParam,
+  shouldDropParam,
+} from "../providers/runtime.js";
 import { generateTextStreamed } from "../providers/streamed-generate.js";
+import type { ModelInfo } from "../types/index.js";
 import { withDeadlineRace, withTimeoutSignal } from "../utils/llm-deadline.js";
 import { logger } from "../utils/logger.js";
+import { parseCompactionProposal } from "./compaction-proposal.js";
 import { COMPACT_PROPOSER_SYSTEM_PROMPT } from "./compaction-proposer-prompt.js";
 import { markProposerStalled } from "./compaction-stall-notice.js";
 import { containsEncryptedReasoning } from "./reasoning";
@@ -75,11 +83,28 @@ export async function proposeCompaction(
   messages: ModelMessage[],
   signal?: AbortSignal,
 ): Promise<CompactionProposal | null> {
-  const runtime = resolveModelRuntime(modelId);
+  const runtime = resolveModelRuntime(modelId, { stage: "compaction" });
   const serialized = serializeConversation(messages);
   const deadlineMs = getProposerDeadlineMs();
+  // The proposer returns per-message-index actions, so its input cannot be
+  // head/tail-capped like the summary's. When the transcript does not fit the
+  // proposer model's window, skip it (the caller's heuristic decides) instead
+  // of sending a request the provider must refuse. Session c2fda568be6b,
+  // 2026-11-06 11:19/11:39: "maximum context length is 262144 tokens. However,
+  // you requested 857116 tokens" — plus a 30s+30s deadline burned every turn.
+  const proposerWindow = runtime.modelInfo?.contextWindow ?? 0;
+  if (exceedsModelInputBudget(serialized, proposerWindow)) {
+    logger.file("warn", "orchestrator", "Compaction proposer skipped: transcript exceeds the proposer window", {
+      modelId,
+      contextWindow: proposerWindow,
+      serializedChars: serialized.length,
+    });
+    return null;
+  }
 
   for (let attempt = 1; attempt <= PROPOSER_MAX_ATTEMPTS; attempt++) {
+    signal?.throwIfAborted();
+    const attemptController = new AbortController();
     pingTurnProgress();
     // The abort-signal's OWN timer is armed slightly LATER than the race
     // below — it exists only for clean HTTP-level cancellation, not as the
@@ -88,8 +113,12 @@ export async function proposeCompaction(
     // window ensures the race's own, deterministically-worded timeout error
     // (matched by `isTimeout` below) is always what wins and gets thrown,
     // instead of racing two same-length timers against each other.
-    const { signal: timedSignal, cleanup } = withTimeoutSignal(signal, deadlineMs + 2_000);
+    const attemptSignal = signal ? AbortSignal.any([signal, attemptController.signal]) : attemptController.signal;
+    const { signal: timedSignal, cleanup } = withTimeoutSignal(attemptSignal, deadlineMs + 2_000);
     let text: string;
+    let finishReason: string | undefined;
+    let reasoningChars = 0;
+    let outputTokens: number | undefined;
     try {
       const result = await withDeadlineRace(
         () =>
@@ -113,8 +142,24 @@ export async function proposeCompaction(
         "compaction proposer",
         signal,
       );
+      // AI SDK may finish an aborted stream without yielding an error part.
+      signal?.throwIfAborted();
       text = result.text.trim();
+      finishReason = result.finishReason;
+      reasoningChars = result.reasoningText?.length ?? 0;
+      outputTokens = result.usage?.outputTokens;
     } catch (err) {
+      // Losing the deadline race does not stop the provider's pending retry loop.
+      // Abort its owner before removing the timer/listener or starting a retry.
+      attemptController.abort(err);
+      if (signal?.aborted) {
+        cleanup();
+        logger.debug("orchestrator", "Compaction proposer cancelled", {
+          error: err instanceof Error ? err.message : String(err),
+          attempt,
+        });
+        signal.throwIfAborted();
+      }
       const isTimeout = err instanceof Error && /deadline|timeout/i.test(err.message);
       if (isTimeout && attempt < PROPOSER_MAX_ATTEMPTS) {
         logger.warn("orchestrator", "Compaction proposer stalled — bounded retry", { attempt, deadlineMs });
@@ -138,47 +183,22 @@ export async function proposeCompaction(
     }
     cleanup();
 
-    // Attempt to parse JSON object robustly, even if the model wraps it in conversational text or markdown fences.
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      logger.warn("orchestrator", "Failed to extract JSON from proposer output", { text });
-      return null;
-    }
-
-    // Contract (see this function's docstring): ANY failure must yield `null`,
-    // never throw — the caller (`compactForContext`, orchestrator.ts:2074) has
-    // no try/catch of its own around this call, and ITS caller
-    // (tool-engine.ts:1221) only wraps it in the whole-turn catch, which
-    // surfaces a raw, uncustomized error instead of the documented graceful
-    // fallback. Measured failure mode: the greedy `/\{[\s\S]*\}/` regex above
-    // matches from the first `{` to the LAST `}` in the text, so prose like
-    // "I'll keep {message 1} and drop {message 2}" produces a non-JSON
-    // substring and `JSON.parse` throws a `SyntaxError` — previously bare,
-    // uncaught, here. Wrapping the shape-validation loop too, since a
-    // malformed-but-parseable payload (e.g. a null entry in `actions`) can
-    // throw a TypeError on property access the same way.
-    try {
-      const parsed: CompactionProposal = JSON.parse(jsonMatch[0]);
-
-      // Validate shape
-      if (typeof parsed.shouldCompact !== "boolean" || !Array.isArray(parsed.actions)) {
-        logger.warn("orchestrator", "Invalid JSON shape from proposer", { parsed });
-        return null;
-      }
-      // Validate each action
-      for (const action of parsed.actions) {
-        if (typeof action.messageIndex !== "number" || !["keep", "drop", "summarize"].includes(action.action)) {
-          logger.warn("orchestrator", "Invalid action shape from proposer", { action });
-          return null;
-        }
-      }
-
-      return parsed;
-    } catch (err) {
-      const errMessage = err instanceof Error ? err.message : String(err);
-      logger.warn("orchestrator", "Failed to parse or validate proposer JSON", { error: errMessage, text });
-      return null;
-    }
+    const proposal = parseCompactionProposal(text, messages.length);
+    if (!proposal)
+      logger.file("warn", "orchestrator", "Compaction proposer rejected; using heuristic fallback", {
+        reason:
+          text.length === 0
+            ? "empty-output"
+            : finishReason === "length"
+              ? "output-limit"
+              : "invalid-or-ambiguous-proposal",
+        textChars: text.length,
+        reasoningChars,
+        finishReason,
+        outputTokens,
+        attempt,
+      });
+    return proposal;
   }
   // Unreachable — every loop iteration either `return`s or `continue`s into
   // the next attempt, and the last attempt cannot `continue`.
@@ -247,7 +267,7 @@ Use this exact format:
 ## Active Plan
 - **Plan file**: [path to PLAN.md or plan document being followed, or "(none)" if no explicit plan]
 - **Plan step**: [current step number and description, e.g. "Step 3/7: implement layer6-output.ts", or "(none)"]
-- **Plan source**: [e.g. "/gsd:execute-phase", "/gsd:quick", "manual", or "(none)"]
+- **Plan source**: [e.g. "/flow:execute-phase", "/flow:quick", "manual", or "(none)"]
 
 ## Constraints & Preferences
 - [Requirements, preferences, or constraints]
@@ -283,15 +303,17 @@ Use this exact format:
 - **Error messages**: [copy verbatim any error messages]
 - **Key numbers/results**: [list important numbers, query results, or metrics]
 
-## Kept Artifacts (high-fidelity tool outputs preserved verbatim across B3/B4 compaction per anti-mù; agent can query the ee_query tool with "tool-artifact id=..." or "full tool result id=..." for full content later)
+## Kept Artifacts (recover exact local contents with retrieve_tool_result; if an ID is unknown, use retrieve_tool_result({view:"index",query:"relevant path or tool name"}); EE availability is independent)
 - toolCallId | toolName | first120chars | reason (high-value|KEEP_TOOL_IDS|recent-turn|error)
+- Preserve the original user goal, outstanding deliverables and acceptance criteria separately from completed helper/preflight scope. A plan pass or a partial result is not whole-task completion.
 
-Keep it concise, but preserve exact file paths, function names, and error messages.`;
+Keep opaque toolCallId, jobId and resultVersion values complete and byte-for-byte unchanged; never abbreviate IDs or replace them with prefixes. Keep it concise, but preserve exact file paths, function names, and error messages.`;
 
 const UPDATE_SUMMARIZATION_PROMPT = `The messages above are new conversation messages to incorporate into the existing summary provided below.
 
 Update the existing structured summary with new information. Rules:
 - Preserve still-relevant information from the previous summary
+- Preserve the original user goal, remaining deliverables, acceptance criteria and next action separately from completed helper/preflight scope; a plan pass is not implementation completion.
 - Add new progress, decisions, and critical context
 - Move completed items from "In Progress" to "Done" (✅ DONE — DO NOT REDO) when appropriate
 - Update "Active Plan" step if the current step has advanced
@@ -304,6 +326,7 @@ Update the existing structured summary with new information. Rules:
 
 ## Kept Artifacts
 - (carry forward or add new high-fidelity toolCallId | tool | reason from this increment)
+- Preserve complete opaque toolCallId/jobId/resultVersion values without shortening. Unknown IDs are discoverable locally with retrieve_tool_result({view:"index"}); an exact-ID miss does not mean evidence was deleted. EE is not required for this recovery.
 
 Use the exact same section structure as the existing summary format.`;
 
@@ -322,9 +345,11 @@ Use this exact format:
 
 ## Current State
 - [Exact state at the cut point: what was just done, what variable/file is mid-edit]
+- [Keep the full user goal, completed partial scope, remaining deliverables and next acceptance check distinct]
 
 ## Context For Suffix
-- [Information needed to understand the kept recent messages]`;
+- [Information needed to understand the kept recent messages]
+- Preserve full opaque toolCallId/jobId/resultVersion references byte-for-byte. Recover unknown IDs with retrieve_tool_result({view:"index"}); EE is not required.`;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -560,7 +585,11 @@ function messageToString(message: ModelMessage): string {
 }
 
 export function estimateMessageTokens(message: ModelMessage): number {
-  return countTokens(messageToString(message));
+  if (typeof message.content === "string") return countTokens(message.content);
+  // Sizing must use full structured text, never the shortened summarizer view.
+  // Binary media uses provider-specific accounting; do not tokenize base64 as text.
+  const parts = message.content.filter((part) => part.type !== "image" && part.type !== "file");
+  return countTokens(JSON.stringify(parts));
 }
 
 export function estimateConversationTokens(systemPrompt: string, messages: ModelMessage[], inFlightText = ""): number {
@@ -751,6 +780,101 @@ export interface CompactionSummaryResult {
   usage: CompactionUsage;
 }
 
+/**
+ * Below this many characters, a summary the provider cut off at the output
+ * limit (`finishReason: "length"`) carries less than the deterministic
+ * mechanical stub does, so it is rejected instead of replacing history.
+ */
+export const COMPACTION_TRUNCATED_MIN_CHARS = 400;
+
+/**
+ * A summarizer call that RETURNED but produced no usable summary. Thrown so the
+ * caller's existing fallback chain (other model, then the mechanical stub)
+ * handles it exactly like a provider error.
+ *
+ * Measured (session 4edc02516a92): 15 of 74 compactions stored an EMPTY
+ * summary - ids 315, 324, 328, 331, 333, 345, 348, 367, 382, 383, 384, 386,
+ * 387, 390, 394 - each billed exactly its output cap (1536/3072/4096/5632/8192
+ * output tokens, step-3.7-flash) with zero text, and `compactForContext`
+ * replaced history with it because it only fell back on a THROW.
+ */
+export class CompactionSummaryRejectedError extends Error {
+  constructor(
+    readonly reason: "empty" | "truncated-short",
+    readonly modelId: string,
+    readonly finishReason: string | undefined,
+    readonly outputTokens: number,
+    readonly budget: number | undefined,
+    readonly textChars: number,
+    readonly reasoningChars: number,
+  ) {
+    super(
+      `compaction summary rejected (${reason}): model=${modelId} finishReason=${finishReason ?? "unknown"} ` +
+        `outputTokens=${outputTokens} budget=${budget ?? "provider-default"} textChars=${textChars} reasoningChars=${reasoningChars}`,
+    );
+    this.name = "CompactionSummaryRejectedError";
+  }
+}
+
+/** Throws {@link CompactionSummaryRejectedError} when a returned summary is unusable. */
+export function assertUsableCompactionSummary(
+  modelId: string,
+  result: { text: string; finishReason?: string; reasoningText?: string },
+  outputTokens: number,
+  budget: number | undefined,
+): void {
+  const text = result.text.trim();
+  const reason =
+    text.length === 0
+      ? "empty"
+      : result.finishReason === "length" && text.length < COMPACTION_TRUNCATED_MIN_CHARS
+        ? "truncated-short"
+        : null;
+  if (!reason) return;
+  const reasoningChars = result.reasoningText?.length ?? 0;
+  logger.warn("orchestrator", "[compaction] summarizer returned an unusable summary; using fallback chain", {
+    reason,
+    modelId,
+    finishReason: result.finishReason,
+    outputTokens,
+    budget,
+    textChars: text.length,
+    reasoningChars,
+  });
+  throw new CompactionSummaryRejectedError(
+    reason,
+    modelId,
+    result.finishReason,
+    outputTokens,
+    budget,
+    text.length,
+    reasoningChars,
+  );
+}
+
+/**
+ * Tokens a FAILED summarizer attempt was billed for, keyed by the thrown error.
+ *
+ * A rejected summary (see {@link CompactionSummaryRejectedError}) is a call that
+ * RETURNED: the provider billed its full input and every output token it spent
+ * reasoning. Session 4edc02516a92 shows that spend is the whole problem (15
+ * empty summaries, each at its output cap), yet once rejection became a throw
+ * the caller recorded nothing — cost became invisible exactly where it leaks.
+ * The caller reads this to attribute the waste in usage_events.
+ */
+const billedUsageByError = new WeakMap<object, CompactionUsage>();
+
+function attachBilledCompactionUsage(err: unknown, usage: CompactionUsage): void {
+  if (typeof err !== "object" || err === null) return;
+  billedUsageByError.set(err, usage);
+}
+
+/** Tokens billed by the failed attempt(s) behind `err`; zero when none were (e.g. the provider threw first). */
+export function getBilledCompactionUsage(err: unknown): CompactionUsage {
+  if (typeof err !== "object" || err === null) return emptyUsage();
+  return billedUsageByError.get(err) ?? emptyUsage();
+}
+
 function readUsage(usage: unknown): CompactionUsage {
   if (!isRecord(usage)) return { promptTokens: 0, completionTokens: 0 };
   const prompt =
@@ -800,21 +924,134 @@ async function summarizeConversation(
   }
 
   const runtime = resolveModelRuntime(modelId);
-  const result = await generateTextStreamed({
-    model: runtime.model,
-    system: SUMMARIZATION_SYSTEM_PROMPT,
-    prompt: promptParts.filter(Boolean).join("\n\n"),
-    abortSignal: signal,
-    maxRetries: 0,
-    ...resolveTemperatureParam(runtime, 0.2),
-    // See proposeCompaction — the OAuth registry veto must be honoured here too.
-    // This call has NO caller-side catch (compactForContext awaits it directly),
-    // so a 400 here aborts the user's turn outright.
-    ...(shouldDropParam(runtime, "maxOutputTokens") ? {} : { maxOutputTokens: effectiveMax }),
-    ...(runtime.providerOptions ? { providerOptions: runtime.providerOptions } : {}),
-  });
+  // Ask for the cheapest reasoning the provider exposes: output tokens are
+  // shared with reasoning, and a summary whose budget is spent thinking comes
+  // back empty (see CompactionSummaryRejectedError). Providers with no knob
+  // return undefined and the merge is a no-op.
+  const providerOptions = minimalReasoningProviderOptions(runtime);
+  // `effectiveMax` is a VISIBLE-summary budget. On a reasoning model the
+  // provider's max_tokens bounds thinking + answer together, so it must go
+  // through the catalog-driven resolver (widened to the model's declared
+  // ceiling) — never inlined. Session c2fda568be6b (2026-11-06 07:11:56Z on):
+  // step-3.7-flash and step-5-preview both came back `finishReason=length
+  // outputTokens=1536 budget=1536 textChars=0 reasoningChars≈6.0-6.5k` with
+  // reasoning_effort=low already applied — the inlined 1536 was spent thinking.
+  // The OAuth `unsupportedParams` veto (shouldDropParam) is honoured inside.
+  const outputParam = resolveMaxOutputTokensParam(runtime, effectiveMax);
+  // The summarizer must fit its OWN window, which can be far smaller than the
+  // main model's (same session: step-3.7-flash, 262,144-token window, was sent
+  // 301k-334k tokens and refused with "maximum context length").
+  const prompt = capSummarizerInput(promptParts.filter(Boolean).join("\n\n"), runtime.modelInfo?.contextWindow ?? 0);
+  const attempt = (maxOutput: { maxOutputTokens?: number }) =>
+    generateTextStreamed({
+      model: runtime.model,
+      system: SUMMARIZATION_SYSTEM_PROMPT,
+      prompt,
+      abortSignal: signal,
+      maxRetries: 0,
+      ...resolveTemperatureParam(runtime, 0.2),
+      ...maxOutput,
+      ...(providerOptions ? { providerOptions } : {}),
+    });
 
-  return { summary: result.text.trim(), usage: readUsage(result.usage) };
+  const first = await attempt(outputParam);
+  let usage = readUsage(first.usage);
+  try {
+    assertUsableCompactionSummary(modelId, first, usage.completionTokens, outputParam.maxOutputTokens);
+    return { summary: first.text.trim(), usage };
+  } catch (firstErr) {
+    // Rethrown, not swallowed: assertUsableCompactionSummary already logged the
+    // rejection; this only carries the billed tokens to the caller.
+    const wider =
+      firstErr instanceof CompactionSummaryRejectedError && first.finishReason === "length"
+        ? widerSummaryBudget(runtime.modelInfo, outputParam.maxOutputTokens)
+        : null;
+    if (wider === null) {
+      attachBilledCompactionUsage(firstErr, usage);
+      throw firstErr;
+    }
+    // The budget ran out before any usable text: ask ONCE for MORE room, never
+    // less (a smaller cap only guarantees the same empty result sooner).
+    logger.warn("orchestrator", "[compaction] summary hit its output cap with no usable text; retrying once wider", {
+      modelId,
+      budget: outputParam.maxOutputTokens,
+      retryBudget: wider,
+      reasoningChars: first.reasoningText?.length ?? 0,
+    });
+    signal?.throwIfAborted();
+    let second: Awaited<ReturnType<typeof attempt>>;
+    try {
+      second = await attempt({ maxOutputTokens: wider });
+    } catch (retryErr) {
+      // The provider threw on the retry: the first attempt was still billed.
+      attachBilledCompactionUsage(retryErr, usage);
+      throw retryErr;
+    }
+    usage = addUsage(usage, readUsage(second.usage));
+    try {
+      assertUsableCompactionSummary(modelId, second, readUsage(second.usage).completionTokens, wider);
+    } catch (secondErr) {
+      attachBilledCompactionUsage(secondErr, usage);
+      throw secondErr;
+    }
+    return { summary: second.text.trim(), usage };
+  }
+}
+
+/** Fraction of a model's window its compaction INPUT may occupy (the rest is output + framing). */
+const SUMMARIZER_INPUT_WINDOW_FRACTION = 0.6;
+
+/**
+ * True when `text` cannot fit `contextWindowTokens` as compaction input. Cheap
+ * exit first (BPE never yields more tokens than characters), so a short prompt
+ * never pays for tokenization. Unknown window (0) = no bound known = false.
+ */
+export function exceedsModelInputBudget(text: string, contextWindowTokens: number): boolean {
+  if (!(contextWindowTokens > 0)) return false;
+  const budget = Math.floor(contextWindowTokens * SUMMARIZER_INPUT_WINDOW_FRACTION);
+  if (text.length <= budget) return false;
+  return countTokens(text) > budget;
+}
+
+/**
+ * Bound the summarizer prompt to the summarizer model's own window: keep the
+ * head (task setup, prior summary) and the tail (recent work, the summary
+ * instructions — which are appended last) and mark the elided middle.
+ */
+export function capSummarizerInput(text: string, contextWindowTokens: number): string {
+  if (!exceedsModelInputBudget(text, contextWindowTokens)) return text;
+  const budgetTokens = Math.floor(contextWindowTokens * SUMMARIZER_INPUT_WINDOW_FRACTION);
+  const tokens = countTokens(text);
+  // Scale chars by the measured chars/token ratio, with 10% slack for the marker
+  // and for the uneven density of the head vs the tail.
+  const keepChars = Math.max(1, Math.floor(text.length * (budgetTokens / tokens) * 0.9));
+  const headChars = Math.floor(keepChars * 0.4);
+  const tailChars = keepChars - headChars;
+  const elided = text.length - headChars - tailChars;
+  logger.warn("orchestrator", "[compaction] summarizer input capped to the summarizer's context window", {
+    contextWindow: contextWindowTokens,
+    inputTokens: tokens,
+    budgetTokens,
+    elidedChars: elided,
+  });
+  return (
+    `${text.slice(0, headChars)}\n\n[... ${elided} characters of the middle of the conversation elided to fit ` +
+    `the summarizer's context window ...]\n\n${text.slice(text.length - tailChars)}`
+  );
+}
+
+/**
+ * The output budget for the ONE retry after a summary ran out of budget with no
+ * usable text, or null when no wider budget exists (param not sent, or already
+ * at the model's declared ceiling). Catalog-driven: the declared
+ * `max_output_tokens` is the bound; an undeclared ceiling grows 4x.
+ */
+export function widerSummaryBudget(model: ModelInfo | undefined, current: number | undefined): number | null {
+  if (current === undefined || !(current > 0)) return null;
+  const ceiling = model?.maxOutputTokens;
+  if (ceiling !== undefined && current >= ceiling) return null;
+  const wider = current * 4;
+  return ceiling !== undefined ? Math.min(wider, ceiling) : wider;
 }
 
 function emptyUsage(): CompactionUsage {
@@ -837,7 +1074,10 @@ export async function generateCompactionSummary(
   const { messagesToSummarize, turnPrefixMessages, isSplitTurn, previousSummary, settings } = preparation;
 
   if (isSplitTurn && turnPrefixMessages.length > 0) {
-    const [historyResult, prefixResult] = await Promise.all([
+    // allSettled, not all: when one half fails, the OTHER half was still billed,
+    // and that spend must reach the caller with the error (see
+    // getBilledCompactionUsage) instead of vanishing with the dropped result.
+    const settled = await Promise.allSettled([
       messagesToSummarize.length > 0
         ? summarizeConversation(
             modelId,
@@ -859,6 +1099,19 @@ export async function generateCompactionSummary(
         signal,
       ),
     ]);
+
+    const failure = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
+    if (failure) {
+      let billed = emptyUsage();
+      for (const s of settled) {
+        billed = addUsage(billed, s.status === "fulfilled" ? s.value.usage : getBilledCompactionUsage(s.reason));
+      }
+      attachBilledCompactionUsage(failure.reason, billed);
+      throw failure.reason;
+    }
+    const [historyResult, prefixResult] = settled.map(
+      (s) => (s as PromiseFulfilledResult<CompactionSummaryResult>).value,
+    ) as [CompactionSummaryResult, CompactionSummaryResult];
 
     const usage = addUsage(historyResult.usage, prefixResult.usage);
     if (historyResult.summary && prefixResult.summary) {

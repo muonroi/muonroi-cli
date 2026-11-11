@@ -1,0 +1,148 @@
+{
+  "measuredAt": "2026-10-16T07:50:18.018287+00:00",
+  "sourceCommit": "2187ba68b681a86a956b782859baa05908a9d221",
+  "linux": {
+    "passed": 1171,
+    "failed": 0,
+    "skipped": 14
+  },
+  "windows": {
+    "passed": 1176,
+    "failed": 0,
+    "skipped": 9
+  },
+  "accepted": true,
+  "pushed": false,
+  "artifacts": [
+    {
+      "path": ".scratch/ee-strict-scope-deploy/source.tar.gz",
+      "sha256": "c000ca78f6fe9feaef541bd39a99e6ecd6a2b33f5b03b47306a8280903f077b1",
+      "bytes": 2662278
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/source-manifest.json",
+      "sha256": "2b9ed67ebcf6bcf72ca63ac014991e8163dbed1a43078741b1f91a5d31cdb787",
+      "bytes": 50341
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/fix.bundle",
+      "sha256": "a47099f8017dfdb897cb68600532e4fdd43973c1a525e101ba646b3167611344",
+      "bytes": 4234330
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/release.json",
+      "sha256": "506ab5c0871cd1a666829141934f8965b361369b497a68a33c855d09b804add8",
+      "bytes": 198
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/red.log",
+      "sha256": "fb83a774deff1ea14d24a90a6c65c3d8d4e13b73f4c0fda2284082c73beddfd2",
+      "bytes": 21088
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/focused.log",
+      "sha256": "faebf7d10196a81ca478c02a3ac66b5b9925e8679af0d065ea8fa4e8dbf46c2e",
+      "bytes": 6686
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/test-isolation.log",
+      "sha256": "6bbc553c38ac19041613a3b37b48f24231a4fe82939561fcd44e80fe5086faa4",
+      "bytes": 3444
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/full-windows.log",
+      "sha256": "4a6aefb55b8a94cf61705748a042c320c6dcbdf242e4dc72c8b98235c432ad07",
+      "bytes": 101354
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/full-windows-final.log",
+      "sha256": "ff58804441f861ab66e366ad1b5d8cba7f4ba46c31203dfb16e8b2ee64b9f3bc",
+      "bytes": 240988
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/full-linux.log",
+      "sha256": "0547de4de074f77d0ec2ef17f9bd0ccc13e45b1369beb8c035fb6907266f6b4e",
+      "bytes": 275575
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/linux-result.json",
+      "sha256": "dade3a5fec54387e5226fb8a16f8f9d53686f669577f5208fe4e8c82fa813a7d",
+      "bytes": 65
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/stage-test.py",
+      "sha256": "4f421cf56c995a9b1413495e4dee6db49634dde749d1fca1201e4f1fdc806dbf",
+      "bytes": 2121
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/deploy.py",
+      "sha256": "312aa5e80218c9d509729f5748562b961fd8e41c4ab816c6a3c8efd59494a59b",
+      "bytes": 4654
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/acceptance.cjs",
+      "sha256": "dd207a6c15efa147be0da13da254d2832cf6393d32a87b4a5f4feb64097c31f4",
+      "bytes": 2975
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/acceptance.json",
+      "sha256": "d7323478a162a03688400a258a59472473647913f3de6953135c12c51c981148",
+      "bytes": 1232
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/deployment-output.log",
+      "sha256": "dbbf2a137bb2c581ea6e44addb4cb1006906a58d24a2f77ef0d492b6afd5416e",
+      "bytes": 2860
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/deployment-output-final.log",
+      "sha256": "3a15af411950bd2ce5f20e537f40e8bbe99d0fb8799e95c11b279bde586be97c",
+      "bytes": 2866
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/deployment-state.json",
+      "sha256": "e3656dc481b39a77389df3c963f651159e068d7e518f20f42d62cb4bc85e2ff6",
+      "bytes": 1834
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/cli-native.mjs",
+      "sha256": "89316798e99d247741e2d80727cdb75285c58a3d30c5bfbacf71541611ff9e15",
+      "bytes": 1221
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/cli-native-result.json",
+      "sha256": "9a47e2ef1aae77669de6049c8100567a9da6d8f811d58b8fb7067f94700f08ed",
+      "bytes": 627
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/cli-native.log",
+      "sha256": "a789c5464f23cec38f5e2ac7490c7a885cfe4bcdb929beac1e68ba197256d04c",
+      "bytes": 1080
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/public-health.mjs",
+      "sha256": "62c7bf613870a9620c75c97b6b577146ba32405952333ba9ce9f1b502f095312",
+      "bytes": 1034
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/public-health.json",
+      "sha256": "ff03221c2db1efc1c46ed876c861fece6dfb3413308e10d5b44e2510c9aaea61",
+      "bytes": 283
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/domain-health.mjs",
+      "sha256": "d536b8a90b7272fffe9ebe012578adb2e4f6fed39c13aa0358fdfdf01a843e5f",
+      "bytes": 850
+    },
+    {
+      "path": ".scratch/ee-strict-scope-deploy/domain-health.json",
+      "sha256": "7910e9ebc07e1fef009176307b9f2e9f20a8fa4b90645fcbbb48d8f486fa181f",
+      "bytes": 226
+    },
+    {
+      "path": "docs/investigations/ee-strict-scope-deployment-2026-10-16.md",
+      "sha256": "595259e55b18e1296253a0af5d2082dd702030a83b9264cacd1809fb01af1aed",
+      "bytes": 6521
+    }
+  ]
+}

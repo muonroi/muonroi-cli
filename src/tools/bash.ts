@@ -14,11 +14,12 @@ import {
 } from "../utils/background-jobs.js";
 import { removeTreeLoggingFailure } from "../utils/fs-cleanup.js";
 import { logger } from "../utils/logger.js";
-import { killProcessTree } from "../utils/process-tree.js";
 import { checkCatastrophicCommand, type SafetyBlockResult } from "../utils/permission-mode.js";
+import { killProcessTree } from "../utils/process-tree.js";
 import type { SandboxMode, SandboxSettings } from "../utils/settings.js";
 import { posixToNative, type ResolvedShell, resolveShell, type ShellSettings } from "../utils/shell";
 import { nextBashRunId, recordBashRun, stripAnsi } from "./bash-output-cache.js";
+import { workerProcessRefusal } from "./worker-process-boundary.js";
 import { describeCwdDrift, normalizeMsysDrivePath } from "./write-scope.js";
 
 const MAX_TAIL_BYTES = 8_192;
@@ -55,6 +56,8 @@ const EXIT_NOTICE_TAIL_LINES = 20;
 const EXIT_NOTICE_TAIL_CHARS = 2_000;
 
 interface BashToolOptions {
+  /** Restrict explicit shell process-control operations in delegated workers. */
+  workerScope?: boolean;
   /**
    * Accepted for backward compatibility with callers that pass sandboxMode.
    * Sandbox has been removed; this value is ignored — mode is always "off".
@@ -69,6 +72,7 @@ interface BashToolOptions {
 let nextBgId = 1;
 
 export class BashTool {
+  private readonly workerScope: boolean;
   private cwd: string;
   private bgProcesses = new Map<number, BackgroundProcess>();
   private tmpDir: string | null = null;
@@ -81,6 +85,7 @@ export class BashTool {
   readonly createdAt = Date.now();
 
   constructor(initialCwd = process.cwd(), options: BashToolOptions = {}) {
+    this.workerScope = options.workerScope === true;
     this.cwd = initialCwd;
     this.shellSettings = options.shellSettings ?? {};
     this.resolvedShell = resolveShell(this.shellSettings);
@@ -103,6 +108,29 @@ export class BashTool {
     this.sandboxSettings = settings;
   }
 
+  /**
+   * An independent BashTool that STARTS at this tool's cwd and carries the same
+   * sandbox and shell settings, but shares nothing mutable with it: its own cwd,
+   * its own background-process table, its own temp dir.
+   *
+   * Exists because the in-band `cd` handler in {@link execute} permanently moves
+   * `this.cwd`, and the main session's cwd anchors the working-context ledger,
+   * flow-state resolution and the run-root. A secondary agent (council member)
+   * handed the session's tool would walk it out of the run root with one `cd`.
+   * Measured: session 7b2886c90a51, a council research call `cd`'d the shared
+   * tool into a sibling `probe/` project, sessions.cwd_last ended there, and the
+   * run was declared complete against an empty planning tree.
+   *
+   * The caller owns the fork and should `cleanup()` it when its work is done.
+   */
+  fork(options: { workerScope?: boolean } = {}): BashTool {
+    return new BashTool(this.cwd, {
+      workerScope: options.workerScope === true,
+      sandboxSettings: this.sandboxSettings,
+      shellSettings: this.shellSettings,
+    });
+  }
+
   private async ensureTmpDir(): Promise<string> {
     if (!this.tmpDir) {
       this.tmpDir = await mkdtemp(path.join(os.tmpdir(), "muonroi-bg-"));
@@ -111,6 +139,9 @@ export class BashTool {
   }
 
   async execute(command: string, timeout = 30_000, abortSignal?: AbortSignal): Promise<ToolResult> {
+    // Before cd handling: a refused chain must not even change this tool's cwd.
+    const refusal = this.workerScope ? workerProcessRefusal(command) : undefined;
+    if (refusal) return { success: false, error: refusal };
     try {
       if (command.startsWith("cd ")) {
         const afterCd = command
@@ -261,6 +292,8 @@ export class BashTool {
 
         const child = spawn(binary, args, {
           cwd: this.cwd,
+          // No stdin tool channel exists; an open pipe strands interactive readers.
+          stdio: ["ignore", "pipe", "pipe"],
           env: { ...process.env, FORCE_COLOR: "0" },
           windowsHide: true,
           // POSIX only: make the child its own process-group leader so
@@ -743,7 +776,9 @@ export class BashTool {
         ? `${base} IMPORTANT: this host runs Windows cmd.exe, NOT a POSIX shell. Use cmd syntax (dir, type, findstr, where, del) — POSIX tools like ls/grep/head/find/cat are unavailable.`
         : `${base} IMPORTANT: this host runs PowerShell, NOT a POSIX shell. Use PowerShell cmdlets (Get-ChildItem, Select-String, Select-Object -First N, Get-Content) — POSIX tools like ls -la/grep/head/find behave differently or fail.`;
     }
-    return base;
+    return process.platform === "win32" && s.kind === "bash"
+      ? `${base} Commands are non-interactive (stdin EOF). In Git Bash/MSYS, cmd /c is path-converted; use cmd //c for cmd.exe calls. Do not globally disable path conversion.`
+      : `${base} Commands are non-interactive (stdin EOF).`;
   }
 
   getResolvedShell(): ResolvedShell {
@@ -794,7 +829,22 @@ export class BashTool {
    */
   private prepareCommand(
     command: string,
-  ): { ok: true; command: string } | { ok: false; error: string; block: SafetyBlockResult } {
+  ): { ok: true; command: string } | { ok: false; error: string; block?: SafetyBlockResult } {
+    const refusal = this.workerScope ? workerProcessRefusal(command) : undefined;
+    if (refusal) return { ok: false, error: refusal };
+    if (
+      process.platform === "win32" &&
+      this.resolvedShell.kind === "bash" &&
+      process.env.MSYS_NO_PATHCONV !== "1" &&
+      process.env.MSYS2_ARG_CONV_EXCL !== "*" &&
+      /^\s*cmd(?:\.exe)?\s+(?:\/c|"\/c"|'\/c')(?=\s|$)/i.test(command)
+    ) {
+      return {
+        ok: false,
+        error:
+          "msys_cmd_switch: Git Bash/MSYS path-converts cmd /c and can return only an interactive prompt without executing your command. Use cmd //c, or explicitly invoke with MSYS_NO_PATHCONV=1. The command was not executed.",
+      };
+    }
     const catBlock = checkCatastrophicCommand(command);
     if (catBlock) {
       return {

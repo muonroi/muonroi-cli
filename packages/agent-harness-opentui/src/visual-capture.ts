@@ -47,6 +47,8 @@ interface OptimizedBufferLike {
   getSpanLines: () => CapturedLineLike[];
 }
 export interface RendererLike {
+  /** OpenTUI CliRenderer: true from the first line of destroy() onward. */
+  isDestroyed?: boolean;
   currentRenderBuffer?: OptimizedBufferLike;
   nextRenderBuffer?: OptimizedBufferLike;
 }
@@ -104,6 +106,15 @@ export function createVisualCaptureHook(getRenderer: () => RendererLike | undefi
 
   function capture(seq: number, ts: number): VisualFrame | null {
     const renderer = getRenderer();
+    // A destroyed renderer has freed its native (Zig) buffers, but the JS
+    // OptimizedBuffer wrappers still hold the dangling pointers — reading them
+    // is a use-after-free that segfaults Bun (it does not throw, so the catch
+    // below cannot help). Measured on Windows: /exit → renderer.destroy() →
+    // the 60fps harness poll called getSpanLines() 1-16 ms later with
+    // isDestroyed=true → "panic: Segmentation fault" in opentui.dll, exit
+    // code 3, in 20 of 28 harness runs that reached destroy (the rest won the
+    // race to the 16 ms process.exit timer).
+    if (renderer?.isDestroyed) return null;
     const buffer = renderer?.currentRenderBuffer ?? renderer?.nextRenderBuffer;
     if (!buffer || typeof buffer.getSpanLines !== "function") return null;
 

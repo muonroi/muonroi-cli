@@ -40,6 +40,10 @@ export default defineConfig({
       "node_modules/**",
       "**/node_modules/**",
       "tmp/**",
+      // Generated investigation/QA fixtures use their own runners and are not
+      // project unit suites (some deliberately import node:test instead).
+      ".scratch/**",
+      ".quick-codex-flow/**",
       ".claude/**",
       ".cursor/**",
       // Angular tests require jsdom + zone.js + TestBed.initTestEnvironment().

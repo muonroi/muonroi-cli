@@ -2,7 +2,7 @@
  * src/orchestrator/settled-synthesis-gate.ts
  *
  * The auto-council gate in tool-engine.ts convenes a fresh debate whenever
- * either PIL classified taskType=plan|analyze OR the GSD complexity assessor
+ * either PIL classified taskType=plan|analyze OR the FLOW complexity assessor
  * (or its heuristic fallback) marked the turn `heavy`. The second path has no
  * concept of "we already argued this" — it re-convenes on every heavy-tier
  * turn regardless of what the session already settled, including an

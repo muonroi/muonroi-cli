@@ -4,20 +4,22 @@
  * Structured EE-failure logger.
  *
  * Every silent Experience Engine catch site routes through `logEeFailure` so:
- *   1. Operators see a `[ee.<source>.<kind>]` warn line with the error name +
+ *   1. Operators get a file-only `[ee.<source>.<kind>]` diagnostic with the error name +
  *      message (no full stack — these failures are degrade signals, not
  *      crashes).
  *   2. The agent harness sees an `ee-timeout` / `ee-error` `LiveEvent` when
  *      `globalThis.__muonroiAgentRuntime?.emitEvent` is wired (TUI agent-mode).
  *
  * Contract:
- *   - Pure aside from `console.warn` + best-effort `emitEvent`.
+ *   - File-only diagnostics + best-effort `emitEvent`; actionable scope400 stays in the tool result.
  *   - NEVER throws (the existing degrade paths must keep returning their
  *     fallbacks unchanged).
  *   - No PII — only error name/message/stack-less metadata is logged.
  *
  * Source labels are documented in `.planning/phases/21-ee-observability-resilience/21-01-PLAN.md`.
  */
+
+import { logger } from "./logger.js";
 
 export type EeFailureKind = "timeout" | "error";
 
@@ -46,6 +48,8 @@ export function readTimeoutEnv(name: string, def: number, lo: number, hi: number
 export interface EeFailureExtra {
   elapsedMs?: number;
   budgetMs?: number;
+  status?: number;
+  projectRequired?: boolean;
   [k: string]: unknown;
 }
 
@@ -127,12 +131,11 @@ export function classifyEeError(err: unknown): EeFailureKind {
 export function logEeFailure(source: string, kind: EeFailureKind, err: unknown, extra?: EeFailureExtra): void {
   const { name, message } = describeError(err);
 
-  try {
-    // eslint-disable-next-line no-console
-    console.warn(`[ee.${source}.${kind}]`, { name, message }, extra ?? {});
-  } catch {
-    /* best-effort logging — never fatal */
-  }
+  logger.file("warn", "ee", `[ee.${source}.${kind}]`, { ...extra, name, message });
+
+  // The native tool returns actionable scope guidance. This recognized request
+  // rejection is not an outage; preserve its status/body in file diagnostics.
+  if (source === "client.recall" && kind === "error" && extra?.status === 400 && extra.projectRequired === true) return;
 
   try {
     const runtime = readAgentRuntime();
@@ -154,10 +157,11 @@ export function logEeFailure(source: string, kind: EeFailureKind, err: unknown, 
         source,
         name,
         message,
+        ...(extra?.status !== undefined ? { status: extra.status } : {}),
         ts: Date.now(),
       });
     }
-  } catch {
-    /* harness emit must never break degrade paths */
+  } catch (error) {
+    logger.file("warn", "ee", "EE failure event delivery failed", { source, error: describeError(error) });
   }
 }

@@ -1,8 +1,8 @@
 import type { ToolSet } from "ai";
+import { modelMessageSchema } from "ai";
 import { afterEach, describe, expect, it } from "vitest";
-
 import { CrossTurnDedup, isCrossTurnDedupEnabled, wrapToolSetWithDedup } from "../cross-turn-dedup.js";
-import { RAW_FOR_DEDUP, wrapToolSetWithCap } from "../sub-agent-cap.js";
+import { rawForDedup, wrapToolSetWithCap } from "../sub-agent-cap.js";
 
 describe("CrossTurnDedup", () => {
   describe("maybeDedup", () => {
@@ -270,7 +270,7 @@ describe("CrossTurnDedup", () => {
       // stream-runner wires them. Turn 1 reads at passthrough; turn 2 reads the
       // same file after the cap's budget crossed into a trim tier — different
       // served bytes, same raw. Before H5 the dedup hashed the trimmed output and
-      // missed; now it hashes the RAW_FOR_DEDUP Symbol the cap stashed.
+      // missed; now it hashes the raw content the cap recorded (rawForDedup).
       const dedup = new CrossTurnDedup({ minChars: 10 });
       const raw = "Z".repeat(9_000);
       let call = 0;
@@ -286,14 +286,40 @@ describe("CrossTurnDedup", () => {
       dedup.beginTurn();
       const first = (await exec({})) as Record<string | symbol, unknown>;
       call++;
-      // Symbol side-channel is present but never serializes to the wire.
-      expect(first[RAW_FOR_DEDUP]).toBe(raw);
-      expect(JSON.stringify(first)).not.toContain("rawForDedup");
+      // Side table holds the raw content; the served object carries no extra key.
+      expect(rawForDedup(first)).toBe(raw);
+      expect(Reflect.ownKeys(first)).toEqual(["output"]);
 
       dedup.beginTurn();
       const second = (await exec({})) as { output: string };
       expect(second.output).toContain("[dup of");
       expect(call).toBe(1);
     });
+  });
+});
+
+describe("capped tool results stay valid ModelMessage JSON (session 4edc02516a92 schema failures)", () => {
+  it("an object result served through cap + dedup validates as a tool-result json output", async () => {
+    // Regression: the cap used to add a Symbol-keyed property to object results.
+    // zod 4's z.record walks Reflect.ownKeys, so `{type:"json", value}` carrying
+    // it failed ModelMessage[] validation when a worker's history was re-submitted
+    // for forced synthesis (gentle-ivory-badger, clever-amber-heron, ...).
+    const baseTools: ToolSet = {
+      edit_file: {
+        description: "d",
+        inputSchema: {},
+        execute: async () => ({ success: true, output: "Edited x" }),
+        // biome-ignore lint/suspicious/noExplicitAny: minimal tool stub
+      } as any,
+    };
+    const cap = wrapToolSetWithCap(baseTools, { maxCumulativeChars: 20_000 });
+    const wrapped = wrapToolSetWithDedup(cap.tools, new CrossTurnDedup({ minChars: 10 }));
+    const exec = (wrapped.edit_file as unknown as { execute: (i: unknown) => Promise<unknown> }).execute;
+    const value = await exec({});
+    const toolMessage = {
+      role: "tool",
+      content: [{ type: "tool-result", toolCallId: "c1", toolName: "edit_file", output: { type: "json", value } }],
+    };
+    expect(modelMessageSchema.safeParse(toolMessage).success).toBe(true);
   });
 });

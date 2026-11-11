@@ -9,6 +9,13 @@ export interface ProviderCredentials {
   workspaceId?: string;
 }
 
+/** The active session also owns the credential forwarded to detached workers. */
+export interface ProviderCredentialSession {
+  getProviderId(): ProviderId;
+  setApiKey(apiKey: string, baseURL?: string): void;
+  refreshAuthentication?(): Promise<void>;
+}
+
 export function workspaceIdError(provider: ProviderId, value: string): string | null {
   const setup = getProviderCapabilities(provider).workspaceSetup();
   if (!setup) return null;
@@ -53,6 +60,7 @@ export async function promptProviderCredentials(
 export async function saveProviderCredentials(
   provider: ProviderId,
   credentials: ProviderCredentials,
+  session?: ProviderCredentialSession,
 ): Promise<boolean> {
   const setup = getProviderCapabilities(provider).workspaceSetup();
   const workspaceId = credentials.workspaceId?.trim();
@@ -70,6 +78,12 @@ export async function saveProviderCredentials(
         [provider]: { ...current.providers?.[provider], workspaceId },
       },
     });
+  }
+  // Rewarming the global factory alone fixes main requests but leaves its
+  // held worker/council handoff key stale. Update only the addressed session.
+  if (session?.getProviderId() === provider) {
+    session.setApiKey(credentials.apiKey.trim(), loadUserSettings().providers?.[provider]?.baseURL);
+    await session.refreshAuthentication?.();
   }
   return true;
 }

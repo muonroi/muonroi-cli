@@ -91,23 +91,27 @@ function captureStdout(fn: () => void): string {
 }
 
 describe("printCostForensics", () => {
-  it("flags a Phase B breach when peak single-call FRESH input exceeds 80k", () => {
-    // Genuine cold cap-escape: 504,737 input, mostly fresh (little cache reuse).
+  it("does not infer context safety from a large cache hit", () => {
+    const out = captureStdout(() =>
+      printCostForensics(summary([event({ source: "message", inputTokens: 400000, cacheReadTokens: 350000 })])),
+    );
+    expect(out).not.toContain("NOT a cap breach");
+    expect(out).toContain("Cache-read tokens still occupy request context");
+  });
+  it("reports high fresh usage without claiming a per-request breach", () => {
     const out = captureStdout(() =>
       printCostForensics(summary([event({ source: "task", inputTokens: 504_737, cacheReadTokens: 20_000 })])),
     );
-    expect(out).toContain("Phase B target breach");
+    expect(out).not.toContain("Phase B target breach");
     expect(out).toContain("484,737"); // fresh = 504,737 - 20,000
   });
 
-  it("does NOT flag a breach when high input is aggregate multi-step reuse (high cache hit)", () => {
-    // Real case, session 6f17a13c1591: task totalUsage aggregated across steps —
-    // 378,613 input but 324,224 cache-read → only 54,389 fresh. Not a cap breach.
+  it("keeps aggregate usage separate from a context-safety conclusion", () => {
     const out = captureStdout(() =>
       printCostForensics(summary([event({ source: "task", inputTokens: 378_613, cacheReadTokens: 324_224 })])),
     );
     expect(out).not.toContain("Phase B target breach");
-    expect(out).toContain("aggregate multi-step reuse");
+    expect(out).toContain("Aggregated usage and failed requests require separate request/error evidence");
   });
 
   it("flags the NULL message_seq regression (A5 write-ahead bypass)", () => {
@@ -175,9 +179,9 @@ describe("printCostForensics", () => {
 });
 
 describe("computeCacheCadence", () => {
-  it("estimates re-billed tokens for calls that miss a cacheable prefix AFTER warm-up", () => {
-    // Prefix proven cacheable (call 2 hit 16,896). Calls 3-4 read 0% despite it
-    // → fast-loop latency re-bill. Call 1 cold-start is NOT counted.
+  it("compares zero reads after a recorded hit without counting cold start", () => {
+    // Call 2 records a hit; calls 3-4 record zero. These usage rows contain
+    // no request identity or provider evidence establishing a cause.
     const c = computeCacheCadence([
       event({ source: "message", inputTokens: 17_000, cacheReadTokens: 0 }), // cold start (not counted)
       event({ source: "message", inputTokens: 18_000, cacheReadTokens: 16_896 }), // warm-up hit
@@ -234,6 +238,9 @@ describe("printCostForensics — cache cadence line", () => {
     );
     expect(out).toContain("Cache cadence");
     expect(out).toContain("33,792");
+    expect(out).toContain("Cause unverified");
+    expect(out).toContain("hypothetical comparison");
+    expect(out).not.toContain("Likely fast tool-loop latency");
   });
 
   it("does NOT print the cadence line when there is no post-warm miss", () => {

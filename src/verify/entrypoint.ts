@@ -1,7 +1,7 @@
 import { VERIFY_FAIL_MARKER, VERIFY_PASS_MARKER } from "../product-loop/verify-result";
 import type { TaskRequest, VerifyRecipe } from "../types/index";
 import type { SandboxMode, SandboxSettings } from "../utils/settings";
-import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint } from "./checkpoint";
+import { ensureVerifyCheckpoint, type PreparedVerifyCheckpoint, type VerifyBootstrapApproval } from "./checkpoint";
 import { loadVerifyEnvironment } from "./environment";
 import { buildBrowserGuidance, buildEvidenceGuidance, buildReadinessGuidance } from "./evidence";
 import { BROWSER_TOOL_NAME, resolveBrowserToolAvailable, type VerifyHostCapabilityDeps } from "./host-capabilities";
@@ -444,10 +444,14 @@ export async function prepareVerifySandbox(
   recipeOverride?: VerifyRecipe | null,
   onProgress?: (detail: string) => void,
   sandboxMode: SandboxMode = "shuru",
+  approve?: VerifyBootstrapApproval,
 ): Promise<PreparedVerifySandbox> {
   const runtime = createVerifyRuntimeConfig(cwd, baseSettings, recipeOverride, sandboxMode);
-  onProgress?.("Preparing verify checkpoint");
-  const checkpoint = await ensureVerifyCheckpoint(cwd, runtime.profile, runtime.sandboxSettings, onProgress);
+  onProgress?.(sandboxMode === "off" ? "Sandbox off — running verify on host" : "Preparing verify checkpoint");
+  const checkpoint =
+    sandboxMode === "off"
+      ? { created: false }
+      : await ensureVerifyCheckpoint(cwd, runtime.profile, runtime.sandboxSettings, onProgress, approve);
   if (checkpoint.checkpointName) {
     runtime.sandboxSettings.from = checkpoint.checkpointName;
     if (checkpoint.guestWorkdir) {

@@ -87,10 +87,30 @@ function formatTimestamp(ts: Date | string | undefined): string {
   return d.toISOString().replace("T", " ").slice(0, 19);
 }
 
-function renderEntries(entries: readonly ChatEntry[]): string[] {
+function flattenToolGroups(entries: readonly ChatEntry[]): ChatEntry[] {
+  return entries.flatMap((entry) => {
+    if (entry.type !== "tool_group" || !entry.toolGroup?.items.length) return [entry];
+    const tools = entry.toolGroup.items.map(
+      (item): ChatEntry => ({
+        type: item.result ? "tool_result" : "tool_call",
+        content: item.result
+          ? item.result.success
+            ? item.result.output || "Success"
+            : item.result.error || "Error"
+          : item.toolCall.function.arguments,
+        timestamp: new Date(item.finishedAt ?? item.startedAt),
+        toolCall: item.toolCall,
+        toolResult: item.result,
+      }),
+    );
+    return entry.content ? [entry, ...tools] : tools;
+  });
+}
+
+function renderEntries(entries: readonly ChatEntry[], includeTimestamps = true): string[] {
   const lines: string[] = [];
   for (const entry of entries) {
-    const ts = formatTimestamp(entry.timestamp);
+    const ts = includeTimestamps ? formatTimestamp(entry.timestamp) : "";
     switch (entry.type) {
       case "user":
         lines.push(`[${ts}] You:`);
@@ -148,10 +168,7 @@ function renderEntries(entries: readonly ChatEntry[]): string[] {
 }
 
 /**
- * Quick structural signature so we can detect whether DB and live scrollback
- * are telling the same story without doing a full content diff. We compare
- * total entry count and the count of each kind — if those match, the two
- * sources almost certainly agree and we can emit a single block.
+ * Structural counts for diagnostics only; equality requires matching content.
  */
 function signature(entries: readonly ChatEntry[]): string {
   const counts: Record<string, number> = {};
@@ -171,28 +188,33 @@ function formatExport(
   timeline: readonly InteractionRow[],
 ): { text: string; mode: "db_only" | "live_only" | "merged" | "synced" } {
   const timelineBlock = renderInteractionTimeline(timeline);
-  const dbSig = signature(dbEntries);
-  const liveSig = signature(liveEntries);
+  const flatDbEntries = flattenToolGroups(dbEntries);
+  const flatLiveEntries = flattenToolGroups(liveEntries);
+  const dbSig = signature(flatDbEntries);
+  const liveSig = signature(flatLiveEntries);
+  const sameContent =
+    renderEntries(flatDbEntries, false).join("\n") === renderEntries(flatLiveEntries, false).join("\n");
   const header: string[] = [
     "=".repeat(72),
     "  muonroi-cli — Chat Export",
     `  Exported: ${formatTimestamp(new Date())}`,
     `  DB entries:    ${dbEntries.length}`,
     `  Live entries:  ${liveEntries.length}`,
+    `  Expanded entries: DB ${flatDbEntries.length}, TUI ${flatLiveEntries.length}`,
     `  Timeline rows: ${timeline.length}`,
     "=".repeat(72),
     "",
   ];
 
   // Case 1: DB and live agree — single block, source=db (canonical).
-  if (dbSig === liveSig && dbEntries.length > 0) {
+  if (sameContent && dbEntries.length > 0) {
     return {
       text: [
         ...header,
         "(DB and TUI scrollback match — single rendering)",
         "",
         ...timelineBlock,
-        ...renderEntries(dbEntries),
+        ...renderEntries(flatDbEntries),
         "=".repeat(72),
         "  End of export",
         "=".repeat(72),
@@ -214,7 +236,7 @@ function formatExport(
         ...timelineBlock,
         "── TUI Scrollback (in-memory) ──",
         "",
-        ...renderEntries(liveEntries),
+        ...renderEntries(flatLiveEntries),
         "=".repeat(72),
         "  End of export",
         "=".repeat(72),
@@ -232,7 +254,7 @@ function formatExport(
         "(Live scrollback unavailable — showing DB only)",
         "",
         ...timelineBlock,
-        ...renderEntries(dbEntries),
+        ...renderEntries(flatDbEntries),
         "=".repeat(72),
         "  End of export",
         "=".repeat(72),
@@ -247,7 +269,7 @@ function formatExport(
   return {
     text: [
       ...header,
-      `WARNING: DB and TUI scrollback disagree.`,
+      `WARNING: DB and TUI transcript content differs.`,
       `  DB signature:    ${dbSig}`,
       `  Live signature:  ${liveSig}`,
       `Both renderings are included below for comparison.`,
@@ -257,12 +279,12 @@ function formatExport(
       "── Section A: Persisted (DB)",
       "─".repeat(72),
       "",
-      ...renderEntries(dbEntries),
+      ...renderEntries(flatDbEntries),
       "─".repeat(72),
       "── Section B: Live TUI Scrollback",
       "─".repeat(72),
       "",
-      ...renderEntries(liveEntries),
+      ...renderEntries(flatLiveEntries),
       "=".repeat(72),
       "  End of export",
       "=".repeat(72),

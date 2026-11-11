@@ -1,9 +1,10 @@
 import { breadcrumb } from "../council/crash-breadcrumb.js";
-import { readState } from "../gsd/workflow-engine.js";
 import { runPipeline } from "../pil/pipeline.js";
 import type { PipelineContext } from "../pil/types.js";
 import type { ToolResult } from "../types/index.js";
+import { recordIntegrationHealth } from "../utils/integration-health.js";
 import { logger } from "../utils/logger.js";
+import { readState } from "../workflow/workflow-engine.js";
 import type { MessageProcessorDeps } from "./message-processor.js";
 import { type ComplexitySize, getSessionLastTask, resolveCeiling } from "./scope-ceiling.js";
 
@@ -49,6 +50,7 @@ function startPilSupplement(
   let alive = true;
   let delivered = false;
   let failed = false;
+  let failureReason: string | undefined;
   let result: PipelineContext | undefined;
   const current = () =>
     alive && !parent?.aborted && (deps.session?.id ?? null) === sessionId && deps.bash.getCwd() === cwd;
@@ -85,11 +87,30 @@ function startPilSupplement(
             breadcrumb("background.pil.phase", { sessionId, name, state, ...(error ? { error } : {}) });
           },
         });
-        if (current()) result = ctx;
-        else cancel();
+        if (current()) {
+          result = ctx;
+          recordIntegrationHealth({
+            component: "pil",
+            check: "background-enrichment",
+            cwd,
+            status: ctx.fallbackReason ? "degraded" : "ready",
+            detail: ctx.fallbackReason ?? "Advisory enrichment completed; does not authorize routing or execution.",
+            phase: ctx.fallbackPhase,
+            durationMs: ctx.fallbackDurationMs,
+          });
+        } else cancel();
       } catch (err) {
         failed = true;
         const error = err instanceof Error ? err.message : String(err);
+        failureReason = error;
+        if (!controller.signal.aborted)
+          recordIntegrationHealth({
+            component: "pil",
+            check: "background-enrichment",
+            cwd,
+            status: "unavailable",
+            detail: error,
+          });
         if (controller.signal.aborted) logger.debug("pil", "Background enrichment cancelled", { sessionId, error });
         else logger.error("pil", "Background enrichment failed; leader continues", { sessionId, error });
       } finally {
@@ -110,8 +131,17 @@ function startPilSupplement(
         return {
           success: true,
           output: failed
-            ? "PIL supplement unavailable. Continue using your own judgment."
-            : "PIL supplement pending. Continue the task without waiting or repeatedly polling.",
+            ? JSON.stringify({
+                status: "unavailable",
+                reason: failureReason,
+                information: "",
+                advisory: "Optional supplement; continue using your own judgment.",
+              })
+            : JSON.stringify({
+                status: "pending",
+                information: "",
+                advisory: "Continue without waiting or repeatedly polling.",
+              }),
         };
       delivered = true;
       return {
@@ -120,9 +150,12 @@ function startPilSupplement(
           advisory:
             "Optional information for the leader; it does not decide routing, council, workflow, or permissions.",
           taskType: result.taskType,
+          status: result.fallbackReason ? "degraded" : "ready",
           domain: result.domain,
           confidence: result.confidence,
           fallbackReason: result.fallbackReason ?? null,
+          fallbackPhase: result.fallbackPhase ?? null,
+          fallbackDurationMs: result.fallbackDurationMs ?? null,
           information: result.enriched.replace(raw, "").trim().slice(0, 6000),
         }),
       };

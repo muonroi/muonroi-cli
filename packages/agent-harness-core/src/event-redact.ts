@@ -109,6 +109,13 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
     phase: "pass",
     optionCount: "pass",
     defaultIndex: "pass",
+    // Approval-card fields (source/toolName/toolCallId/jobId are machine ids;
+    // preview is tool input, so it is capped + scrubbed like `question`).
+    source: "pass",
+    toolName: "pass",
+    toolCallId: "pass",
+    jobId: "pass",
+    preview: 300,
   },
   "askcard-answered": {
     questionId: "pass",
@@ -188,6 +195,18 @@ const ALLOWED_FIELDS: Record<EventKind, Record<string, FieldSpec>> = {
   "input-ready": {
     flushed: "pass",
     dropped: "pass",
+    ts: "pass",
+  },
+  // Counters, an enum action, a stable stop code and a spend figure — no prompt
+  // or model output. Without this entry the fail-safe below would strip the
+  // event to {t, kind}, hiding the stop reason a driver needs.
+  "ideal-autopilot": {
+    action: "pass",
+    turn: "pass",
+    maxTurns: "pass",
+    noProgressStreak: "pass",
+    reason: "pass",
+    spentUsd: "pass",
     ts: "pass",
   },
   toast: {

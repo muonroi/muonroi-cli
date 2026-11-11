@@ -1,6 +1,6 @@
 import type { CouncilLLM, PreflightResponder } from "../council/types.js";
-import type { WorkflowKind } from "../gsd/types.js";
 import type { ToolResult, VerifyRecipe } from "../types/index.js";
+import type { WorkflowKind } from "../workflow/types.js";
 import type { VerifyVerdict } from "./verify-result.js";
 
 export type { WorkflowKind };
@@ -580,7 +580,7 @@ export interface RunPhasesOptions {
   }) => Promise<Omit<CustomerDecision, "seq" | "timestampUtc" | "phaseId" | "sprintN">>;
   suppressPush?: boolean;
   backoffDelays?: number[];
-  /** Project repo cwd — hosts `.planning/` when MUONROI_GSD_NATIVE=1 */
+  /** Project repo cwd — hosts `.planning/` when MUONROI_FLOW_NATIVE=1 */
   projectCwd?: string;
   idea?: string;
 }

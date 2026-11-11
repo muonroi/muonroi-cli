@@ -22,6 +22,7 @@
  */
 
 import type { ChatEntry, ToolCall, ToolResult } from "../../types/index";
+import { logger } from "../../utils/logger.js";
 import {
   type BackgroundJobSnapshot,
   type BackgroundJobState,
@@ -30,7 +31,7 @@ import {
   processJobKey,
 } from "../../utils/background-jobs.js";
 
-export type ActivityKind = "subagent" | "delegate" | "background";
+export type ActivityKind = "subagent" | "delegate" | "council" | "background";
 export type ActivityStatus = "running" | "done" | "failed";
 
 export interface AgentActivity {
@@ -51,6 +52,7 @@ export interface AgentActivity {
 const KIND_BY_TOOL: Record<string, ActivityKind> = {
   task: "subagent",
   delegate: "delegate",
+  convene_council: "council",
 };
 
 function parseArgs(tc: ToolCall): Record<string, unknown> {
@@ -71,6 +73,10 @@ function str(value: unknown): string {
 /** The activity kind a tool call represents, or null if it spawns nothing. */
 export function activityKindFor(tc: ToolCall): ActivityKind | null {
   const name = tc.function.name;
+  if (name === "flow_plan_review") {
+    const action = parseArgs(tc).action;
+    return action === "complete" ? null : action === "revalidate" ? "subagent" : "council";
+  }
   const known = KIND_BY_TOOL[name];
   if (known) return known;
   // A backgrounded shell is a spawned job too — but only when it actually
@@ -96,6 +102,30 @@ function fromJobState(state: BackgroundJobState): ActivityStatus {
   return state;
 }
 
+/** Flow wraps the durable dispatch receipt in JSON, including reused jobs. */
+function planReviewJob(result: ToolResult): { id: string; agent: string; description: string; output: string } | null {
+  if (!result.success) return null;
+  try {
+    const dispatch = JSON.parse(result.output ?? "");
+    const job = dispatch?.receipt?.delegation;
+    if (
+      dispatch?.ok !== true ||
+      dispatch.pending !== true ||
+      dispatch.receipt?.success !== true ||
+      typeof job?.id !== "string" ||
+      !job.id ||
+      !["council", "verify"].includes(job.agent)
+    )
+      return null;
+    return { id: job.id, agent: job.agent, description: str(job.description), output: str(dispatch.receipt.output) };
+  } catch (err) {
+    logger.warn("ui", "Invalid Flow plan review dispatch receipt", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
 function toActivity(
   tc: ToolCall,
   result: ToolResult | undefined,
@@ -106,23 +136,46 @@ function toActivity(
   const kind = kindFor(tc, result);
   if (!kind) return null;
   const args = parseArgs(tc);
+  const planReview = tc.function.name === "flow_plan_review" && result ? planReviewJob(result) : null;
+  // Completing, skipping or refusing a review does not spawn another council.
+  if (tc.function.name === "flow_plan_review" && result && !planReview) return null;
 
-  const agent = kind === "background" ? "" : str(args.agent);
+  const agent =
+    planReview?.agent ??
+    (tc.function.name === "flow_plan_review" && args.action === "revalidate"
+      ? "verify"
+      : kind === "background"
+        ? ""
+        : kind === "council"
+          ? "council"
+          : str(args.agent));
   const command = str(args.command);
-  const label = (kind === "background" ? command : str(args.description) || str(args.prompt)) || tc.function.name;
-  const request = kind === "background" ? command : str(args.prompt);
+  const label =
+    planReview?.description ||
+    (kind === "background"
+      ? command
+      : kind === "council"
+        ? str(args.topic)
+        : str(args.description) || str(args.prompt)) ||
+    tc.function.name;
+  const request =
+    kind === "background"
+      ? command
+      : kind === "council"
+        ? [str(args.reason), str(args.context)].filter(Boolean).join("\n\n")
+        : str(args.prompt);
 
   let status: ActivityStatus = "running";
   if (result) status = result.success ? "done" : "failed";
 
-  let output = result ? (result.success ? result.output || "" : result.error || "") : "";
+  let output = planReview?.output ?? (result ? (result.success ? result.output || "" : result.error || "") : "");
   let job: AgentActivity["job"];
 
   if (result?.success) {
     // A "started" result means the job is running — not that it finished.
     // A job missing from the snapshot is still running: the record exists
     // before the tool returns, so absence only means the poll has not caught up.
-    const delegationId = parseDelegationStartedId(result.output);
+    const delegationId = planReview?.id ?? parseDelegationStartedId(result.output);
     const proc = delegationId ? null : parseBackgroundProcessStarted(result.output);
     if (delegationId) {
       job = { delegationId };
@@ -160,11 +213,19 @@ export function collectAgentActivities(
   live?: BackgroundJobSnapshot,
 ): AgentActivity[] {
   const byId = new Map<string, AgentActivity>();
+  const settledCalls = new Set<string>();
 
   const add = (tc: ToolCall | undefined, result: ToolResult | undefined, at?: number) => {
     if (!tc) return;
+    if (result) settledCalls.add(tc.id);
     const activity = toActivity(tc, result, live, at);
-    if (activity) byId.set(activity.id, activity);
+    if (activity) {
+      const existing = activity.job?.delegationId
+        ? [...byId.values()].find((a) => a.job?.delegationId === activity.job!.delegationId)
+        : undefined;
+      const id = existing?.id ?? activity.id;
+      byId.set(id, { ...activity, id });
+    }
   };
 
   for (const entry of messages) {
@@ -181,7 +242,7 @@ export function collectAgentActivities(
   // activeToolCalls is not always cleared the instant a result lands, so adding
   // one unconditionally would flip a finished row back to "running".
   for (const tc of activeToolCalls) {
-    if (!byId.has(tc.id)) add(tc, undefined);
+    if (!byId.has(tc.id) && !settledCalls.has(tc.id)) add(tc, undefined);
   }
 
   return [...byId.values()];

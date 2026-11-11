@@ -20,7 +20,7 @@ vi.mock("../layer3-ee-injection.js", () => ({
   layer3EeInjection: async (ctx: PipelineContext) => ctx,
   surfaceCompactionArtifacts: async (ctx: PipelineContext) => ctx,
 }));
-vi.mock("../layer4-gsd.js", () => ({ layer4Gsd: async (ctx: PipelineContext) => ctx }));
+vi.mock("../layer4-flow.js", () => ({ layer4Flow: async (ctx: PipelineContext) => ctx }));
 vi.mock("../layer5-context.js", () => ({ layer5Context: mocks.layer5 }));
 vi.mock("../layer6-output.js", () => ({
   layer6Output: mocks.layer6,
@@ -114,6 +114,8 @@ describe("PIL automated preparation deadline (session cde402aafc74)", () => {
     expect(result).not.toBe("still-pending");
     expect((result as PipelineContext).fallbackReason).toBe("pipeline-timeout");
     expect(phases).toContain("layer5-context-enrichment:error");
+    expect((result as PipelineContext).fallbackPhase).toBe("layer5-context-enrichment");
+    expect((result as PipelineContext).fallbackDurationMs).toBeGreaterThanOrEqual(100);
     expect(mocks.layer6).not.toHaveBeenCalled();
   });
 

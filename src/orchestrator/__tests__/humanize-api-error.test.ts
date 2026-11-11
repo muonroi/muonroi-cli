@@ -20,6 +20,16 @@ function apiErr(statusCode: number, responseBody: string): APICallError {
 }
 
 describe("humanizeApiError — routing context (P0 #2)", () => {
+  it.each([429, 50429, 142900])("does not describe local context token count %i as provider rate limiting", (count) => {
+    const msg = humanizeApiError(
+      new Error(
+        `Request context overflow: estimated ${count} input tokens + 16000 reserved output tokens exceed the model context window (58134). Request was not sent.`,
+      ),
+      { modelId: "fixture-model", providerId: "fixture-provider" },
+    );
+    expect(msg).not.toMatch(/rate.limit|routed to model/i);
+    expect(msg).toContain("Request was not sent");
+  });
   it("adds routed model + provider + a balance hint on 402", () => {
     const err = apiErr(402, '{"error":{"message":"Insufficient Balance"}}');
     const msg = humanizeApiError(err, { modelId: "deepseek-v4-flash", providerId: "deepseek" });

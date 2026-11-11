@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { buildResearchSystemPrompt } from "../prompts.js";
 
+// Council tools run on a per-call fork of the session BashTool (BashTool.fork); the
+// tool factory is mocked here, so a stub that can fork is all these tests need.
+const FORKABLE_BASH = { fork: () => ({ cleanup: async () => {} }) };
+
 const FINISH = { type: "finish", finishReason: "stop", totalUsage: { inputTokens: 1, outputTokens: 1 } };
 
 /**
@@ -79,6 +83,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({
         factory: {},
@@ -113,7 +118,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
     // bash and mode are not used in the mocked code paths
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     const result = await llm.research("gpt-4o", "Check https://example.com for issues", "", undefined);
 
@@ -134,6 +139,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -162,7 +168,7 @@ describe("CQ-04: research() URL detection and gap annotation", () => {
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     const result = await llm.research("gpt-4o", "What is the council architecture?", "", undefined);
 
@@ -193,6 +199,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -221,7 +228,7 @@ describe("CQ-03: research() MCP tool merge", () => {
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     await llm.research("gpt-4o", "What are best practices for TypeScript?", "", undefined);
 
@@ -247,6 +254,7 @@ describe("CQ-03: research() MCP tool merge", () => {
       loadKeyForProvider: vi.fn().mockResolvedValue("test-key"),
     }));
     vi.doMock("../../providers/runtime.js", () => ({
+      hasProviderFactory: vi.fn().mockReturnValue(false),
       detectProviderForModel: vi.fn().mockReturnValue("openai"),
       createProviderFactory: vi.fn().mockReturnValue({ factory: {} }),
       createProviderFactoryAsync: vi.fn().mockResolvedValue({ factory: {} }),
@@ -271,7 +279,7 @@ describe("CQ-03: research() MCP tool merge", () => {
 
     const { createCouncilLLM } = await import("../llm.js");
     const stats = { calls: 0, startMs: Date.now(), phases: [] };
-    const llm = createCouncilLLM({} as any, "agent" as any, undefined, stats);
+    const llm = createCouncilLLM(FORKABLE_BASH as any, "agent" as any, undefined, stats);
 
     // Should not throw; falls back to builtins
     const result = await llm.research("gpt-4o", "Some topic", "", undefined);

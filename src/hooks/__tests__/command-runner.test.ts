@@ -17,6 +17,7 @@ describe("hooks/command-runner — runCommandHooksForEvent", () => {
   const tmpHome = path.join(os.tmpdir(), `muonroi-cli-hooks-cr-${process.pid}-${Date.now()}`);
   const origHome = process.env.HOME;
   const origUserProfile = process.env.USERPROFILE;
+  const origCliHome = process.env.MUONROI_CLI_HOME;
   let runCommandHooksForEvent: typeof import("../command-runner.js").runCommandHooksForEvent;
 
   function writeUserHooks(hooksConfig: unknown) {
@@ -29,6 +30,7 @@ describe("hooks/command-runner — runCommandHooksForEvent", () => {
     fs.mkdirSync(tmpHome, { recursive: true });
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
     vi.resetModules();
     const mod = await import("../command-runner.js");
     runCommandHooksForEvent = mod.runCommandHooksForEvent;
@@ -40,6 +42,8 @@ describe("hooks/command-runner — runCommandHooksForEvent", () => {
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
+    if (origCliHome === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = origCliHome;
   });
 
   const cwd = os.tmpdir();

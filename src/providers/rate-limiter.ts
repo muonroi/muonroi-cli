@@ -68,6 +68,8 @@
  */
 
 import type { ModelRateLimits } from "../types/index.js";
+import { logger } from "../utils/logger.js";
+import { abortableSleep } from "./rate-limit-backoff.js";
 
 /** Length of the rolling window a `requests_per_minute` budget is measured over. */
 export const RATE_LIMIT_WINDOW_MS = 60_000;
@@ -116,12 +118,12 @@ export interface RateLimitWait {
 /** Injection seam so tests drive the clock instead of sleeping in wall time. */
 export interface PacerClock {
   now: () => number;
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
 }
 
 const realClock: PacerClock = {
   now: () => Date.now(),
-  sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  sleep: abortableSleep,
 };
 
 function pacingDisabled(): boolean {
@@ -191,14 +193,27 @@ function reserveSlot(state: PacerState, rpm: number, now: number): number {
  * on elapsed time alone therefore announced phantom "waited 1ms" holds on calls
  * that were never delayed at all — measured live against api.stepfun.ai.
  */
-async function acquireConcurrency(state: PacerState, limit: number): Promise<boolean> {
+async function acquireConcurrency(state: PacerState, limit: number, signal?: AbortSignal): Promise<boolean> {
+  signal?.throwIfAborted();
   if (state.inFlight < limit) {
     state.inFlight++;
     return false;
   }
   // No increment on this path: the slot is HANDED OVER by releaseConcurrency,
   // which keeps `inFlight` unchanged across the transfer (see below).
-  await new Promise<void>((resolve) => state.waiters.push(resolve));
+  await new Promise<void>((resolve, reject) => {
+    const grant = () => {
+      signal?.removeEventListener("abort", cancel);
+      resolve();
+    };
+    const cancel = () => {
+      const index = state.waiters.indexOf(grant);
+      if (index >= 0) state.waiters.splice(index, 1);
+      reject(signal?.reason);
+    };
+    state.waiters.push(grant);
+    signal?.addEventListener("abort", cancel, { once: true });
+  });
   return true;
 }
 
@@ -251,7 +266,9 @@ export async function acquireRateLimitSlot(
   limits: ModelRateLimits | undefined,
   clock: PacerClock = realClock,
   onWait?: (wait: RateLimitWait) => void,
+  signal?: AbortSignal,
 ): Promise<RateLimitLease> {
+  signal?.throwIfAborted();
   const waits: RateLimitWait[] = [];
   /**
    * Announce a wait the moment it is DECIDED, never after it elapses.
@@ -274,41 +291,60 @@ export async function acquireRateLimitSlot(
   }
 
   const state = stateFor(key);
-
-  if (typeof rpm === "number" && rpm > 0) {
-    const now = clock.now();
-    const at = reserveSlot(state, rpm, now);
-    const waitMs = at - now;
-    if (waitMs > 0) {
-      noteWait({ kind: "requests-per-minute", limit: rpm, waitMs });
-      await clock.sleep(waitMs);
+  let reservation: number | undefined;
+  let holdsSlot = false;
+  try {
+    if (typeof rpm === "number" && rpm > 0) {
+      const now = clock.now();
+      const at = reserveSlot(state, rpm, now);
+      reservation = at;
+      const waitMs = at - now;
+      if (waitMs > 0) {
+        noteWait({ kind: "requests-per-minute", limit: rpm, waitMs });
+        signal?.throwIfAborted();
+        await clock.sleep(waitMs, signal);
+      }
     }
-  }
 
-  if (typeof concurrency === "number" && concurrency > 0) {
-    const before = clock.now();
-    const queued = await acquireConcurrency(state, concurrency);
-    const waitMs = queued ? clock.now() - before : 0;
-    // Asymmetry with the RPM wait above, deliberately: a concurrency wait's
-    // duration is not knowable in advance (it ends when some other call finishes),
-    // so it can only be reported once measured. That is acceptable here because a
-    // concurrency wait means other calls ARE actively in flight — the run is
-    // visibly working — whereas an RPM wait is a pure clock hold with nothing
-    // running, which is the case that must never look like a hang.
-    if (waitMs > 0) noteWait({ kind: "concurrency", limit: concurrency, waitMs });
-    let released = false;
-    return {
-      waits,
-      holdsSlot: true,
-      release: () => {
-        if (released) return;
-        released = true;
-        releaseConcurrency(state);
-      },
-    };
-  }
+    signal?.throwIfAborted();
+    if (typeof concurrency === "number" && concurrency > 0) {
+      const before = clock.now();
+      const queued = await acquireConcurrency(state, concurrency, signal);
+      holdsSlot = true;
+      signal?.throwIfAborted();
+      const waitMs = queued ? clock.now() - before : 0;
+      // Asymmetry with the RPM wait above, deliberately: a concurrency wait's
+      // duration is not knowable in advance (it ends when some other call finishes),
+      // so it can only be reported once measured. That is acceptable here because a
+      // concurrency wait means other calls ARE actively in flight — the run is
+      // visibly working — whereas an RPM wait is a pure clock hold with nothing
+      // running, which is the case that must never look like a hang.
+      if (waitMs > 0) noteWait({ kind: "concurrency", limit: concurrency, waitMs });
+      let released = false;
+      return {
+        waits,
+        holdsSlot: true,
+        release: () => {
+          if (released) return;
+          released = true;
+          releaseConcurrency(state);
+        },
+      };
+    }
 
-  return { waits, holdsSlot: false, release: () => {} };
+    return { waits, holdsSlot: false, release: () => {} };
+  } catch (err) {
+    if (holdsSlot) releaseConcurrency(state);
+    if (reservation !== undefined) {
+      const index = state.dispatches.indexOf(reservation);
+      if (index >= 0) state.dispatches.splice(index, 1);
+    }
+    logger.debug("orchestrator", "Provider pacing interrupted", {
+      provider: key,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    throw err;
+  }
 }
 
 /**

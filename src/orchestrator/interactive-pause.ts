@@ -18,6 +18,7 @@
  */
 
 let pauseDepth = 0;
+let boundedWorkerWaitDepth = 0;
 
 /** Enter an interactive pause — call before awaiting a blocking card. */
 export function beginInteractivePause(): void {
@@ -34,7 +35,21 @@ export function isInteractivePaused(): boolean {
   return pauseDepth > 0;
 }
 
+/** Worker I/O pauses idle detection only; the original hard turn deadline remains armed. */
+export function beginBoundedWorkerWait(): void {
+  boundedWorkerWaitDepth += 1;
+  beginInteractivePause();
+}
+export function endBoundedWorkerWait(): void {
+  boundedWorkerWaitDepth = Math.max(0, boundedWorkerWaitDepth - 1);
+  endInteractivePause();
+}
+export function isBoundedWorkerWaitActive(): boolean {
+  return boundedWorkerWaitDepth > 0;
+}
+
 /** Test-only: force the counter back to zero. */
 export function __resetInteractivePauseForTests(): void {
   pauseDepth = 0;
+  boundedWorkerWaitDepth = 0;
 }

@@ -1,0 +1,67 @@
+{
+  "at": "2026-10-15T01:45:31.802Z",
+  "synthetic": true,
+  "chatNetworkRequests": 0,
+  "limits": {
+    "concurrency": 5,
+    "requestsPerMinute": 100,
+    "tokensPerMinute": 500000
+  },
+  "observations": {
+    "healthyModelBeforeRefusal": {
+      "elapsedVirtualMs": 0,
+      "sleeps": []
+    },
+    "differentModelSameProviderAfterRefusal": {
+      "elapsedVirtualMs": 6000,
+      "sleeps": [2000, 2000, 2000]
+    },
+    "differentProviderDuringCooldown": {
+      "elapsedVirtualMs": 0,
+      "sleeps": []
+    },
+    "exhaustedWrapper": {
+      "name": "ProviderRateLimitError",
+      "attempts": 1,
+      "retrySleep": 0,
+      "status": 429,
+      "message": "Rate-limited by the \"diagnostic-provider\" provider account (HTTP 429): still refused after 1 attempt(s) and 0s of backoff. The provider asked to wait 6s more. The limit is the account's budget, shared by every muonroi agent on this machine (the main agent and all background delegations). Do not retry immediately: wait for running agents to finish, retry later, or launch fewer agents in parallel. Provider said: Rate limit reached, please try again later.",
+      "outerBody": null,
+      "outerHeaders": null,
+      "causeBody": "{\"error\":{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}}",
+      "causeTrace": "synthetic-trace",
+      "rawIsQuotaExhaustion": false
+    },
+    "sameProviderAfterRetryBudgetAlreadyExhausted": {
+      "elapsedVirtualMs": 6000,
+      "sleeps": [2000, 2000, 2000]
+    },
+    "waitReasons": [
+      {
+        "kind": "provider-cooldown",
+        "limit": 0,
+        "waitMs": 6000
+      },
+      {
+        "kind": "provider-cooldown",
+        "limit": 0,
+        "waitMs": 6000
+      }
+    ],
+    "sdk-0": {
+      "requests": 1,
+      "elapsedMs": 25,
+      "errorName": "AI_APICallError"
+    },
+    "sdk-default": {
+      "requests": 3,
+      "elapsedMs": 6027,
+      "errorName": "AI_RetryError"
+    },
+    "sdkDefaultWithExhaustedWrapper": {
+      "requests": 1,
+      "errorName": "ProviderRateLimitError"
+    }
+  },
+  "fixtureDir": "C:\\Users\\phila\\AppData\\Local\\Temp\\muonroi-rate-replay-03H4z4"
+}

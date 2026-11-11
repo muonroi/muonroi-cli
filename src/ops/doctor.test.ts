@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // RED phase: import module under test (will fail until doctor.ts is created)
 import { type CheckResult, formatDoctorReport, runDoctor } from "./doctor.js";
 
-describe("doctor — runDoctor returns 10 checks", () => {
+describe("doctor — environment and recorded runtime checks", () => {
   beforeEach(() => {
     // Mock fetch to avoid real network calls in tests
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: false, status: 503 }));
@@ -14,9 +14,10 @@ describe("doctor — runDoctor returns 10 checks", () => {
     vi.restoreAllMocks();
   });
 
-  it("returns exactly 10 CheckResult entries (dotnet added in VERIFY F1)", async () => {
+  it("includes the recorded runtime integration check", async () => {
     const results = await runDoctor();
-    expect(results).toHaveLength(10);
+    expect(results).toHaveLength(11);
+    expect(results.some((result) => result.name === "integrations.runtime")).toBe(true);
   });
 
   it("each CheckResult has valid name, status, and detail fields", async () => {

@@ -1,0 +1,342 @@
+﻿{
+  "files": [
+    {
+      "path": ".scratch/runtime-feedback-20261017/audit.py",
+      "sha256": "9e345292a0869cfca6f3b04916cfe1992dee208707ba060505b05460aca15908",
+      "bytes": 9930
+    },
+    {
+      "path": ".scratch/runtime-feedback-20261017/audit.json",
+      "sha256": "ad777ffad0c67e0cad9d5353b7fee9b5ec164be33f438e27c089af423e05dc1d",
+      "bytes": 52474
+    },
+    {
+      "path": ".scratch/runtime-feedback-20261017/mcp-usage-forensics.json",
+      "sha256": "0b818c02481ddd87176eb6a7fd5ba34f4f7ff7095993d73860206c65511c4cc1",
+      "bytes": 6031
+    },
+    {
+      "path": ".scratch/runtime-feedback-20261017/native-controls.mjs",
+      "sha256": "ac60039d08123a4ac2b7b75ad8860acfb54d2b70431a50f2579e42cfd27ef42b",
+      "bytes": 2757
+    },
+    {
+      "path": ".scratch/runtime-feedback-20261017/native-controls.json",
+      "sha256": "2c41f87ea51c7ecaa7328fd32e46566b335c6bfea34fbd98f89013fb0c9fcd56",
+      "bytes": 2136
+    },
+    {
+      "path": ".scratch/runtime-feedback-20261017/native-controls-accepted.log",
+      "sha256": "24d4402591f4c74a0b4f6e9798154999e2cd3f0c63044d651f67fe393184f12d",
+      "bytes": 820
+    },
+    {
+      "path": "dist/src/tools/bash.js",
+      "sha256": "ce1b507081d1bfa9b07257f53494949611dc171580e27b9b502c7498f100f795",
+      "bytes": 35588
+    },
+    {
+      "path": "dist/src/tools/native-tools.js",
+      "sha256": "f667819a725425557d10c146e8ae8412d1596e22a5ae119a2cd8916d1ef5fb8a",
+      "bytes": 25524
+    },
+    {
+      "path": "dist/src/lsp/manager.js",
+      "sha256": "d5cbbfbdcc2eb9bfeb40548b2f51ee01d359a3210c509713f4022989c77eadc3",
+      "bytes": 29406
+    },
+    {
+      "path": "src/council/crash-breadcrumb.ts",
+      "sha256": "6c1cde410dd1739ca7890a2cd42714d6bf5fe6157bdffc103153f105ca92c5fd",
+      "bytes": 24881
+    },
+    {
+      "path": "src/council/llm.ts",
+      "sha256": "4654c32095dab621bd730d057c039ad5a8419834561298fd11bbe4aad4e6f2a0",
+      "bytes": 94280
+    },
+    {
+      "path": "src/providers/rate-ledger.ts",
+      "sha256": "acae05c5656c4e7e948d6f357eefdfcb37c4d31a2dee0b2d8d63da0b8985a585",
+      "bytes": 19072
+    },
+    {
+      "path": "src/orchestrator/prompts.ts",
+      "sha256": "f1a3939b3fca9a43aed2e0f1f404f2eb728df162c0ea6f80608f86d35c951cf5",
+      "bytes": 53090
+    }
+  ],
+  "originalLogHashes": {
+    "artifact-cache.jsonl": {
+      "bytes": 5286044,
+      "lines": 2606,
+      "sha256": "52a7574cc74f8fdc7f2c2ee826da53c66f6a7291b918556bfe1338d8b4f208fc",
+      "modifiedUtc": "2026-10-17T01:24:35.198421+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 654,
+        "429": 45,
+        "limit": 349,
+        "timeout": 38,
+        "stub": 47,
+        "UNCAUGHT_REJECTION_ERROR": 68
+      },
+      "firstTimestamp": "2025-12-21T21:03:13Z",
+      "lastTimestamp": "2026-10-15T09:07:21.492Z"
+    },
+    "council-breadcrumbs.jsonl": {
+      "bytes": 1621681,
+      "lines": 5845,
+      "sha256": "dfa9a1fe6504319e49dcdfb4a94b36cd09f6c08f9e43c39eb70ccdadf9ecf016",
+      "modifiedUtc": "2026-10-17T01:25:32.983610+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 99,
+        "429": 176,
+        "limit": 0,
+        "timeout": 0,
+        "stub": 0,
+        "UNCAUGHT_REJECTION_ERROR": 99
+      },
+      "firstTimestamp": "2026-10-06T04:31:09.201Z",
+      "lastTimestamp": "2026-10-17T01:25:32.961Z",
+      "validRecords": 5845,
+      "distinctSessions": 46,
+      "markers": {
+        "council.heartbeat": 1197,
+        "background.pil.phase": 290,
+        "pre-stream.ensureCouncilFactory.start": 280,
+        "pre-stream.ensureCouncilFactory.end": 280,
+        "council.phase.enter": 174,
+        "council.phase.exit": 174,
+        "process.exit": 133,
+        "pre-stream.toolEngine.end": 130,
+        "pre-stream.flowReady.start": 125,
+        "pre-stream.flowReady.end": 125,
+        "pre-stream.initOAuthProvider.start": 125,
+        "pre-stream.initOAuthProvider.end": 125
+      },
+      "currentFamilyRecords": 81,
+      "currentFamilyMarkers": {
+        "pre-stream.subSessionClassify.start": 2,
+        "pre-stream.subSessionClassify.end": 2,
+        "pre-stream.flowReady.start": 3,
+        "pre-stream.flowReady.end": 3,
+        "pre-stream.initOAuthProvider.start": 3,
+        "pre-stream.initOAuthProvider.end": 3,
+        "pre-stream.sessionStartHook.start": 1,
+        "pre-stream.sessionStartHook.end": 1,
+        "pre-stream.userPromptSubmitHook.start": 3,
+        "pre-stream.userPromptSubmitHook.end": 3,
+        "pre-stream.consumeBackgroundNotifications.start": 3,
+        "pre-stream.consumeBackgroundNotifications.end": 3,
+        "pre-stream.pilPrep.start": 3,
+        "pre-stream.pilPrep.end": 3,
+        "pre-stream.pilInteractionLog.start": 3,
+        "pre-stream.pilInteractionLog.end": 3,
+        "pre-stream.routerDecide.start": 3,
+        "background.pil.phase": 6,
+        "pre-stream.routerDecide.end": 3,
+        "pre-stream.providerRedetect.start": 3,
+        "pre-stream.providerRedetect.end": 3,
+        "pre-stream.toolEngine.start": 3,
+        "pre-stream.toolEngine.end": 4,
+        "mainStream.provider.start": 4,
+        "mainStream.firstProviderPart": 4,
+        "mainStream.provider.end": 4,
+        "pre-stream.subSessionSpawn.start": 1,
+        "pre-stream.subSessionSpawn.end": 1
+      },
+      "recordFields": [
+        "attempt",
+        "callId",
+        "chunksThisAttempt",
+        "chunksThisStep",
+        "diagnostics",
+        "elapsedMs",
+        "error",
+        "exitCode",
+        "inFlight",
+        "inFlightCount",
+        "kind",
+        "label",
+        "lastMarker",
+        "lastMarkerAtMs",
+        "lastMarkerPhase",
+        "marker",
+        "maxTokens",
+        "mem",
+        "model",
+        "modelId",
+        "msSinceTurnStart",
+        "name",
+        "otherListeners",
+        "outcome",
+        "partType",
+        "phase",
+        "pid",
+        "promptChars",
+        "provider",
+        "providerId",
+        "role",
+        "routeAction",
+        "sessionId",
+        "signal",
+        "state",
+        "statusId",
+        "systemChars",
+        "tMs",
+        "textChars",
+        "totalCandidates",
+        "ts",
+        "tuiActive",
+        "via"
+      ],
+      "memoryFields": ["external", "heapTotal", "heapUsed", "rss"]
+    },
+    "council-breadcrumbs.1.jsonl": {
+      "bytes": 4194178,
+      "lines": 11637,
+      "sha256": "0db0d854daa6636c61f15cd65d51fb5ca8f27770de4a25e7a2dab0b873180684",
+      "modifiedUtc": "2026-10-06T04:30:59.357740+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 13,
+        "429": 358,
+        "limit": 0,
+        "timeout": 0,
+        "stub": 0,
+        "UNCAUGHT_REJECTION_ERROR": 13
+      },
+      "firstTimestamp": "2026-09-09T04:05:01.758Z",
+      "lastTimestamp": "2026-10-06T04:30:59.337Z",
+      "validRecords": 11637,
+      "distinctSessions": 55,
+      "markers": {
+        "council.heartbeat": 7847,
+        "council.phase.enter": 620,
+        "council.phase.exit": 618,
+        "pre-stream.ensureCouncilFactory.start": 416,
+        "pre-stream.ensureCouncilFactory.end": 416,
+        "process.exit": 406,
+        "pre-stream.toolEngine.end": 60,
+        "pre-stream.subSessionClassify.start": 50,
+        "pre-stream.subSessionClassify.end": 50,
+        "pre-stream.flowReady.start": 50,
+        "pre-stream.flowReady.end": 50,
+        "pre-stream.initOAuthProvider.start": 50
+      },
+      "currentFamilyRecords": 0,
+      "currentFamilyMarkers": {},
+      "recordFields": [
+        "attempt",
+        "diagnostics",
+        "elapsedMs",
+        "errorMessage",
+        "exitCode",
+        "inFlight",
+        "inFlightCount",
+        "label",
+        "lastMarker",
+        "lastMarkerAtMs",
+        "lastMarkerPhase",
+        "marker",
+        "maxTokens",
+        "mem",
+        "modelId",
+        "msSinceTurnStart",
+        "otherListeners",
+        "outcome",
+        "phase",
+        "pid",
+        "promptChars",
+        "provider",
+        "providerId",
+        "role",
+        "routeAction",
+        "sessionId",
+        "signal",
+        "statusId",
+        "systemChars",
+        "tMs",
+        "textChars",
+        "totalCandidates",
+        "ts",
+        "tuiActive",
+        "via"
+      ],
+      "memoryFields": ["external", "heapTotal", "heapUsed", "rss"]
+    },
+    "debug.log": {
+      "bytes": 841940,
+      "lines": 2809,
+      "sha256": "5657a20b4a9753ca39d3e28e2a934bc054a9505b05970f675337a60dca5de502",
+      "modifiedUtc": "2026-10-17T01:24:58.086556+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 989,
+        "429": 58,
+        "limit": 60,
+        "timeout": 30,
+        "stub": 5,
+        "UNCAUGHT_REJECTION_ERROR": 245
+      },
+      "firstTimestamp": "2026-07-27T01:44:43.705Z",
+      "lastTimestamp": "2026-10-17T01:24:58.065Z"
+    },
+    "crash.log": {
+      "bytes": 15169,
+      "lines": 171,
+      "sha256": "33b05bf63bd03c6223d00e98bf4ae313a97cc0496e61616a699279072de88ccd",
+      "modifiedUtc": "2026-10-15T09:54:56.640156+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 22,
+        "429": 0,
+        "limit": 0,
+        "timeout": 3,
+        "stub": 0,
+        "UNCAUGHT_REJECTION_ERROR": 40
+      },
+      "firstTimestamp": "2026-07-31T06:53:36.699Z",
+      "lastTimestamp": "2026-10-15T09:54:56.640Z"
+    },
+    "tui-stderr.log": {
+      "bytes": 7873,
+      "lines": 53,
+      "sha256": "d3863217e31159562c48e7e7ecb83c8ddc11a61422ffa37479cbeaad282be786",
+      "modifiedUtc": "2026-10-16T15:26:46.699683+00:00",
+      "lexicalLines": {
+        "ERROR_or_WARN": 0,
+        "429": 0,
+        "limit": 0,
+        "timeout": 0,
+        "stub": 0,
+        "UNCAUGHT_REJECTION_ERROR": 0
+      },
+      "firstTimestamp": "2026-09-11T01:50:57.818Z",
+      "lastTimestamp": "2026-10-16T15:26:46.684Z"
+    }
+  },
+  "nativeControls": {
+    "stubReturnsNoEdits": true,
+    "bashReadsLiteralEnvAndSpacedPath": true,
+    "powershellReadsLiteralEnvAndSpacedPath": true,
+    "powerShellDialectAdvertised": true
+  },
+  "capturedAtUtc": "2026-10-17T01:42:19.408922+00:00",
+  "family": ["81e606ae4fda", "17c87acc8f8d"],
+  "boundary": "Read-only original DB/log inspection; no paid provider or council run",
+  "usage": {
+    "records": 16,
+    "first": "2026-10-16T15:27:40.714Z",
+    "last": "2026-10-17T01:25:32.813Z",
+    "input": 380134,
+    "output": 9866,
+    "cacheRead": 275968,
+    "costEstimateUsd": 0.043219,
+    "peakInput": 33508,
+    "bySource": {
+      "message": 16
+    },
+    "byModel": {
+      "step-3.7-flash": 16
+    }
+  },
+  "session": "81e606ae4fda"
+}

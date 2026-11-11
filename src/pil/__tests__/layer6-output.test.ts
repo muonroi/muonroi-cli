@@ -486,7 +486,7 @@ describe("isQuestionLike — Vietnamese yes/no question frames (regression: sess
   it("detects the live miss: 'check ... dùng được mcp ... không nhé'", () => {
     // The exact prompt that was mis-routed to the implement/verify scaffold.
     expect(isQuestionLike("bạn check xem dùng được mcp muonroi-docs không nhé")).toBe(true);
-    // It is NOT an implementation intent, so layer4-gsd's informational gate fires.
+    // It is NOT an implementation intent, so layer4-flow's informational gate fires.
     expect(isImplementationIntent("bạn check xem dùng được mcp muonroi-docs không nhé")).toBe(false);
   });
 

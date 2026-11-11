@@ -1,0 +1,374 @@
+{
+  "at": "2026-10-15T01:48:04.732Z",
+  "endpoint": "https://api.stepfun.ai/step_plan/v1",
+  "mainModel": "step-5-preview",
+  "workerModel": "step-3.5-flash",
+  "effectiveLimits": {
+    "main": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    },
+    "worker": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    }
+  },
+  "promptSentAt": "2026-10-15T01:48:09.050Z",
+  "summary": {
+    "directResponses": 0,
+    "direct429": 0,
+    "cliRequests": 9,
+    "cliResponses": 7,
+    "cli429": 5,
+    "workerResponses": 0
+  },
+  "trace": [
+    {
+      "at": "2026-10-15T01:48:09.118Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "255bc004-bfb6-4fc4-b787-4b35efc862d7",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-5-preview",
+      "stream": true,
+      "bytes": 776,
+      "sha256": "8c72f71f58bd3e0602195cfd933bbc0bcac1ec6c90ff4de33b659cf82a035a3e",
+      "messageChars": 702,
+      "messages": 2,
+      "maxTokens": 64,
+      "purpose": "session-title"
+    },
+    {
+      "at": "2026-10-15T01:48:09.121Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "df017c42-0039-4f20-b870-d430785d8ba6",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2558,
+      "sha256": "84317501df4f0cc764e3c31d6eaee50fb7dce1320161efc9f1a171732666599c",
+      "messageChars": 2476,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "sub-session-router"
+    },
+    {
+      "at": "2026-10-15T01:48:10.999Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "255bc004-bfb6-4fc4-b787-4b35efc862d7",
+      "model": "step-5-preview",
+      "status": 200,
+      "headers": {
+        "x-trace-id": "66478400538a2413d6535d52ff7464ad"
+      },
+      "headersMs": 1881
+    },
+    {
+      "at": "2026-10-15T01:48:11.593Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "255bc004-bfb6-4fc4-b787-4b35efc862d7",
+      "model": "step-5-preview",
+      "status": 200,
+      "durationMs": 2475,
+      "bytes": 10197,
+      "usage": {
+        "prompt_tokens": 157,
+        "completion_tokens": 64,
+        "total_tokens": 221,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finish": "length"
+    },
+    {
+      "at": "2026-10-15T01:48:11.612Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "df017c42-0039-4f20-b870-d430785d8ba6",
+      "model": "step-3.5-flash",
+      "status": 200,
+      "headers": {
+        "x-trace-id": "bd26303b9929557a2a648a1fba8080d4"
+      },
+      "headersMs": 2491
+    },
+    {
+      "at": "2026-10-15T01:48:17.122Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response_read_error",
+      "id": "df017c42-0039-4f20-b870-d430785d8ba6",
+      "error": "AbortError: The operation was aborted."
+    },
+    {
+      "at": "2026-10-15T01:48:17.281Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "0bc86727-dc71-4241-ad99-e4626d7948aa",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 9109,
+      "sha256": "2c47bcfea80eb3f12a885334a284965ef56906024d98022027572c169b9ae8a7",
+      "messageChars": 8830,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "PIL-classifier"
+    },
+    {
+      "at": "2026-10-15T01:48:17.334Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "32a8f142-99af-4468-93bf-2d79de739ac6",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:48:18.129Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "32a8f142-99af-4468-93bf-2d79de739ac6",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "932fc2a5ca3f69da8c9daee52e8b41bd"
+      },
+      "headersMs": 795
+    },
+    {
+      "at": "2026-10-15T01:48:18.130Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "32a8f142-99af-4468-93bf-2d79de739ac6",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 796,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:48:18.772Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "fetch_error",
+      "id": "0bc86727-dc71-4241-ad99-e4626d7948aa",
+      "durationMs": 1491,
+      "error": "PilTimeoutError: PIL automated preparation exceeded 1500ms deadline"
+    },
+    {
+      "at": "2026-10-15T01:48:22.221Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "b832c1bd-8317-4b57-854c-03c00fcc6bae",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 9428,
+      "sha256": "b7407881bf560860e8facb26007bdc501b25be305d7da8c8f76ccc2ce9d84193",
+      "messageChars": 9145,
+      "messages": 2,
+      "maxTokens": 4096,
+      "purpose": "PIL-classifier"
+    },
+    {
+      "at": "2026-10-15T01:48:22.222Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "fetch_error",
+      "id": "b832c1bd-8317-4b57-854c-03c00fcc6bae",
+      "durationMs": 1,
+      "error": "PilTimeoutError: PIL automated preparation exceeded 1500ms deadline"
+    },
+    {
+      "at": "2026-10-15T01:48:22.226Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "4733e498-9a7d-4871-886a-c667be3653b1",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:48:22.502Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "4733e498-9a7d-4871-886a-c667be3653b1",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "19e3f3460c9d9fc115f5f7d7c407445e"
+      },
+      "headersMs": 276
+    },
+    {
+      "at": "2026-10-15T01:48:22.503Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "4733e498-9a7d-4871-886a-c667be3653b1",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 277,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:48:32.108Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "b90174c0-1319-43c9-9754-6c58338124a0",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:48:32.379Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "b90174c0-1319-43c9-9754-6c58338124a0",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "82cac118f8142aa8ed2d1259269c55f8"
+      },
+      "headersMs": 272
+    },
+    {
+      "at": "2026-10-15T01:48:32.379Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "b90174c0-1319-43c9-9754-6c58338124a0",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 272,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:48:50.170Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "44396175-93f4-478c-953b-c4bf01c87742",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:48:50.174Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "request",
+      "id": "ad52449b-5b18-4b89-b903-07d71af81353",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:48:50.967Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "44396175-93f4-478c-953b-c4bf01c87742",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "34f029adf47dc4c650f52c2da59011c4"
+      },
+      "headersMs": 797
+    },
+    {
+      "at": "2026-10-15T01:48:50.968Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "44396175-93f4-478c-953b-c4bf01c87742",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 798,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:48:50.973Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "response",
+      "id": "ad52449b-5b18-4b89-b903-07d71af81353",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "80417cedc55f58f4ee68f68cd0ee2901"
+      },
+      "headersMs": 799
+    },
+    {
+      "at": "2026-10-15T01:48:50.974Z",
+      "pid": 36296,
+      "role": "main",
+      "event": "complete",
+      "id": "ad52449b-5b18-4b89-b903-07d71af81353",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 800,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    }
+  ],
+  "notes": "Stopped after approximately 69.767 seconds. Initial screen marker check matched prompt/title; this is NOT an assistant-answer latency. Exclude its replyObservedAt/observedReplyLatencyMs fields. HTTP traces and timeout events remain valid."
+}

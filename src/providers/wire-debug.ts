@@ -15,13 +15,16 @@
  * Fail-open: any logging error is swallowed so we never break the main flow.
  */
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { redactSecrets } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 const ENABLED = process.env.MUONROI_DEBUG_LLM_WIRE === "1";
 
-const LOG_FILE = process.env.MUONROI_DEBUG_LLM_WIRE_PATH ?? join(homedir(), ".muonroi-cli", "llm-wire.log");
+/** Resolved per call: the wire log follows `MUONROI_CLI_HOME` like every other store. */
+function logFile(): string {
+  return process.env.MUONROI_DEBUG_LLM_WIRE_PATH ?? join(muonroiHome(), "llm-wire.log");
+}
 
 // Cap individual log files at ~25 MB. When exceeded we rotate to .1 and start
 // fresh. A single noisy /ideal session produces ~2 MB; the cap leaves room for
@@ -34,13 +37,13 @@ function ensureDirAndRotate(): void {
   if (_dirEnsured && _rotateChecked) return;
   try {
     if (!_dirEnsured) {
-      mkdirSync(dirname(LOG_FILE), { recursive: true });
+      mkdirSync(dirname(logFile()), { recursive: true });
       _dirEnsured = true;
     }
-    if (!_rotateChecked && existsSync(LOG_FILE)) {
-      const size = statSync(LOG_FILE).size;
+    if (!_rotateChecked && existsSync(logFile())) {
+      const size = statSync(logFile()).size;
       if (size > MAX_LOG_BYTES) {
-        const rotated = `${LOG_FILE}.1`;
+        const rotated = `${logFile()}.1`;
         if (existsSync(rotated)) {
           try {
             unlinkSync(rotated);
@@ -48,7 +51,7 @@ function ensureDirAndRotate(): void {
             /* fail-open */
           }
         }
-        renameSync(LOG_FILE, rotated);
+        renameSync(logFile(), rotated);
       }
     }
     _rotateChecked = true;
@@ -74,7 +77,7 @@ function append(label: string, data: unknown): void {
     // body SHAPE — everything the flag exists to capture — and replaces only
     // the credential-shaped span.
     const line = redactSecrets(JSON.stringify({ t: new Date().toISOString(), label, data }));
-    appendFileSync(LOG_FILE, `${line}\n`, "utf8");
+    appendFileSync(logFile(), `${line}\n`, "utf8");
   } catch {
     /* fail-open */
   }

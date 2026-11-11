@@ -28,6 +28,16 @@ afterEach(() => {
 });
 
 describe("prepareVerifySandbox", () => {
+  it("does not bootstrap shuru when the worker sandbox mode is off", async () => {
+    const { ensureVerifyCheckpoint } = await import("./checkpoint");
+    vi.mocked(ensureVerifyCheckpoint).mockClear();
+    const dir = makeTempDir("muonroi-verify-host-");
+    fs.writeFileSync(path.join(dir, "fixture.csproj"), "<Project />");
+    const prepared = await prepareVerifySandbox(dir, {}, undefined, undefined, "off");
+    expect(ensureVerifyCheckpoint).not.toHaveBeenCalled();
+    expect(prepared.checkpoint).toEqual({ created: false });
+  });
+
   it("adds checkpoint-backed sandbox settings for verify execution", async () => {
     const dir = makeTempDir("muonroi-verify-runtime-prep-");
     fs.writeFileSync(

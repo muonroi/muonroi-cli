@@ -136,6 +136,25 @@ describe("acquireLedgerSlot across processes", () => {
 });
 
 describe("provider cooldown (a 429 anywhere holds every process)", () => {
+  it.each([
+    undefined,
+    { concurrency: 1 },
+  ])("cancels a shared cooldown wait without a dispatch entry (%j)", async (limits) => {
+    const controller = new AbortController();
+    const reason = new Error("request cancelled during shared cooldown");
+    await noteProviderRateLimited("cancel-ledger", { proposedMs: 6000, hintMs: 6000 }, deps(1));
+    const clockDeps = deps(2);
+    clockDeps.sleep = async (ms) => {
+      controller.abort(reason);
+      clock += ms;
+    };
+    await expect(acquireLedgerSlot("cancel-ledger", limits, 0, undefined, clockDeps, controller.signal)).rejects.toBe(
+      reason,
+    );
+    const ledger = JSON.parse(fs.readFileSync(path.join(dir, "cancel-ledger.json"), "utf8"));
+    expect(ledger.entries).toEqual([]);
+  });
+
   it("holds another process's next call until the cooldown lifts — declared limits", async () => {
     const wait = await noteProviderRateLimited("acme", { proposedMs: 4_000, hintMs: null }, deps(1));
     expect(wait).toBeGreaterThanOrEqual(4_000);

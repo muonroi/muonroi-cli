@@ -140,8 +140,8 @@ describe("PilContextResponseSchema", () => {
     outputStyle: "balanced",
     confidence: 0.85,
     domain: "typescript",
-    gsd_phase: "execute",
-    gsd_route_source: "ee",
+    flow_phase: "execute",
+    flow_route_source: "ee",
     t0_principles: [{ text: "principle one", score: 0.9 }],
     t1_rules: ["always run tests after edit"],
     t2_patterns: [{ text: "pattern one", score: 0.7 }],
@@ -156,13 +156,13 @@ describe("PilContextResponseSchema", () => {
     expect(result.success).toBe(true);
   });
 
-  it("accepts nullable taskType / intentKind / domain / gsd_phase", () => {
+  it("accepts nullable taskType / intentKind / domain / flow_phase", () => {
     const r = PilContextResponseSchema.safeParse({
       ...validResponse,
       taskType: null,
       intentKind: null,
       domain: null,
-      gsd_phase: null,
+      flow_phase: null,
     });
     expect(r.success).toBe(true);
   });

@@ -1,5 +1,5 @@
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { atomicReadJSON, atomicWriteJSON, sweepStaleAtomicTemps } from "./atomic-io.js";
 
 /**
@@ -23,8 +23,8 @@ const DEFAULT_CONFIG: MuonroiConfig = {
  * Resolve the ~/.muonroi-cli/ home directory.
  * Priority: explicit override → MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli
  */
-function muonroiHome(override?: string): string {
-  return override ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(override?: string): string {
+  return override ?? muonroiHome();
 }
 
 /**
@@ -33,7 +33,7 @@ function muonroiHome(override?: string): string {
  * Accepts an optional homeOverride for test isolation.
  */
 export async function loadConfig(homeOverride?: string): Promise<MuonroiConfig> {
-  const home = muonroiHome(homeOverride);
+  const home = resolveHome(homeOverride);
   // Best-effort cleanup of crashed-writer leftovers. Never throws.
   sweepStaleAtomicTemps(home).catch(() => {
     /* swallow */

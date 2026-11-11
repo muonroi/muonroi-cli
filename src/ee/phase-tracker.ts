@@ -4,7 +4,7 @@
  * P1 Item 3 wiring: in-memory phase tracker.
  *
  * Aggregates the runtime signals (principles fired, verifier outcomes, abort
- * events) for the *current* GSD phase. The orchestrator calls `setPhase()`
+ * events) for the *current* FLOW phase. The orchestrator calls `setPhase()`
  * at every user-turn boundary; when the phase changes from a non-null prior
  * phase, the tracker drains a snapshot the orchestrator forwards to
  * `firePhaseOutcome`.

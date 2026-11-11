@@ -1,0 +1,544 @@
+{
+  "at": "2026-10-15T01:50:47.509Z",
+  "endpoint": "https://api.stepfun.ai/step_plan/v1",
+  "mainModel": "step-5-preview",
+  "workerModel": "step-3.5-flash",
+  "effectiveLimits": {
+    "main": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    },
+    "worker": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    }
+  },
+  "promptSentAt": "2026-10-15T01:50:49.593Z",
+  "mainResponseCompletedAt": "2026-10-15T01:52:08.972Z",
+  "observedMainCompletionMs": 79379,
+  "summary": {
+    "directResponses": 0,
+    "direct429": 0,
+    "cliRequests": 12,
+    "cliResponses": 11,
+    "cli429": 8,
+    "workerResponses": 0
+  },
+  "trace": [
+    {
+      "at": "2026-10-15T01:50:49.668Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "7e9a6a81-bfb3-4b6a-a853-e8e4c9ed4b40",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-5-preview",
+      "stream": true,
+      "bytes": 776,
+      "sha256": "8c72f71f58bd3e0602195cfd933bbc0bcac1ec6c90ff4de33b659cf82a035a3e",
+      "messageChars": 702,
+      "messages": 2,
+      "maxTokens": 64,
+      "purpose": "session-title"
+    },
+    {
+      "at": "2026-10-15T01:50:49.675Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "37b924ea-8c00-43ab-9128-2bd81b7df403",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2558,
+      "sha256": "84317501df4f0cc764e3c31d6eaee50fb7dce1320161efc9f1a171732666599c",
+      "messageChars": 2476,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "sub-session-router"
+    },
+    {
+      "at": "2026-10-15T01:50:51.969Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "37b924ea-8c00-43ab-9128-2bd81b7df403",
+      "model": "step-3.5-flash",
+      "status": 200,
+      "headers": {
+        "x-trace-id": "388a4723f429309013fa73a72eb8e13e"
+      },
+      "headersMs": 2294
+    },
+    {
+      "at": "2026-10-15T01:50:52.149Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "7e9a6a81-bfb3-4b6a-a853-e8e4c9ed4b40",
+      "model": "step-5-preview",
+      "status": 200,
+      "headers": {
+        "x-trace-id": "f75d23ddf68295bedd799ca200603e07"
+      },
+      "headersMs": 2482
+    },
+    {
+      "at": "2026-10-15T01:50:52.712Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "37b924ea-8c00-43ab-9128-2bd81b7df403",
+      "model": "step-3.5-flash",
+      "status": 200,
+      "durationMs": 3037,
+      "bytes": 19056,
+      "usage": {
+        "cached_tokens": 256,
+        "prompt_tokens": 597,
+        "completion_tokens": 88,
+        "total_tokens": 685,
+        "prompt_tokens_details": {
+          "cached_tokens": 256
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finish": "stop"
+    },
+    {
+      "at": "2026-10-15T01:50:52.794Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "7e9a6a81-bfb3-4b6a-a853-e8e4c9ed4b40",
+      "model": "step-5-preview",
+      "status": 200,
+      "durationMs": 3127,
+      "bytes": 10278,
+      "usage": {
+        "prompt_tokens": 157,
+        "completion_tokens": 64,
+        "total_tokens": 221,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finish": "length"
+    },
+    {
+      "at": "2026-10-15T01:50:52.893Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "99a4caf7-de31-46f9-befc-93971f74f971",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 9109,
+      "sha256": "2c47bcfea80eb3f12a885334a284965ef56906024d98022027572c169b9ae8a7",
+      "messageChars": 8830,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "PIL-classifier"
+    },
+    {
+      "at": "2026-10-15T01:50:52.945Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "ae0af6fd-a10b-48cb-a637-f909f63e8f5e",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:50:53.169Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "99a4caf7-de31-46f9-befc-93971f74f971",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "e492449ad108b00917502f0588101a51"
+      },
+      "headersMs": 276
+    },
+    {
+      "at": "2026-10-15T01:50:53.169Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "99a4caf7-de31-46f9-befc-93971f74f971",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 276,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:50:53.214Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "ae0af6fd-a10b-48cb-a637-f909f63e8f5e",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "3a0e339319fa5389a59eab09b26fa834"
+      },
+      "headersMs": 269
+    },
+    {
+      "at": "2026-10-15T01:50:53.215Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "ae0af6fd-a10b-48cb-a637-f909f63e8f5e",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 270,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:50:57.829Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "f27b854b-8f9e-417c-b0ba-cafc5e8ced1a",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 9428,
+      "sha256": "b7407881bf560860e8facb26007bdc501b25be305d7da8c8f76ccc2ce9d84193",
+      "messageChars": 9145,
+      "messages": 2,
+      "maxTokens": 4096,
+      "purpose": "PIL-classifier"
+    },
+    {
+      "at": "2026-10-15T01:50:57.830Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "fetch_error",
+      "id": "f27b854b-8f9e-417c-b0ba-cafc5e8ced1a",
+      "durationMs": 1,
+      "error": "PilTimeoutError: PIL automated preparation exceeded 1500ms deadline"
+    },
+    {
+      "at": "2026-10-15T01:50:57.836Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "c4f5712c-8f1a-49dc-abbd-36ac8084556a",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:50:58.112Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "c4f5712c-8f1a-49dc-abbd-36ac8084556a",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "3865a3fbd57609d181893f42f0f8bd41"
+      },
+      "headersMs": 276
+    },
+    {
+      "at": "2026-10-15T01:50:58.113Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "c4f5712c-8f1a-49dc-abbd-36ac8084556a",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 277,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:51:06.999Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "6f8f1247-ecb3-4d3e-b089-f71717a49416",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:51:07.276Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "6f8f1247-ecb3-4d3e-b089-f71717a49416",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "0edff54be7d58113a94079182c3f420b"
+      },
+      "headersMs": 277
+    },
+    {
+      "at": "2026-10-15T01:51:07.277Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "6f8f1247-ecb3-4d3e-b089-f71717a49416",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 278,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:51:25.988Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "414e506d-a301-4ffb-9c83-5aac3d2cf8dc",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:51:25.991Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "678ef6a0-fa4d-4682-9b74-9726efff9e12",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:51:26.795Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "414e506d-a301-4ffb-9c83-5aac3d2cf8dc",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "a2194ea5579d67664fb200c2ccc922f9"
+      },
+      "headersMs": 807
+    },
+    {
+      "at": "2026-10-15T01:51:26.795Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "414e506d-a301-4ffb-9c83-5aac3d2cf8dc",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 807,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:51:26.797Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "678ef6a0-fa4d-4682-9b74-9726efff9e12",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "173616095fbe9aa3e508b134a2aefc83"
+      },
+      "headersMs": 807
+    },
+    {
+      "at": "2026-10-15T01:51:26.797Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "678ef6a0-fa4d-4682-9b74-9726efff9e12",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 807,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:52:01.360Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "331bbc2e-70a7-41b8-b0ba-dc44dc95c3e1",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-5-preview",
+      "stream": true,
+      "bytes": 88400,
+      "sha256": "f9a11bf8da8b37e8c913fa59b3a06d41238b26deb957edcba85dff36a9bfdae0",
+      "messageChars": 50352,
+      "messages": 2,
+      "tools": 58,
+      "maxTokens": 64000,
+      "purpose": "other"
+    },
+    {
+      "at": "2026-10-15T01:52:01.364Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "0b2887aa-1dea-4b28-9b66-c31d23d51b16",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:52:01.370Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "request",
+      "id": "01e8fd42-757f-44dc-befc-7c7dbee835a8",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 2226,
+      "sha256": "9d6015002cf3e53f3bd50b13fac7aa68b3aadda6ed82b80a049935f68c5fa984",
+      "messageChars": 2152,
+      "messages": 2,
+      "maxTokens": 2048,
+      "purpose": "compaction-proposer"
+    },
+    {
+      "at": "2026-10-15T01:52:02.242Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "0b2887aa-1dea-4b28-9b66-c31d23d51b16",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "e0b1de867d612b1e883ba57f115455f4"
+      },
+      "headersMs": 878
+    },
+    {
+      "at": "2026-10-15T01:52:02.243Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "0b2887aa-1dea-4b28-9b66-c31d23d51b16",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 879,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:52:02.244Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "01e8fd42-757f-44dc-befc-7c7dbee835a8",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "dc52e46cf9cd7e4a0610f07783a8e07f"
+      },
+      "headersMs": 875
+    },
+    {
+      "at": "2026-10-15T01:52:02.244Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "01e8fd42-757f-44dc-befc-7c7dbee835a8",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 875,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    },
+    {
+      "at": "2026-10-15T01:52:08.837Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "response",
+      "id": "331bbc2e-70a7-41b8-b0ba-dc44dc95c3e1",
+      "model": "step-5-preview",
+      "status": 200,
+      "headers": {
+        "x-trace-id": "a56a009675b6a39acf2a14b02f66b100"
+      },
+      "headersMs": 7478
+    },
+    {
+      "at": "2026-10-15T01:52:08.972Z",
+      "pid": 80960,
+      "role": "main",
+      "event": "complete",
+      "id": "331bbc2e-70a7-41b8-b0ba-dc44dc95c3e1",
+      "model": "step-5-preview",
+      "status": 200,
+      "durationMs": 7613,
+      "bytes": 2048,
+      "usage": {
+        "prompt_tokens": 22434,
+        "completion_tokens": 10,
+        "total_tokens": 22444,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "completion_tokens_details": {
+          "reasoning_tokens": 0
+        }
+      },
+      "finish": "stop"
+    }
+  ],
+  "notes": "Main completion detected by request tools>0 and matching HTTP 200 complete event; user prompt/title marker is not sufficient.",
+  "persistedAssistantMarkerPresent": true
+}

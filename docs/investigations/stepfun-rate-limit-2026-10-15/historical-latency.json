@@ -1,0 +1,59 @@
+{
+  "session": "5aaaa73e8b1c",
+  "captureAt": "2026-10-14T07:54:10.981653+00:00",
+  "turns": [
+    {
+      "prompt_at": "2026-10-14T07:44:42.411Z",
+      "stream_start_at": "2026-10-14T07:45:43.617Z",
+      "pre_main_seconds": 61.206
+    },
+    {
+      "prompt_at": "2026-10-14T07:46:28.767Z",
+      "stream_start_at": "2026-10-14T07:47:29.811Z",
+      "pre_main_seconds": 61.044
+    },
+    {
+      "prompt_at": "2026-10-14T07:49:31.365Z",
+      "stream_start_at": "2026-10-14T07:50:33.673Z",
+      "pre_main_seconds": 62.308
+    }
+  ],
+  "toolDurations": [
+    {
+      "tool_name": "list_mcp_servers",
+      "started_at": "2026-10-14T07:47:35.849Z",
+      "completed_at": "2026-10-14T07:47:35.886Z",
+      "seconds": 0.037
+    },
+    {
+      "tool_name": "list_mcp_servers",
+      "started_at": "2026-10-14T07:51:29.028Z",
+      "completed_at": "2026-10-14T07:51:29.101Z",
+      "seconds": 0.073
+    },
+    {
+      "tool_name": "mcp_stealthgpt__enable_pay_as_you_go",
+      "started_at": "2026-10-14T07:51:34.110Z",
+      "completed_at": "2026-10-14T07:51:34.169Z",
+      "seconds": 0.059
+    },
+    {
+      "tool_name": "mcp_stealthgpt__get_run_status",
+      "started_at": "2026-10-14T07:52:22.148Z",
+      "completed_at": "2026-10-14T07:52:22.826Z",
+      "seconds": 0.678
+    },
+    {
+      "tool_name": "mcp_stealthgpt__humanize_text",
+      "started_at": "2026-10-14T07:52:22.795Z",
+      "completed_at": "2026-10-14T07:52:22.884Z",
+      "seconds": 0.089
+    },
+    {
+      "tool_name": "mcp_stealthgpt__get_run_status",
+      "started_at": "2026-10-14T07:53:09.426Z",
+      "completed_at": "2026-10-14T07:53:10.369Z",
+      "seconds": 0.943
+    }
+  ]
+}

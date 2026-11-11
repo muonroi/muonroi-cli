@@ -282,8 +282,13 @@ export function attachReminderToMessages<T>(messages: ReadonlyArray<T>, reminder
  * Used by prepareStep / sub-agent paths after compaction.
  */
 export function buildCheckpointReminder(iteration: number, hasEECheckpoint: boolean): string {
-  // Enhanced per anti-mù (ideas 3+4): lighter KEEP_TOOL_IDS + on-demand artifact fetch.
-  const base = `[checkpoint status iter=${iteration}${hasEECheckpoint ? " (EE persisted)" : ""}] Task finished? Emit PRESERVE or KEEP_TOOL_IDS: id1,id2. High-value elided? Use ee_query tool with "tool-artifact id=XXX".`;
+  // The ONLY place the compaction-veto syntax is taught (M14): it rides on the
+  // host's pre-compaction warning / compaction note — the moment it can act —
+  // instead of every static prompt. Tokens must be the exact literals
+  // context-preservation.ts parses: a line `PRESERVE_FULL_CONTEXT`, or
+  // `KEEP_TOOL_IDS: id1,id2`. (The old text said "Emit PRESERVE", which the
+  // parser never matched.)
+  const base = `[checkpoint status iter=${iteration}${hasEECheckpoint ? " (EE persisted)" : ""}] Veto: emit a line PRESERVE_FULL_CONTEXT. Keep some: KEEP_TOOL_IDS: id1,id2 (stub id=). Elided result? ee_query "tool-artifact id=XXX".`;
   if (base.length <= 220) return base;
   return base.slice(0, 220);
 }

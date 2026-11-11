@@ -1,0 +1,32 @@
+{
+  "sample": "16 bounded expanded-matrix/wire-control requests; historical/native requests excluded",
+  "totals": {
+    "step-3.5-flash": {
+      "responses": 12,
+      "status200": 4,
+      "status429": 8
+    },
+    "step-5-preview": {
+      "responses": 4,
+      "status200": 4,
+      "status429": 0
+    }
+  },
+  "native": {
+    "promptSentAt": "2026-10-15T01:50:49.593Z",
+    "mainFetchAt": "2026-10-15T01:52:01.360Z",
+    "timeToMainFetchMs": 71767,
+    "mainHeaderMs": 7478,
+    "mainCompletedAt": "2026-10-15T01:52:08.972Z",
+    "promptToMainCompleteMs": 79379,
+    "persistedAssistantMarkerPresent": true,
+    "summary": {
+      "directResponses": 0,
+      "direct429": 0,
+      "cliRequests": 12,
+      "cliResponses": 11,
+      "cli429": 8,
+      "workerResponses": 0
+    }
+  }
+}

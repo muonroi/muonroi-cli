@@ -16,7 +16,15 @@
  *
  * Verification: after the run, the dumped doStreamCalls show messages
  * containing the literal "[elided by top-level compactor]" marker on at
- * least one call after round 2.
+ * least one main-agent (orchestrator) call after round 1.
+ *
+ * Permission mode: the top-level agent is the orchestrator (b014c9b9). It keeps
+ * native read_file, but in safe mode main's read_file/grep carry
+ * `needsApproval` (src/orchestrator/tool-engine.ts, "Main's new direct reads use
+ * the existing SDK/UI approval path in safe mode"), so the first read parks on
+ * an approval card and the loop never reaches round 2 (measured: 1 main round,
+ * then the turn ended "Task incomplete"). This spec is about compaction, so it
+ * runs in auto-edit, where read_file is auto-approved (AUTO_EDIT_ALLOWED).
  */
 
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -25,7 +33,7 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { bestEffortRemoveSync } from "../../src/__test-stubs__/cleanup";
 import { type CostLeakHarness, exitTuiAndWaitForDump, spawnCostLeakHarness } from "./cost-leak-tui-helpers.js";
-import { loadDumpedRecordings } from "./recording.js";
+import { isMainAgentCall, loadDumpedRecordings } from "./recording.js";
 
 const LARGE_PAYLOAD_CHARS = 30_000;
 
@@ -94,17 +102,20 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     process.env.MUONROI_TOP_LEVEL_COMPACT_THRESHOLD_CHARS = "50000";
     process.env.MUONROI_TOP_LEVEL_COMPACT_KEEP_LAST = "1";
 
-    handle = await spawnCostLeakHarness({
-      provider: "deepseek",
-      modelId: "deepseek-v4-flash",
-      stream: [
-        buildToolCallRound("c1", join(payloadDir, "big1.txt")),
-        buildToolCallRound("c2", join(payloadDir, "big2.txt")),
-        buildToolCallRound("c3", join(payloadDir, "big3.txt")),
-        buildToolCallRound("c4", join(payloadDir, "big4.txt")),
-        buildFinalTextRound(),
-      ],
-    });
+    handle = await spawnCostLeakHarness(
+      {
+        provider: "deepseek",
+        modelId: "deepseek-v4-flash",
+        stream: [
+          buildToolCallRound("c1", join(payloadDir, "big1.txt")),
+          buildToolCallRound("c2", join(payloadDir, "big2.txt")),
+          buildToolCallRound("c3", join(payloadDir, "big3.txt")),
+          buildToolCallRound("c4", join(payloadDir, "big4.txt")),
+          buildFinalTextRound(),
+        ],
+      },
+      { permission: "auto-edit" },
+    );
   }, 120_000);
 
   afterAll(() => {
@@ -125,12 +136,17 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     // executes read_file → 30k content appended → next streamText call.
     // Poll the dump file for >=3 recorded calls (event-driven, not wall-clock).
     // The dump is written after every doStream call by writeDumpAlways.
+    // Count MAIN-agent rounds only — the session-title, classifier and
+    // compaction-proposer calls are recorded too and would satisfy a raw count.
     const deadline_b4 = Date.now() + 60_000;
-    let calls_b4: ReturnType<typeof loadDumpedRecordings> = [];
     while (Date.now() < deadline_b4) {
       if (existsSync(handle.dumpPath)) {
-        calls_b4 = loadDumpedRecordings(handle.dumpPath);
-        if (calls_b4.length >= 3) break;
+        try {
+          if (loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall).length >= 3) break;
+        } catch (err) {
+          // Dump mid-rotation — the atomic rename means the next read is clean.
+          console.debug(`[b4 spec] dump not readable yet: ${(err as Error).message}`);
+        }
       }
       await new Promise((r) => setTimeout(r, 2000));
     }
@@ -138,21 +154,15 @@ describe("B4 TUI: top-level compactor reduces cumulative prompt size", () => {
     await exitTuiAndWaitForDump(handle, 30_000);
 
     expect(existsSync(handle.dumpPath)).toBe(true);
-    const calls = loadDumpedRecordings(handle.dumpPath);
-    // Expect at least 3 rounds to have happened (compaction needs prior tool
-    // turns to elide). The exact count depends on maxToolRounds + finish
+    const calls = loadDumpedRecordings(handle.dumpPath).filter(isMainAgentCall);
+    // Expect at least 3 main rounds to have happened (compaction needs prior
+    // tool turns to elide). The exact count depends on maxToolRounds + finish
     // reasons — we just need enough rounds for compaction to fire.
     expect(calls.length).toBeGreaterThanOrEqual(3);
 
-    // Find any call whose serialized prompt contains the top-level marker.
-    const elidedCalls = calls.filter((c) => {
-      try {
-        const promptText = JSON.stringify(c.options.prompt);
-        return promptText.includes("elided by top-level compactor");
-      } catch {
-        return false;
-      }
-    });
+    // Find any main call whose serialized prompt contains the top-level marker.
+    // Dumped prompts are parsed JSON, so re-serialising them cannot throw.
+    const elidedCalls = calls.filter((c) => JSON.stringify(c.options.prompt).includes("elided by top-level compactor"));
     if (elidedCalls.length === 0) {
       // Helpful diagnostic if the assertion is about to fail.
       const lastPrompt = JSON.stringify(calls[calls.length - 1]?.options.prompt ?? "").slice(0, 500);

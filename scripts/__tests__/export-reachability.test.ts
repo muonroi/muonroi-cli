@@ -19,7 +19,8 @@
  *   MUONROI_EXPORT_REACHABILITY=0
  */
 
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -54,6 +55,36 @@ function scaffold(files: Record<string, string>): string {
 }
 
 const symbolsOf = (findings: Finding[]): string[] => findings.map((f) => f.symbol).sort();
+
+it("preserves renamed modules' baseline while rejecting a new unused export in the moved file", () => {
+  const original = Array.from({ length: 10 }, (_, i) => `export function existingUnused${i}() { return ${i}; }\n`).join(
+    "",
+  );
+  const dir = scaffold({
+    "package.json": '{"main":"src/index.ts"}',
+    "src/index.ts": "export const main = 1;",
+    "src/original.ts": original,
+    "scripts/.gitkeep": "",
+    "packages/.gitkeep": "",
+    "tests/.gitkeep": "",
+  });
+  const git = (...args: string[]) =>
+    execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init");
+  git("add", ".");
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Baseline fixture");
+  const baseline = git("rev-parse", "HEAD");
+  renameSync(join(dir, "src/original.ts"), join(dir, "src/moved.ts"));
+  writeFileSync(join(dir, "src/moved.ts"), original + "export function newUnused() { return 2; }\n");
+  git("add", ".");
+  const before = readBaselineSources(dir, baseline, ["src/moved.ts"]);
+  expect(before.get("src/moved.ts")).toBe(original);
+  expect(
+    symbolsOf(analyze({ treeRoot: dir, changedFiles: ["src/moved.ts"], baselineSources: before }).findings),
+  ).toEqual(["newUnused"]);
+  git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-m", "Move with new export");
+  expect(symbolsOf(analyzeRevision(dir, "HEAD").findings)).toEqual(["newUnused"]);
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Synthetic fixtures — the two observed shapes, isolated

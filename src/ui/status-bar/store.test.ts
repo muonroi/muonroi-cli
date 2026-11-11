@@ -78,6 +78,30 @@ describe("wireStatusBar", () => {
     downgradeCallback = null;
   });
 
+  it("keeps the live orchestrator identity across auxiliary routing and downgrade events", () => {
+    let identity = { provider: "fixture-provider", model: "fixture-leader" };
+    const off = wireStatusBar(() => identity);
+    try {
+      routerCallback!({
+        tier: "warm",
+        degraded: false,
+        lastDecision: { provider: "helper-provider", model: "helper-model" },
+      });
+      expect(statusBarStore.getState()).toMatchObject(identity);
+      downgradeCallback!({ fromModel: "helper-model", toModel: "cheaper-helper", pct: 80, atMs: 1 });
+      expect(statusBarStore.getState()).toMatchObject({ ...identity, current_pct: 80 });
+      identity = { provider: "next-provider", model: "next-leader" };
+      routerCallback!({
+        tier: "hot",
+        degraded: false,
+        lastDecision: { provider: "helper-provider", model: "helper-model" },
+      });
+      expect(statusBarStore.getState()).toMatchObject(identity);
+    } finally {
+      off();
+    }
+  });
+
   it("registers 3 subscriptions; routerStore tier change updates store", () => {
     const off = wireStatusBar();
     expect(routerCallback).toBeTruthy();

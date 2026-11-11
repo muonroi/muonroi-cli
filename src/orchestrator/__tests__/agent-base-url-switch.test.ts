@@ -2,24 +2,34 @@
  * Regression: Agent.setModel / Agent.setApiKey must NOT carry a previous
  * provider's default baseURL into the new provider's factory.
  */
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
 import { apiBaseFor } from "../../providers/endpoints.js";
 import { Agent } from "../orchestrator.js";
 
 describe("Agent provider switch — baseURL hygiene", () => {
+  let fixtureHome: string;
   beforeAll(async () => {
+    // Exercise root provider switching independently of the developer's own
+    // disabled-provider preferences, without weakening production eligibility.
+    fixtureHome = fs.mkdtempSync(path.join(os.tmpdir(), "muonroi-base-url-"));
+    vi.stubEnv("HOME", fixtureHome);
+    vi.stubEnv("USERPROFILE", fixtureHome);
+    vi.stubEnv("MUONROI_CLI_HOME", path.join(fixtureHome, ".muonroi-cli"));
     await loadCatalog();
   });
 
   beforeEach(() => {
-    process.env.MUONROI_TEST_NO_PERSIST = "1";
-    process.env.MUONROI_TEST_NO_KEYCHAIN = "1";
+    vi.stubEnv("MUONROI_TEST_NO_PERSIST", "1");
+    vi.stubEnv("MUONROI_TEST_NO_KEYCHAIN", "1");
   });
 
-  afterEach(() => {
-    delete process.env.MUONROI_TEST_NO_PERSIST;
-    delete process.env.MUONROI_TEST_NO_KEYCHAIN;
+  afterAll(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(fixtureHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   });
 
   it("setModel drops stale baseURL when switching to a different provider", () => {

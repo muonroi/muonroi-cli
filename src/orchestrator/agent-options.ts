@@ -148,6 +148,11 @@ export interface ProcessMessageObserver {
 }
 
 export interface AgentOptions {
+  /** Host-inherited billing source after a subscription fallback, never model-selected. */
+  authMode?: import("../providers/subscription-fallback.js").ProviderAuthMode;
+  /** User-facing agents coordinate; internal execution must declare a worker/infrastructure role. */
+  executionRole?: import("./orchestration-policy.js").ExecutionRole;
+  reasoningEffort?: import("../types/index.js").ReasoningEffort;
   persistSession?: boolean;
   session?: string;
   sandboxMode?: SandboxMode;

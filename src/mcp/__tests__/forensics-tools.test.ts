@@ -1,5 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { CostForensicsSummary } from "../../cli/cost-forensics.js";
 import { registerForensicsTools } from "../forensics-tools.js";
 
@@ -38,6 +38,24 @@ const fakeSummary = (id: string): CostForensicsSummary =>
   }) as CostForensicsSummary;
 
 describe("forensics-tools", () => {
+  it("forwards a fixed snapshot cutoff and pagination to the shared collector", async () => {
+    const collect = vi.fn((id: string) => fakeSummary(id));
+    const handlers = collectTools((s) => registerForensicsTools(s, { resolve: () => ["sess123"], collect }));
+    await handlers.usage_forensics!({
+      prefix: "sess",
+      until: "2026-10-15T09:00:00.000Z",
+      usage_offset: 20,
+      error_offset: 5,
+      measurement_offset: 10,
+    });
+    expect(collect).toHaveBeenCalledWith("sess123", {
+      until: "2026-10-15T09:00:00.000Z",
+      usageOffset: 20,
+      errorOffset: 5,
+      measurementOffset: 10,
+    });
+  });
+
   it("usage_forensics returns the summary for a unique prefix", async () => {
     const handlers = collectTools((s) =>
       registerForensicsTools(s, { resolve: () => ["sess123"], collect: (id) => fakeSummary(id) }),

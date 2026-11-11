@@ -1,9 +1,9 @@
-import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import { getMcpKey } from "../mcp/mcp-keychain.js";
 import { getWebResearchModel } from "../models/registry.js";
 import type { CouncilQuestionOption, StreamChunk } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { getCouncilLanguage } from "../utils/settings.js";
+import type { GrayAreaQuestion } from "../workflow/gray-areas.js";
 import { pickCouncilTaskModel } from "./leader.js";
 import { tracedAsync, tracedGenerate, tracedGenerateWithFallback } from "./llm.js";
 import { phaseDone, phaseError, phaseStart } from "./phase-events.js";

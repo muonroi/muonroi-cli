@@ -40,6 +40,7 @@
  */
 import { isProviderBackoffActive } from "../providers/rate-limit-backoff.js";
 import type { StreamChunk } from "../types/index.js";
+import { isBoundedWorkerWaitActive } from "./interactive-pause.js";
 import { beginTurnGeneration, endTurnGeneration } from "./turn-progress.js";
 
 export class TurnStallError extends Error {
@@ -112,7 +113,7 @@ export async function* withTurnWatchdog(
           const armTotal = () => {
             totalTimer = setTimeout(() => {
               // Hold open while an interactive card blocks the turn.
-              if (shouldSuppressFire?.()) {
+              if (!isBoundedWorkerWaitActive() && shouldSuppressFire?.()) {
                 armTotal();
                 return;
               }

@@ -25,7 +25,7 @@ describe("model → provider detection", () => {
     ["deepseek-ai/DeepSeek-V4-Pro", "deepseek"],
     ["grok-3", "xai"],
     ["grok-3-mini", "xai"],
-    ["step-3.5-flash-2603", "stepfun"],
+    ["step-3.7-flash", "stepfun"],
   ];
 
   for (const [modelId, expectedProvider] of cases) {
@@ -84,8 +84,10 @@ describe("end-to-end: create factory + resolve runtime", () => {
 
   test("stepfun model resolves through its OpenAI-compatible factory", () => {
     createProviderFactory("stepfun", { apiKey: MOCK_KEY });
-    const runtime = resolveModelRuntime("step-3.5-flash-2603");
+    const runtime = resolveModelRuntime("step-3.7-flash");
     expect(runtime.modelInfo?.provider).toBe("stepfun");
-    expect(runtime.modelId).toBe("step-3.5-flash-2603");
+    expect(runtime.modelId).toBe("step-3.7-flash");
+    expect(() => resolveModelRuntime("step-3.5-flash")).toThrow("not found in catalog");
+    expect(() => resolveModelRuntime("step-3.5-flash-2603")).toThrow("not found in catalog");
   });
 });

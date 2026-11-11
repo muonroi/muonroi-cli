@@ -14,7 +14,7 @@
 import type { ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { spawnHarness } from "./helpers.js";
@@ -36,6 +36,13 @@ export interface ModelFixture {
   defaultProviderOptions?: Record<string, unknown>;
   provider?: string;
   modelId?: string;
+  /**
+   * Per-role queues keyed by a system-prompt substring (see `routes` in
+   * src/agent-harness/mock-model.ts). Use it to script a background worker —
+   * which runs in its own process with a fresh fixture cursor — separately from
+   * the orchestrator's `stream`.
+   */
+  routes?: ReadonlyArray<{ systemIncludes: string; stream: StreamChunks | StreamChunks[] }>;
 }
 
 export interface CostLeakHarness {
@@ -46,6 +53,8 @@ export interface CostLeakHarness {
   /** Temp directory the helper owns — cleaned up by `cleanup()`. */
   workDir: string;
   cleanup(): void;
+  /** Send every key in ONE transport write (one stdin chunk in the child). */
+  pressBurst(keys: string[]): void;
 }
 
 /** Build a one-finish-stop text-only stream. */
@@ -87,6 +96,30 @@ export interface SpawnCostLeakOptions {
    * Layer-1 deterministically falls back to the LLM (mock) classifier.
    */
   env?: Record<string, string>;
+  /**
+   * `--permission` mode for the spawned TUI. Omitted → the CLI default (safe).
+   * Safe mode is documented as "every tool call prompts the user for approval"
+   * (src/utils/permission-mode.ts) and since the orchestrator contract it is
+   * enforced: main's read_file/grep carry `needsApproval` in safe mode
+   * (src/orchestrator/tool-engine.ts) and every worker tool goes through the
+   * owner approval channel (src/orchestrator/worker-approval.ts). A spec whose
+   * subject is NOT approval (compaction, bash cache, scope reminder) must pick
+   * `auto-edit` so file reads/writes and non-dangerous shell auto-approve —
+   * otherwise the turn parks on an approval card the spec never answers.
+   */
+  permission?: "safe" | "auto-edit" | "yolo";
+  /**
+   * Spawn the TUI in a fresh empty project dir under the helper's workDir
+   * instead of the repo root. Required for specs whose orchestrator dispatches
+   * a mutation-capable worker (`task`): the native FLOW gate reads
+   * `<cwd>/.planning/STATE.md`, which is gitignored and machine-local — a
+   * developer checkout at `Depth: heavy` refuses the dispatch ("FLOW refused
+   * dispatch ... No worker was started"), so the spec passed in a clean agent
+   * worktree and failed in the main checkout. Defaults to false (repo root).
+   */
+  isolatedCwd?: boolean;
+  /** Files (relative path → content) seeded into the isolated project dir. Implies `isolatedCwd`. */
+  projectFiles?: Record<string, string>;
 }
 
 /**
@@ -109,12 +142,31 @@ export async function spawnCostLeakHarness(
     "utf8",
   );
   const dumpPath = join(workDir, "calls.json");
+  let projectDir: string | undefined;
+  if (opts.isolatedCwd || opts.projectFiles) {
+    projectDir = join(workDir, "project");
+    mkdirSync(projectDir);
+    for (const [rel, content] of Object.entries(opts.projectFiles ?? {})) {
+      const target = join(projectDir, rel);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, content, "utf8");
+    }
+  }
 
   const modelId = opts.modelId ?? "deepseek-v4-flash";
   const apiKey = opts.apiKey ?? "FAKE_KEY_FOR_TESTS";
 
   const ctx = await spawnHarness({
-    extraArgs: ["-k", apiKey, "-m", modelId, "--mock-llm", fixDir],
+    ...(projectDir ? { cwd: projectDir } : {}),
+    extraArgs: [
+      "-k",
+      apiKey,
+      "-m",
+      modelId,
+      "--mock-llm",
+      fixDir,
+      ...(opts.permission ? ["--permission", opts.permission] : []),
+    ],
     env: {
       MUONROI_MOCK_MODEL_DUMP: dumpPath,
       MUONROI_NO_SHELL_HOLD: "1",
@@ -157,6 +209,7 @@ export async function spawnCostLeakHarness(
     driver: ctx.driver,
     dumpPath,
     workDir,
+    pressBurst: ctx.pressBurst,
     cleanup: () => {
       try {
         ctx.proc.kill();

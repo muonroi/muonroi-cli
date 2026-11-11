@@ -1,0 +1,138 @@
+{
+  "capturedAt": "2026-10-17T15:56:22.245Z",
+  "boundary": "Local source and compiled/offline SDK controls; actual native TUI and host I/O; one live external MCP unauthenticated initialize. Not paid-model, global latency or user-process load evidence.",
+  "regressions": {
+    "log": ".scratch/worker-evidence-followup/regression.log",
+    "filesPassed": 15,
+    "testsPassed": 202
+  },
+  "additionalAuthContracts": {
+    "log": ".scratch/worker-evidence-followup/final-auth-contracts.log",
+    "filesPassed": 3,
+    "testsPassed": 22,
+    "overlapsRegressionFile": "src/mcp/__tests__/client-pool.spec.ts"
+  },
+  "exactEvidenceRedLog": ".scratch/worker-evidence-followup/exact-evidence-red.log",
+  "compiledReview": {
+    "file": ".scratch/worker-evidence-followup/compiled-review.json",
+    "checks": {
+      "prepared": true,
+      "hostManifestHasActualCallIdAndDigest": true,
+      "authorReasoningNotInherited": true,
+      "scopedReaderReturnsPeerMcpOutput": true,
+      "hostRecordsExactJobVersionCallDigest": true,
+      "undeliveredEvidenceCannotBeAccepted": true,
+      "ackIsNotAcceptance": true,
+      "artifactCorroborationCanBeAccepted": true,
+      "labelNeverClaimsTestsExecuted": true,
+      "displayedAcceptanceCurrent": true,
+      "payloadTamperRevokesDisplayedAcceptance": true,
+      "workspaceUnchanged": true,
+      "sdkUsesOfflineModel": true,
+      "noExternalProviderRequests": true
+    }
+  },
+  "actualApp": {
+    "file": ".scratch/session5689/tui-safe-s4NR90/report.json",
+    "scenarios": [
+      {
+        "name": "sentinel",
+        "pass": true
+      },
+      {
+        "name": "allow",
+        "pass": true
+      },
+      {
+        "name": "deny",
+        "pass": true
+      },
+      {
+        "name": "escape",
+        "pass": true
+      },
+      {
+        "name": "foreground",
+        "pass": true
+      },
+      {
+        "name": "responsive",
+        "pass": true
+      },
+      {
+        "name": "long-preview",
+        "pass": true
+      },
+      {
+        "name": "draft-preview",
+        "pass": true
+      }
+    ],
+    "checks": {
+      "realUserSettingsUnchanged": true,
+      "sourceBuildFreezeUnchangedThroughRun": true
+    }
+  },
+  "boot": {
+    "file": ".scratch/worker-evidence-followup/native-selfverify.json",
+    "runId": "dff3dc0a-ba67-4e91-96c5-1bd5fd7325dc",
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "pass": true
+  },
+  "liveAuth": {
+    "file": ".scratch/worker-evidence-followup/live-auth-probe.json",
+    "attempts": [
+      {
+        "attempt": 0,
+        "elapsedMs": 979,
+        "requests": 2,
+        "capabilities": 0,
+        "errors": [
+          "StealthGPT: mcp_auth_required: stealthgpt: MCP HTTP Transport Error: POSTing to endpoint (HTTP 401): {\"error\":\"invalid_token\",\"error_description\":\"No authorization provided\"}. Configure this server's Authorization header or sign in via /mcp. Unchanged configuration will not reconnect for 60s; changed configuration reconnects immediately. No credentials were changed by the CLI."
+        ]
+      },
+      {
+        "attempt": 1,
+        "elapsedMs": 0,
+        "requests": 0,
+        "capabilities": 0,
+        "errors": [
+          "StealthGPT: mcp_auth_required: stealthgpt: MCP HTTP Transport Error: POSTing to endpoint (HTTP 401): {\"error\":\"invalid_token\",\"error_description\":\"No authorization provided\"}. Configure this server's Authorization header or sign in via /mcp. Unchanged configuration will not reconnect for 60s; changed configuration reconnects immediately. No credentials were changed by the CLI."
+        ]
+      }
+    ],
+    "pass": true
+  },
+  "incidentPermissionEvidence": ".scratch/worker-evidence-followup/incident-permission-summary.json",
+  "freeze": {
+    "file": ".scratch/worker-evidence-followup/freeze.json",
+    "sha256": "dcd60705617782420d01b2e9498cb5a5b81e3c70663e636ef66731906e6cdb39",
+    "paths": 59,
+    "allStable": true
+  },
+  "retainedApprovalUi": [
+    {
+      "file": "src/ui/modals/wallet-picker-modal.tsx",
+      "sha256": "23915766462ea0107c54c3ee7c025179a085dedbd49563a6dbdc080359d493bd"
+    },
+    {
+      "file": "dist/src/ui/modals/wallet-picker-modal.js",
+      "sha256": "96617ad6653c259f88471faea250f84c621480a7f5d34d75e35f994b0afd0a2c"
+    }
+  ],
+  "build": {
+    "log": ".scratch/worker-evidence-followup/build.log",
+    "exitCode": 0
+  },
+  "semantic": {
+    "log": ".scratch/worker-evidence-followup/semantic.log",
+    "exitCode": 0
+  },
+  "noCommitPushDeploy": true
+}

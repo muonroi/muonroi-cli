@@ -447,9 +447,9 @@ async function* runHotPath(
 
   if (opts.cwd) {
     try {
-      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
-      if (isGsdNativeEnabled()) {
-        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+      const { isFlowNativeEnabled } = await import("../workflow/flags.js");
+      if (isFlowNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../workflow/product-workspace.js");
         ensureProductPlanningWorkspace(opts.cwd, {
           idea,
           sessionModelId: opts.sessionModelId,
@@ -457,7 +457,7 @@ async function* runHotPath(
         });
       }
     } catch (err) {
-      console.error(`[ideal/hot-path] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+      console.error(`[ideal/hot-path] flow product workspace bootstrap failed: ${(err as Error).message}`);
     }
   }
 
@@ -963,9 +963,9 @@ async function* runStart(
 
   if (opts.cwd) {
     try {
-      const { isGsdNativeEnabled } = await import("../gsd/flags.js");
-      if (isGsdNativeEnabled()) {
-        const { ensureProductPlanningWorkspace } = await import("../gsd/product-workspace.js");
+      const { isFlowNativeEnabled } = await import("../workflow/flags.js");
+      if (isFlowNativeEnabled()) {
+        const { ensureProductPlanningWorkspace } = await import("../workflow/product-workspace.js");
         ensureProductPlanningWorkspace(opts.cwd, {
           idea,
           sessionModelId: opts.sessionModelId,
@@ -973,7 +973,7 @@ async function* runStart(
         });
       }
     } catch (err) {
-      console.error(`[ideal] gsd product workspace bootstrap failed: ${(err as Error).message}`);
+      console.error(`[ideal] flow product workspace bootstrap failed: ${(err as Error).message}`);
     }
   }
 

@@ -11,6 +11,7 @@
 import { readFile } from "fs/promises";
 import os from "os";
 import path from "path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { redactor } from "../utils/redactor.js";
 import { type CheckResult, runDoctor } from "./doctor.js";
 
@@ -25,7 +26,7 @@ export interface BugReportBundle {
 }
 
 async function loadConfigRedacted(): Promise<Record<string, unknown>> {
-  const configPath = path.join(os.homedir(), ".muonroi-cli", "config.json");
+  const configPath = path.join(muonroiHome(), "config.json");
   try {
     const raw = await readFile(configPath, "utf-8");
     const config = JSON.parse(raw);
@@ -41,7 +42,7 @@ async function loadConfigRedacted(): Promise<Record<string, unknown>> {
 }
 
 async function loadErrorLogTail(): Promise<string[]> {
-  const logPath = path.join(os.homedir(), ".muonroi-cli", "errors.log");
+  const logPath = path.join(muonroiHome(), "errors.log");
   try {
     const content = await readFile(logPath, "utf-8");
     const lines = content.split("\n").filter(Boolean);

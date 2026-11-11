@@ -28,8 +28,8 @@ export interface InterceptIntentContext {
   assistantReasoningExcerpt?: string;
   /** Principle UUIDs already surfaced earlier in the same session. */
   priorWarningIdsInSession?: string[];
-  /** Active GSD phase identifier when running under GSD workflow. */
-  gsdPhase?: string;
+  /** Active FLOW phase identifier when running under FLOW workflow. */
+  flowPhase?: string;
   /** First ~200 chars of the user prompt that started this turn. */
   userGoalExcerpt?: string;
 }
@@ -398,9 +398,25 @@ export interface EESearchOptions {
 export interface EERecallEntry {
   id: string;
   collection: string | null;
+  /**
+   * The hint's stored scope, when the server returns it (experience-core's
+   * surfaced meta carries `projectSlug` + `scope`; /api/recall must forward
+   * them). Lets ee_feedback derive wrong_repo / wrong_language host-side.
+   */
+  projectSlug?: string | null;
+  scope?: EEHintStoredScope | null;
+}
+
+/** Stored scope of an experience point (payload `scope`), as far as the client reads it. */
+export interface EEHintStoredScope {
+  project_slug?: string | null;
+  lang?: string | string[] | null;
+  [key: string]: unknown;
 }
 
 export interface EERecallResponse {
+  /** Proof supplied by a server that enforces project filtering. Absent on legacy advisory recall. */
+  scope?: { strict: boolean; project?: string; cwd?: string; repository?: { root: string; project: string } };
   /** Formatted recall index carrying `[id col]` handles (null when nothing matched). */
   text: string | null;
   entries: EERecallEntry[];
@@ -408,8 +424,18 @@ export interface EERecallResponse {
   query?: string;
 }
 
+export interface EERecallHttpFailure {
+  status: number;
+  projectRequired: boolean;
+}
+
 export interface EERecallOptions {
-  /** Scope hint → body.project_slug (advisory under recallMode). */
+  /** Authenticated caller's filesystem-derived repository identity; not inferred from query text. */
+  repository?: { root: string; project: string };
+  /** Request-local diagnostics; recall still returns null on failure. Never sent over HTTP. */
+  onHttpError?: (failure: EERecallHttpFailure) => void;
+  strictProject?: boolean;
+  /** Explicit project → body.project_slug; strict recall requires matching proof. */
   project?: string;
   /** Working dir → body.cwd (server derives project_slug + attribution). */
   cwd?: string;

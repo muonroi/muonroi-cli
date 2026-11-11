@@ -48,6 +48,142 @@ describe("activityKindFor", () => {
 });
 
 describe("collectAgentActivities", () => {
+  const planReview = (receiptOutput = formatDelegationStarted("keen-emerald-badger")) =>
+    ok(
+      JSON.stringify({
+        ok: true,
+        pending: true,
+        receipt: {
+          success: true,
+          output: receiptOutput,
+          delegation: {
+            id: "keen-emerald-badger",
+            agent: "council",
+            description: "Flow plan review",
+            status: "running",
+          },
+        },
+        nextAction: "await_background_result",
+      }),
+    );
+
+  it("shows background Flow plan council from its nested host receipt", () => {
+    const review = call("plan-review", "flow_plan_review", {});
+    const entries = [resultEntry(review, planReview())];
+    expect(collectAgentActivities(entries)).toMatchObject([
+      {
+        kind: "council",
+        agent: "council",
+        label: "Flow plan review",
+        status: "running",
+        job: { delegationId: "keen-emerald-badger" },
+      },
+    ]);
+    expect(
+      collectAgentActivities(entries, [], {
+        processes: {},
+        delegations: { "keen-emerald-badger": { state: "done", summary: "Review complete" } },
+      })[0],
+    ).toMatchObject({ status: "done" });
+    expect(
+      collectAgentActivities(entries, [], {
+        processes: {},
+        delegations: { "keen-emerald-badger": { state: "failed", summary: "Review failed" } },
+      })[0],
+    ).toMatchObject({ status: "failed" });
+  });
+
+  it("shows independent plan revalidation as a verify worker with its durable status", () => {
+    const review = call("revalidate-plan", "flow_plan_review", { action: "revalidate" });
+    const receipt = ok(
+      JSON.stringify({
+        ok: true,
+        pending: true,
+        receipt: {
+          success: true,
+          output: "Independent verification started",
+          delegation: {
+            id: "verify-current-plan",
+            agent: "verify",
+            description: "Independent current-plan revalidation",
+            status: "running",
+          },
+        },
+      }),
+    );
+    const entries = [resultEntry(review, receipt)];
+    expect(collectAgentActivities(entries)).toMatchObject([
+      { kind: "subagent", agent: "verify", status: "running", job: { delegationId: "verify-current-plan" } },
+    ]);
+    expect(
+      collectAgentActivities(entries, [], {
+        processes: {},
+        delegations: { "verify-current-plan": { state: "failed", summary: "Evidence incomplete" } },
+      })[0],
+    ).toMatchObject({ status: "failed" });
+  });
+
+  it("keeps one council row when a repeated dispatch reuses the existing job", () => {
+    const entries = [
+      resultEntry(call("first", "flow_plan_review", {}), planReview()),
+      resultEntry(
+        call("again", "flow_plan_review", { action: "start" }),
+        planReview("Existing plan review jobId=keen-emerald-badger. Read its result; do not launch another council."),
+      ),
+    ];
+    const rows = collectAgentActivities(entries);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ id: "first", status: "running", job: { delegationId: "keen-emerald-badger" } });
+    expect(
+      collectAgentActivities(
+        entries,
+        entries.map((e) => e.toolCall!),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("does not invent a council for completion, skipped or refused dispatches", () => {
+    const complete = call("complete", "flow_plan_review", { action: "complete" });
+    expect(activityKindFor(complete)).toBeNull();
+    expect(
+      collectAgentActivities([resultEntry(complete, ok('{"ok":true,"completedJobId":"keen-emerald-badger"}'))]),
+    ).toEqual([]);
+    expect(collectAgentActivities([resultEntry(complete, ok('{"ok":true}'))], [complete])).toEqual([]);
+    for (const output of [
+      '{"ok":true,"skipped":true}',
+      '{"ok":false,"pending":false}',
+      '{"ok":true,"pending":true,"receipt":{"success":false}}',
+      '{"ok":true,"pending":true,"receipt":{"success":true,"delegation":{}}}',
+      "malformed receipt",
+    ]) {
+      expect(collectAgentActivities([resultEntry(call("review", "flow_plan_review", {}), ok(output))])).toEqual([]);
+    }
+  });
+
+  it("keeps a detached council visible until its durable job completes", () => {
+    const council = call("c1", "convene_council", {
+      topic: "Council visibility",
+      reason: "Independent viewpoints",
+      context: "Bounded evidence",
+    });
+    const entries = [resultEntry(council, ok(formatDelegationStarted("gentle-teal-falcon")))];
+    const initial = collectAgentActivities(entries);
+    expect(initial).toHaveLength(1);
+    expect(initial[0]).toMatchObject({
+      kind: "council",
+      agent: "council",
+      label: "Council visibility",
+      status: "running",
+      job: { delegationId: "gentle-teal-falcon" },
+    });
+    expect(initial[0].detail).toContain("Bounded evidence");
+    const terminal = collectAgentActivities(entries, [], {
+      delegations: { "gentle-teal-falcon": { state: "done", summary: "Saved council advice" } },
+      processes: {},
+    });
+    expect(terminal[0].status).toBe("done");
+    expect(partitionForRail(terminal)).toMatchObject({ running: [], done: 1 });
+  });
   it("reports a finished sub-agent with its prompt and output", () => {
     const [a] = collectAgentActivities([resultEntry(TASK, ok("all done"))]);
     expect(a.kind).toBe("subagent");

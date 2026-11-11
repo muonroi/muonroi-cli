@@ -25,7 +25,12 @@ export type InteractionEventType =
   | "ui_interaction"
   | "stream_retry"
   | "f6_synthesis"
+  | "final_answer_recovery"
+  | "final_answer_failure"
   | "grounding_flag"
+  // Final-answer host checks (tool-engine finalize): unsupported test/build claim; done-claim vs open ledger.
+  | "verification_claim_flag"
+  | "completion_check"
   | "stall_rescue"
   | "stream_start"
   | "text_tool_resteer"
@@ -33,6 +38,7 @@ export type InteractionEventType =
   | "turn_tool_load"
   | "dedup"
   | "call_accounting"
+  | "prompt_breakdown"
   | "subagent_step"
   | "session_experience";
 

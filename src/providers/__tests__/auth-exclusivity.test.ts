@@ -28,11 +28,11 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-describe("auth exclusivity — setKeyForProvider clears OAuth", () => {
-  it("logs out OAuth for an OAuth-capable provider when setting an API key", async () => {
+describe("subscription and API-key coexistence", () => {
+  it("retains OAuth when saving an API key as a backup", async () => {
     await setKeyForProvider("openai", "envkey-openai-abcdefghij");
     expect(process.env.OPENAI_API_KEY).toBe("envkey-openai-abcdefghij");
-    expect(deleteTokensSpy).toHaveBeenCalledWith("openai");
+    expect(deleteTokensSpy).not.toHaveBeenCalled();
   });
 
   it("does not touch OAuth for a non-OAuth provider", async () => {

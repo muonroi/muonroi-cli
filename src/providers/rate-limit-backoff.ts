@@ -227,16 +227,50 @@ export function retryAfterMsFromError(err: unknown, now: number = Date.now(), de
   return null;
 }
 
+/** Provider response evidence safe to attach to diagnostic logs (no auth/cookie headers). */
+export interface ProviderErrorDetails {
+  statusCode?: number;
+  responseBody?: string;
+  responseHeaders?: Record<string, string>;
+  traceId?: string;
+  requestId?: string;
+}
+
+export function getProviderErrorDetails(error: unknown): ProviderErrorDetails {
+  const details: ProviderErrorDetails = {};
+  const headers: Record<string, string> = {};
+  const seen = new Set<unknown>();
+  const visit = (current: unknown, depth: number): void => {
+    if (!current || typeof current !== "object" || depth > 6 || seen.has(current)) return;
+    seen.add(current);
+    details.statusCode ??= statusOf(current);
+    const e = current as { responseBody?: unknown; responseHeaders?: unknown };
+    if (details.responseBody === undefined && typeof e.responseBody === "string") details.responseBody = e.responseBody;
+    if (e.responseHeaders && typeof e.responseHeaders === "object") {
+      const pairs =
+        e.responseHeaders instanceof Headers ? [...e.responseHeaders.entries()] : Object.entries(e.responseHeaders);
+      for (const [name, value] of pairs) {
+        const key = name.toLowerCase();
+        if (
+          typeof value === "string" &&
+          /^(?:x-)?(?:trace-id|request-id|retry-after(?:-ms)?|ratelimit[-\w]*)$/.test(key)
+        )
+          headers[key] ??= value;
+      }
+    }
+    for (const inner of innerErrors(current)) visit(inner, depth + 1);
+  };
+  visit(error, 0);
+  if (Object.keys(headers).length) details.responseHeaders = headers;
+  details.traceId = headers["x-trace-id"] ?? headers["trace-id"];
+  details.requestId = headers["x-request-id"] ?? headers["request-id"];
+  return details;
+}
+
 /**
- * Thrown when a call is STILL rate-limited after its whole wait budget. Carries
- * `statusCode: 429` (so existing status-based surfaces still say "HTTP 429") and
- * the marker {@link isRateLimitRetryExhausted} reads, so outer retry layers do
- * not stack another full budget on top of one already spent — the transient
- * classifier treats it as non-transient.
- *
- * The message is written for the AGENT that reads it (a background delegation's
- * error text lands verbatim in the main agent's context): what happened, that
- * the budget is shared, and what to do instead of retrying immediately.
+ * The local retry wait budget is exhausted; the provider still returned 429.
+ * Preserve its evidence and prevent outer retries from stacking another budget.
+ * This marker does not establish exhausted credits or a provider-wide limit.
  */
 export class ProviderRateLimitError extends Error {
   readonly statusCode = 429;
@@ -245,6 +279,10 @@ export class ProviderRateLimitError extends Error {
   readonly attempts: number;
   readonly waitedMs: number;
   readonly retryAfterMs: number | null;
+  readonly responseBody: string | undefined;
+  readonly responseHeaders: Record<string, string> | undefined;
+  readonly traceId: string | undefined;
+  readonly requestId: string | undefined;
   constructor(opts: {
     provider?: string;
     attempts: number;
@@ -260,9 +298,9 @@ export class ProviderRateLimitError extends Error {
         : "";
     super(
       `Rate-limited by ${providerText} (HTTP 429): still refused after ${opts.attempts} attempt(s) and ` +
-        `${Math.round(opts.waitedMs / 1000)}s of backoff.${hint} The limit is the account's budget, shared by ` +
-        `every muonroi agent on this machine (the main agent and all background delegations). Do not retry ` +
-        `immediately: wait for running agents to finish, retry later, or launch fewer agents in parallel. ` +
+        `${Math.round(opts.waitedMs / 1000)}s of backoff.${hint} HTTP 429 alone does not establish exhausted ` +
+        `credits or the provider's limit scope. The CLI cooldown is shared by every muonroi agent on this machine. ` +
+        `Do not retry immediately; inspect provider usage and retry/reset guidance, or launch fewer agents in parallel. ` +
         `Provider said: ${original}`,
     );
     this.name = "ProviderRateLimitError";
@@ -270,6 +308,11 @@ export class ProviderRateLimitError extends Error {
     this.attempts = opts.attempts;
     this.waitedMs = opts.waitedMs;
     this.retryAfterMs = opts.retryAfterMs ?? null;
+    const details = getProviderErrorDetails(opts.cause);
+    this.responseBody = details.responseBody;
+    this.responseHeaders = details.responseHeaders;
+    this.traceId = details.traceId;
+    this.requestId = details.requestId;
     (this as { cause?: unknown }).cause = opts.cause;
   }
 }
@@ -392,6 +435,7 @@ export async function withProviderRateLimitRetry<T>(
   let retries = 0;
   let waitedMs = 0;
   for (;;) {
+    opts.signal?.throwIfAborted();
     try {
       return await attempt();
     } catch (err) {

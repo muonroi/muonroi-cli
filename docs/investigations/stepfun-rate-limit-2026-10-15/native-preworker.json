@@ -1,0 +1,84 @@
+{
+  "at": "2026-10-15T01:34:06.366Z",
+  "endpoint": "https://api.stepfun.ai/step_plan/v1",
+  "mainModel": "step-5-preview",
+  "workerModel": "step-3.5-flash",
+  "effectiveLimits": {
+    "main": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    },
+    "worker": {
+      "concurrency": 5,
+      "requestsPerMinute": 100,
+      "tokensPerMinute": 500000
+    }
+  },
+  "summary": {
+    "directResponses": 0,
+    "direct429": 0,
+    "cliRequests": 2,
+    "cliResponses": 1,
+    "cli429": 1,
+    "workerResponses": 0
+  },
+  "trace": [
+    {
+      "at": "2026-10-15T01:34:12.178Z",
+      "pid": 46468,
+      "role": "main",
+      "event": "request",
+      "id": "bdf2ce40-23fa-4cc3-8520-e21271c48593",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-5-preview",
+      "stream": true,
+      "bytes": 1366,
+      "sha256": "83a945ca0635aa7f9d940a707be8f5c2fde59f88c178b27552d6b05d09550264",
+      "messageChars": 1292,
+      "messages": 2,
+      "maxTokens": 64
+    },
+    {
+      "at": "2026-10-15T01:34:12.182Z",
+      "pid": 46468,
+      "role": "main",
+      "event": "request",
+      "id": "c2e314e7-478c-43ce-84cf-544aaa676e63",
+      "url": "https://api.stepfun.ai/step_plan/v1/chat/completions",
+      "model": "step-3.5-flash",
+      "stream": true,
+      "bytes": 3148,
+      "sha256": "e286fcbc0b581d8d62a8986078808aa8298c4fd10baa0a6f1ca2ba9d7295a18e",
+      "messageChars": 3066,
+      "messages": 2,
+      "maxTokens": 2048
+    },
+    {
+      "at": "2026-10-15T01:34:13.049Z",
+      "pid": 46468,
+      "role": "main",
+      "event": "response",
+      "id": "c2e314e7-478c-43ce-84cf-544aaa676e63",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "headers": {
+        "x-trace-id": "ae93dfa5b430718c2d4b6b4c8e3a9e79"
+      },
+      "headersMs": 867
+    },
+    {
+      "at": "2026-10-15T01:34:13.050Z",
+      "pid": 46468,
+      "role": "main",
+      "event": "complete",
+      "id": "c2e314e7-478c-43ce-84cf-544aaa676e63",
+      "model": "step-3.5-flash",
+      "status": 429,
+      "durationMs": 868,
+      "bytes": 89,
+      "error": "{\"message\":\"Rate limit reached, please try again later.\",\"type\":\"rate_limited\"}"
+    }
+  ],
+  "notes": "Stopped at first 429; no worker launched. Pending title response excluded from success/failure counts."
+}

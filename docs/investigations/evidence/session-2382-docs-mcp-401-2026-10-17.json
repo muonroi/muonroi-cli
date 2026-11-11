@@ -1,0 +1,228 @@
+{
+  "capturedAt": "2026-10-17T07:20:20.664Z",
+  "session": "2382ab402feb",
+  "boundary": "Actual native MCP, provider and Qdrant controls; sanitized credential metadata only; server-only one-field config repair",
+  "before": {
+    "connection": {
+      "capturedAt": "2026-10-17T07:13:56.622Z",
+      "boundary": "Configured first-party docs read-only initialize; no OAuth browser, settings writes or credentials logged",
+      "config": {
+        "found": true,
+        "id": "muonroi-docs",
+        "enabled": true,
+        "url": "https://docs-mcp.muonroi.com/mcp",
+        "headerNames": []
+      },
+      "requests": [
+        {
+          "label": "configured",
+          "status": 200,
+          "elapsedMs": 667,
+          "challenge": "",
+          "contentType": "text/event-stream",
+          "body": "event: message\ndata: {\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"muonroi-docs\",\"version\":\"1.0.0\"}},\"jsonrpc\":\"2.0\",\"id\":1}\n\n"
+        },
+        {
+          "label": "anonymous",
+          "status": 200,
+          "elapsedMs": 93,
+          "challenge": "",
+          "contentType": "text/event-stream",
+          "body": "event: message\ndata: {\"result\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{\"tools\":{}},\"serverInfo\":{\"name\":\"muonroi-docs\",\"version\":\"1.0.0\"}},\"jsonrpc\":\"2.0\",\"id\":1}\n\n"
+        }
+      ],
+      "oauth": {
+        "exists": false,
+        "hasClient": false,
+        "hasAccessToken": false,
+        "hasRefreshToken": false
+      },
+      "native": {
+        "connected": true,
+        "toolCount": 6,
+        "toolNames": [
+          "mcp_muonroi-docs__docs_search",
+          "mcp_muonroi-docs__docs_read",
+          "mcp_muonroi-docs__bb_template_describe",
+          "mcp_muonroi-docs__bb_package_describe",
+          "mcp_muonroi-docs__bb_recipe_list",
+          "mcp_muonroi-docs__setup_guide"
+        ]
+      }
+    },
+    "deployment": {
+      "capturedAt": "2026-10-17T07:16:04.279Z",
+      "image": "muonroi-docs-mcp",
+      "imageId": "sha256:aeea0abcedc80861ecb61b856dbc51009347beac356b6d36065163f46b3ba7ba",
+      "workdir": "/app",
+      "compose": {
+        "com.docker.compose.project": "muonroi",
+        "com.docker.compose.project.config_files": "/opt/muonroi/docker-compose.yml,/opt/muonroi/docker-compose.override.yml",
+        "com.docker.compose.project.working_dir": "/opt/muonroi",
+        "com.docker.compose.service": "docs-mcp"
+      },
+      "mounts": [
+        {
+          "source": "/opt/muonroi/docs-mcp.config.json",
+          "destination": "/root/.experience/config.json",
+          "readWrite": false
+        }
+      ],
+      "docs": {
+        "cwd": "/app",
+        "configFile": "/root/.experience/config.json",
+        "configExists": true,
+        "provider": "siliconflow",
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "endpoint": "https://api.siliconflow.com/v1/embeddings",
+        "keyPresent": true,
+        "keySha12": "1e160a7336bb",
+        "keySource": "config",
+        "qdrant": "http://qdrant:6333/",
+        "qdrantKeyPresent": true
+      },
+      "eeHost": {
+        "cwd": "/home/phila",
+        "configFile": "/home/phila/.experience/config.json",
+        "configExists": true,
+        "provider": "siliconflow",
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "endpoint": "https://api.siliconflow.com/v1/embeddings",
+        "keyPresent": true,
+        "keySha12": "dfb3bdae1349",
+        "keySource": "config",
+        "qdrant": "http://localhost:6333/",
+        "qdrantKeyPresent": true
+      }
+    },
+    "tools": {
+      "capturedAt": "2026-10-17T07:16:04.171Z",
+      "calls": [
+        {
+          "name": "bb_recipe_list",
+          "elapsedMs": 1216,
+          "isError": true,
+          "chars": 68,
+          "embed401": true,
+          "mentions401": true,
+          "contentTypes": ["text"]
+        },
+        {
+          "name": "docs_search",
+          "elapsedMs": 597,
+          "isError": true,
+          "chars": 68,
+          "embed401": true,
+          "mentions401": true,
+          "contentTypes": ["text"]
+        }
+      ]
+    },
+    "embedding": {
+      "capturedAt": "2026-10-17T07:17:02.067Z",
+      "boundary": "Private configured provider requests; only statuses/dimensions returned, no credentials/vectors logged",
+      "docs": {
+        "status": 401,
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "vectorDimensions": null,
+        "qdrant": {
+          "status": 200,
+          "points": 8765,
+          "vectors": {
+            "size": 1024,
+            "distance": "Cosine"
+          }
+        }
+      },
+      "eeHost": {
+        "status": 200,
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "vectorDimensions": 1024
+      }
+    }
+  },
+  "repair": {
+    "capturedAt": "2026-10-17T07:17:59.215Z",
+    "boundary": "Validated same-host same-provider credential; one secret field changed with0600 backup; no token output",
+    "repair": {
+      "backup": "/opt/muonroi/docs-mcp.config.json.backup-2026-10-17T07-18-01-338Z",
+      "changedFields": ["embedKey"],
+      "oldSha12": "1e160a7336bb",
+      "newSha12": "dfb3bdae1349",
+      "mode": "600"
+    },
+    "restart": "muonroi-docs-mcp-1"
+  },
+  "after": {
+    "tools": {
+      "capturedAt": "2026-10-17T07:18:27.567Z",
+      "calls": [
+        {
+          "name": "bb_recipe_list",
+          "elapsedMs": 2226,
+          "isError": false,
+          "chars": 4071,
+          "embed401": false,
+          "mentions401": false,
+          "count": 10,
+          "contentTypes": ["text"]
+        },
+        {
+          "name": "docs_search",
+          "elapsedMs": 959,
+          "isError": false,
+          "chars": 543,
+          "embed401": false,
+          "mentions401": false,
+          "count": 1,
+          "contentTypes": ["text"]
+        },
+        {
+          "name": "docs_read",
+          "elapsedMs": 703,
+          "isError": false,
+          "chars": 497
+        }
+      ],
+      "connected": true,
+      "toolCount": 6
+    },
+    "embedding": {
+      "capturedAt": "2026-10-17T07:18:26.845Z",
+      "boundary": "Private configured provider requests; only statuses/dimensions returned, no credentials/vectors logged",
+      "docs": {
+        "status": 200,
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "vectorDimensions": 1024,
+        "qdrant": {
+          "status": 200,
+          "points": 8765,
+          "vectors": {
+            "size": 1024,
+            "distance": "Cosine"
+          }
+        }
+      },
+      "eeHost": {
+        "status": 200,
+        "model": "Qwen/Qwen3-Embedding-0.6B",
+        "vectorDimensions": 1024
+      }
+    }
+  },
+  "deployedHashes": [
+    "cc2054fc3b023de4dafaf57b9bd170eb7a828738db16d9bf3dad0fed78181696  /app/src/qdrant-client.js",
+    "4e6adf466e422c1ba8cc1d3dcd5a28b683635fdc2aa52476b82f8f01ba73b6b2  /app/src/server-http.js"
+  ],
+  "hashes": {
+    ".scratch/first-party-mcp/session-trace.json": "fe8bf971038583b4bbf3c311263c6c13bb37332decb71a68a93e66a98ae5defd",
+    ".scratch/first-party-mcp/probe.json": "8a1a9753be542eb1483013f8df1c63ddbe9997cffa45459fd3710e72ca003bb9",
+    ".scratch/first-party-mcp/server-meta.json": "972c64eecdc9cf54befd474890d9b90964aef1b77c9936f670358388b39287f1",
+    ".scratch/first-party-mcp/tool-calls.json": "fde165d634ce51136a862055df006006212f1c67fff238a5d952b673470c9c85",
+    ".scratch/first-party-mcp/embedding-probe.json": "fc626e5b04a7161f64dd1e7073b0611209f7232dea2a2d86ae880f10c84a4e6c",
+    ".scratch/first-party-mcp/repair-config.json": "2253c99565c503720d9fe7573802257cc3720483ed94399ad1606de15dd4916b",
+    ".scratch/first-party-mcp/tool-calls-after.json": "3008673a5a4312b2fee7cfe2e22054433e1e68221459083634f6acfd602e4084",
+    ".scratch/first-party-mcp/embedding-probe-after.json": "f8eacddccd361f7c95a6926408b250568eacb04bcaab8ee28b83cf59e0e90946",
+    "docs/investigations/session-2382-docs-mcp-401-2026-10-17.md": "c770a303e0c20cdc6607e4370175ec2dec90fa2473db7204f1af0b5c68e81b39"
+  }
+}

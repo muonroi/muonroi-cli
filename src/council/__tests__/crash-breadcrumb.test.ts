@@ -204,8 +204,8 @@ describe("per-session tails are bounded", () => {
 
   it("evicts the LEAST-RECENTLY-written session once the cap is exceeded", () => {
     setBreadcrumbSession("victim");
-    breadcrumb("pre-stream.gsdGate.start");
-    expect(getLastOpenPhase("victim")).toBe("gsdGate");
+    breadcrumb("pre-stream.flowGate.start");
+    expect(getLastOpenPhase("victim")).toBe("flowGate");
 
     // Flood with exactly MAX_TRACKED_SESSIONS fresh sessions: `victim` is then
     // the oldest of MAX+1 and is the one dropped.

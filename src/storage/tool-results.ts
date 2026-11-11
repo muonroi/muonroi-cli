@@ -7,6 +7,7 @@ export function extractToolResultFromOutput(output: unknown): ToolResult | null 
     const result = output as ToolResult;
     return {
       success: Boolean(result.success),
+      ...(result.preview === true ? { preview: true } : {}),
       output: result.output,
       error: result.error,
       diff: result.diff,

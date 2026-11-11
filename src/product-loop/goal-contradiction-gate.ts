@@ -54,7 +54,7 @@
  *   contract demands. A gate whose parse failure means "approve" is a rubber
  *   stamp, which is worse than no gate: it launders an unexamined change as an
  *   examined one. The council's own verdict parser already follows this rule
- *   (`src/gsd/verdict-schema.ts`: "caller MUST treat null as parse failed
+ *   (`src/workflow/verdict-schema.ts`: "caller MUST treat null as parse failed
  *   (conservative revise), never as approve") and this copies it.
  *
  * The line between the two is whether a reply ARRIVED. That distinction was
@@ -868,7 +868,7 @@ function normalizeContradictions(raw: unknown): GoalContradiction[] {
  *
  * `null` means "no verdict" and the caller MUST treat it as a flag, never as an
  * approval — the same contract as `extractStructuredVerdict` in
- * `src/gsd/verdict-schema.ts`. This is a separate implementation only because
+ * `src/workflow/verdict-schema.ts`. This is a separate implementation only because
  * that one is bound to the plan-council's schema; the extraction strategy
  * (labelled fence → any fence → bare object, last-wins) is deliberately the
  * same, since the model is told to reason first and emit the block last.

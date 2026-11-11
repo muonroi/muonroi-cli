@@ -1,0 +1,168 @@
+{
+  "src/cli/config/screen-providers.ts": {
+    "anthropic": 1,
+    "deepseek": 1,
+    "zai": 1,
+    "opencode-go": 1,
+    "xai": 1,
+    "stepfun": 1,
+    "ollama": 5
+  },
+  "src/cli/keys.ts": {
+    "xai": 1
+  },
+  "src/models/registry.ts": {
+    "deepseek": 1,
+    "zai": 1,
+    "opencode-go": 1,
+    "xai": 1
+  },
+  "src/ops/doctor.ts": {
+    "ollama": 2
+  },
+  "src/orchestrator/error-utils.ts": {
+    "opencode-go": 1
+  },
+  "src/orchestrator/orchestrator.ts": {
+    "anthropic": 1
+  },
+  "src/orchestrator/prompts.ts": {
+    "anthropic": 1
+  },
+  "src/orchestrator/tool-engine.ts": {
+    "anthropic": 1
+  },
+  "src/product-loop/index.ts": {
+    "xai": 1
+  },
+  "src/providers/adapter.ts": {
+    "deepseek": 1,
+    "xai": 2,
+    "zai": 2,
+    "opencode-go": 2,
+    "stepfun": 2
+  },
+  "src/providers/anthropic.ts": {
+    "anthropic": 1
+  },
+  "src/providers/auth/grok-oauth.ts": {
+    "xai": 8
+  },
+  "src/providers/auth/openai-oauth.ts": {
+    "openai": 7
+  },
+  "src/providers/auth/registry.ts": {
+    "openai": 1
+  },
+  "src/providers/capabilities.ts": {
+    "anthropic": 6,
+    "openai": 6,
+    "xai": 1,
+    "deepseek": 1,
+    "ollama": 1,
+    "zai": 1,
+    "opencode-go": 2,
+    "stepfun": 1
+  },
+  "src/providers/endpoints.ts": {
+    "opencode-go": 4,
+    "deepseek": 1,
+    "xai": 1,
+    "zai": 1,
+    "stepfun": 1
+  },
+  "src/providers/keychain.ts": {
+    "opencode-go": 1,
+    "ollama": 3,
+    "openai": 2,
+    "xai": 1
+  },
+  "src/providers/ollama.ts": {
+    "ollama": 1
+  },
+  "src/providers/openai.ts": {
+    "openai": 1
+  },
+  "src/providers/runtime.ts": {
+    "deepseek": 2,
+    "openai": 1,
+    "xai": 1,
+    "zai": 2,
+    "opencode-go": 1,
+    "ollama": 1,
+    "anthropic": 1
+  },
+  "src/providers/strategies/anthropic.strategy.ts": {
+    "anthropic": 2
+  },
+  "src/providers/strategies/deepseek.strategy.ts": {
+    "deepseek": 2
+  },
+  "src/providers/strategies/ollama.strategy.ts": {
+    "ollama": 2
+  },
+  "src/providers/strategies/openai.strategy.ts": {
+    "openai": 2
+  },
+  "src/providers/strategies/opencode-go.strategy.ts": {
+    "opencode-go": 3,
+    "deepseek": 1
+  },
+  "src/providers/strategies/registry.ts": {
+    "opencode-go": 1
+  },
+  "src/providers/strategies/stepfun.strategy.ts": {
+    "stepfun": 2
+  },
+  "src/providers/strategies/xai.strategy.ts": {
+    "xai": 2
+  },
+  "src/providers/strategies/zai.strategy.ts": {
+    "zai": 2
+  },
+  "src/providers/types.ts": {
+    "anthropic": 1,
+    "openai": 1,
+    "deepseek": 1,
+    "xai": 1,
+    "ollama": 1,
+    "zai": 1,
+    "opencode-go": 1,
+    "stepfun": 1
+  },
+  "src/providers/vision-backend.ts": {
+    "zai": 4,
+    "glm-4.6v-flash": 2,
+    "glm-5.2": 2,
+    "xai": 1,
+    "grok-4.5": 1,
+    "anthropic": 1
+  },
+  "src/router/peak-hour.ts": {
+    "zai": 1,
+    "deepseek": 1
+  },
+  "src/self-qa/agentic-loop.ts": {
+    "deepseek": 1
+  },
+  "src/ui/app.tsx": {
+    "deepseek": 1,
+    "zai": 1,
+    "opencode-go": 1,
+    "xai": 1,
+    "stepfun": 1
+  },
+  "src/ui/use-app-logic.tsx": {
+    "deepseek": 1,
+    "zai": 1,
+    "opencode-go": 1,
+    "xai": 1
+  },
+  "src/utils/settings.ts": {
+    "opencode-go": 5,
+    "deepseek": 1,
+    "xai": 1,
+    "zai": 1,
+    "stepfun": 1
+  }
+}

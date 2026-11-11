@@ -27,8 +27,7 @@ import {
 describe("setKeyForProvider / deleteKeyForProvider (env-store)", () => {
   beforeEach(() => {
     process.env.MUONROI_ENV_FILE = join(tmpdir(), `kc-${Date.now()}-${Math.random().toString(36).slice(2)}.env`);
-    // Isolate the OAuth token dir — setKeyForProvider clears OAuth for the
-    // provider (exclusivity), which must not touch the real user's tokens.
+    // Keep authentication fixtures isolated from the real user's tokens.
     process.env.MUONROI_AUTH_DIR = join(tmpdir(), `kc-auth-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     delete process.env.OPENAI_API_KEY;
   });

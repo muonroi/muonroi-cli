@@ -4,8 +4,8 @@
  * Core type definitions for the Prompt Intelligence Layer (PIL) pipeline.
  */
 
-import type { GrayAreaQuestion } from "../gsd/gray-areas.js";
 import type { ComplexityTier } from "../playbook/complexity.js";
+import type { GrayAreaQuestion } from "../workflow/gray-areas.js";
 import type { ComplexitySizeResult } from "./layer1_5-complexity-size.js";
 
 export type TaskType = "refactor" | "debug" | "plan" | "analyze" | "documentation" | "generate" | "build" | "general";
@@ -41,20 +41,20 @@ export interface PipelineContext {
   tokenBudget: number;
   metrics: PipelineMetrics | null;
   layers: LayerResult[];
-  // P2: Session & GSD context (optional — layers skip if absent)
-  gsdPhase?: string | null;
+  // P2: Session & FLOW context (optional — layers skip if absent)
+  flowPhase?: string | null;
   resumeDigest?: string | null;
   activeRunId?: string | null;
   digestAgeMs?: number | null;
   sessionId?: string | null;
-  /** GSD-native triage tier (set by layer4 — sourced from modelDepthTier when present). */
+  /** FLOW-native triage tier (set by layer4 — sourced from modelDepthTier when present). */
   complexityTier?: ComplexityTier | null;
-  /** True when layer4 classified this turn as a heavy GSD task the mutation gate must block until plan-review passes. */
-  gsdGateBlocking?: boolean | null;
+  /** True when layer4 classified this turn as a heavy FLOW task the mutation gate must block until plan-review passes. */
+  flowGateBlocking?: boolean | null;
   /**
    * Model-decided work depth (quick | standard | heavy), set by layer1's
    * model-first classifier (the 5th classify word). This is the agent-first
-   * source of truth for the GSD directive tier; layer4 prefers it over the
+   * source of truth for the FLOW directive tier; layer4 prefers it over the
    * legacy regex `scoreComplexity` (which now only runs as the offline fallback
    * when the model classifier is unwired/failed). null when the model omitted
    * the word OR the legacy cascade ran → layer4 falls back accordingly.
@@ -62,12 +62,12 @@ export interface PipelineContext {
   modelDepthTier?: ComplexityTier | null;
   /**
    * Leader-tier complexity assessor's auto-council recommendation (Task 4
-   * `assessComplexity` / `src/gsd/complexity-assessor.ts`), set by the native
+   * `assessComplexity` / `src/workflow/complexity-assessor.ts`), set by the native
    * depth-sync block in message-processor.ts BEFORE `syncWorkflowContext`.
    * undefined when the assessor didn't run (prefilter-skip / disabled) or
    * failed; consumed by the auto-council gate (Task 8).
    */
-  gsdAutoCouncil?: boolean;
+  flowAutoCouncil?: boolean;
   /**
    * Model-decided scope (agent-first replacement for the `mentionsEcosystemScope`
    * regex): true when the turn is about the Muonroi PLATFORM/ecosystem (BB/.NET,
@@ -104,7 +104,7 @@ export interface PipelineContext {
   /**
    * Coarse intent: "chitchat" for greetings/small-talk/no-coding-intent,
    * "task" when there is a coding intent, null when undetermined. Set by
-   * layer1; respected by layer4 (skip GSD directive) and layer5 (skip
+   * layer1; respected by layer4 (skip FLOW directive) and layer5 (skip
    * heavy context like recent-files / flow-state). Distinct from taskType
    * "general", which conflates chitchat with low-confidence fallback.
    */
@@ -134,6 +134,9 @@ export interface PipelineContext {
    * because schema validation failed" when reading interaction_logs.
    */
   fallbackReason?: string | null;
+  /** Internal phase/timing only; not a routing decision or provider diagnosis. */
+  fallbackPhase?: string | null;
+  fallbackDurationMs?: number;
   /**
    * T1 behavioral rules extracted by Layer 3 from EE proven-tier points.
    * These are high-hitCount / tier=proven entries that have been promoted to
@@ -229,11 +232,22 @@ export interface IntentDetectionTrace {
   complexitySizeScore?: number;
 }
 
+export interface BrainPoint {
+  text: string;
+  score: number;
+  id?: string;
+  collection?: string;
+  projectSlug?: string | null;
+  scope?: import("../ee/types.js").EEHintStoredScope | null;
+}
+
 export interface BrainData {
   // id/collection present when PIL schema_version >= 1.1 (server attributes the
   // point), enabling layer3's unified path to record it as rateable recall debt.
-  t0_principles: Array<{ text: string; score: number; id?: string; collection?: string }>;
+  // projectSlug/scope: the point's stored scope when the server forwards it, so a
+  // passive hint rated noise can get a host-derived wrong_repo/wrong_language.
+  t0_principles: Array<BrainPoint>;
   t1_rules: string[];
-  t2_patterns: Array<{ text: string; score: number; id?: string; collection?: string }>;
+  t2_patterns: Array<BrainPoint>;
   retrieval_skipped_reason: string | null;
 }

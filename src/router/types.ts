@@ -16,5 +16,8 @@ export interface RouteDecision {
   cap_overridden?: boolean;
   taskHash?: string;
   source?: string;
+  routingMode?: import("../utils/settings.js").RoutingMode;
+  suggestedModel?: string;
+  suggestedReason?: string;
   reasoningEffort?: "low" | "medium" | "high";
 }

@@ -43,9 +43,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { redactSecrets } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 
 const BASENAME = "tui-stderr.log";
 
@@ -71,20 +71,6 @@ let failureSink: FailureSink | null = null;
  */
 export function setStderrMirrorFailureSink(sink: FailureSink | null): void {
   failureSink = sink;
-}
-
-/**
- * Root of the muonroi home.
- *
- * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
- * `muonroiHome()` convention already used by src/storage/config.ts,
- * src/usage/ledger.ts, src/chat/channel-manager.ts et al. Resolved lazily per
- * call, never as a module-level `const`, so the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` can reach it (`src/lsp/npm-cache.ts:20-28`
- * records why a const cannot be redirected from a test).
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 /**

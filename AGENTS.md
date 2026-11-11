@@ -1,4 +1,8 @@
-# AGENTS.md
+# AGENTS.md — muonroi-cli
+
+Project knowledge for this repository only. General working rules (language, evidence, test gate,
+error handling, …) are NOT here: muonroi-cli implements them natively, and third-party CLIs read them
+from their own global instruction file.
 
 ## Overview
 
@@ -9,12 +13,14 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 | Action | Command |
 |--------|---------|
 | Install deps | `bun install` |
-| Typecheck | `bun run typecheck` or `npx tsc --noEmit` |
+| Typecheck | `bun run typecheck` (= `tsc --noEmit`) |
 | Build | `bun run build` |
 | Run from source | `bun run dev` |
-| Run built CLI | `node dist/index.js` |
-| Headless mode | `node dist/index.js --prompt "..." --max-tool-rounds N` |
-| Run tests | `bun test` |
+| Run built CLI (TUI, Bun runtime) | `bun dist/src/index.js` |
+| Headless mode | `bun run src/index.ts --prompt "..." --max-tool-rounds N` |
+| Unit tests (full suite) | `bun run test` (= `bunx vitest run`) |
+| Harness E2E suite | `bun run test:harness` (= `bunx vitest -c vitest.harness.config.ts run tests/harness/`) |
+| Self-verify Tier 1 | `bun run src/index.ts self-verify --since HEAD~1 --max 4` |
 
 ## Key directories
 
@@ -24,85 +30,60 @@ muonroi-cli is a multi-provider BYOK AI coding agent CLI built with Bun + React 
 | `src/providers/` | Multi-provider factory, keychain, vision proxy |
 | `src/router/` | Per-turn model routing with role-based resolution |
 | `src/pil/` | Prompt Intelligence Layer (6-layer pipeline) |
+| `src/workflow/` | Native FLOW: depth, assessor, mutation gate, verify council |
 | `src/ui/` | React TUI, status bar, slash commands |
 | `src/storage/` | SQLite session/message persistence |
 | `src/tools/` | Builtin tools (bash, file ops, grep, LSP) |
 | `src/mcp/` | Model Context Protocol server integration |
 | `src/models/` | Model catalog and pricing registry |
 | `src/ee/` | Experience Engine client and hooks |
-
-## Communication Rule
-
-Reply to the user in the language they are using. When the user writes in Vietnamese, reply in Vietnamese. When the user writes in English, reply in English. Detect from the user's message(s).
-
-Code, comments, commit messages, PR text, and all internal agent reasoning, analysis, and council debate steps must remain in English for stability, machine-readability, and cross-turn consistency. Only final user-facing output (synthesis, direct answers) follows the user's language.
-
-## Evidence-First Rule (HIGHEST PRIORITY — NO EXCEPTIONS)
-
-**Never guess. Never assume. Never speculate.** Every finding, fix, recommendation, and proposal MUST be backed by concrete evidence — file contents read, command output captured, log lines quoted, database rows queried, test runs measured.
-
-- Forbidden words/patterns in analysis: "I think", "probably", "should be", "might be", "I assume", "likely", "I guess", or any Vietnamese equivalent ("đoán", "giả định", "giả sử", "có lẽ", "chắc là").
-- Before stating a cause: read the file, run the command, query the DB. Quote line numbers + verbatim output.
-- Before recommending a fix: prove the bug exists with a reproducer or trace. Inference from code semantics is NOT proof — confirm with runtime behavior.
-- When you genuinely don't know: say "I don't know — need to check X" and then check X. Do not fill the gap with a plausible-sounding guess.
-- Every commit message / PR description that explains WHY must cite the evidence (session ID, log line, file:line, test name).
-- The only acceptable "guess" is an explicitly-labelled hypothesis followed by the experiment to test it.
-- **Graceful Reporting:** While you must *base* your answers on evidence, do NOT dump massive blocks of raw tool output (e.g. raw grep results, full directory trees, or unformatted logs) into your final response to the user. Synthesize the findings into highly readable, natural markdown. Cite file names and line numbers concisely (e.g. `[src/file.ts:10]`) without copy-pasting the entire file into the chat.
-
-## Experience Recall Rule (recall-first)
-
-The Experience Engine brain holds prior decisions, gotchas, and learned warnings for this codebase. Recalling them *before* acting supports Evidence-First — it surfaces what was already proven so you don't re-derive or repeat a past mistake.
-
-- **Recall-first triggers — call the `ee.query` tool (`mcp__muonroi-tools__ee_query`) BEFORE acting when:** starting work in an unfamiliar area; unsure how something is done in this stack; about to take a risky or hard-to-reverse step; or re-orienting after a compaction (e.g. `query="recent compaction checkpoint Progress DONE for <subtask>"`).
-- **Prefer the MCP tool over the `exp-recall.js` shell hint.** Both hit the same recallMode pipeline (`/api/recall`), but the tool is a first-class action in your tool-set — use it directly.
-- **Close the loop.** Returned entries carry `[id col]` handles; after you act on one, report usefulness with `exp-feedback` (followed / ignored / noise) so recall reinforces and noise is pruned.
-- **Graceful degrade.** If `ee.query` returns `ee_unavailable`, proceed without it — recall is an aid, never a blocker.
-- Recall is an *aid to* Evidence-First, not a substitute: a recalled lesson is point-in-time and can be stale — still verify the actual code/output before acting on it.
-
-## Pre-Push Test Gate (MANDATORY)
-
-**Before ANY `git push` to ANY repo, the FULL unit test suite MUST pass — 0 failed tests.** No exceptions for "pre-existing" failures, "flaky" tests, or "not my changes". A red test on master is a bug regardless of who wrote it.
-
-- If a test fails locally, the push is blocked. Either fix the test, fix the underlying bug, or revert your change.
-- "Pre-existing flake" is not a defense — fix the flake (deterministic wait, proper synchronization, isolated state) before pushing.
-- Run the FULL suite: `bun test` for unit tests.
-- **For UI/harness surfaces or workflow changes**, ALWAYS use the `selfverify_*` native tools (e.g. `selfverify_start(mode="tier1")`) to run the automated QA harness. This simulates a real user driving the live TUI and catches regressions that unit tests can't!
-- CI failures from a green-local push are still your responsibility — investigate environment differences before retrying.
+| `packages/agent-harness-*` | Agent harness (core protocol/driver/MCP server + OpenTUI/React/Angular adapters) |
 
 ## Zero Hardcode Rule — Model & Provider IDs
 
-**NEVER** hardcode model IDs or provider IDs as string literals in production code. All references MUST come from `catalog.json` + user settings + runtime detection. If unresolvable, throw — do NOT `?? "anthropic"` or `?? "deepseek-v4-flash"`. See CLAUDE.md for full details.
+**NEVER** hardcode model IDs (`"claude-sonnet-4-6"`, `"gpt-4o"`, `"deepseek-v4-flash"`) or provider IDs (`"anthropic"`, `"openai"`, `"deepseek"`) as string literals in production code. All model/provider references MUST derive from:
 
-## No Silent Catch Rule
+- **`catalog.json`** (`src/models/catalog.json`) — single source of truth for available models
+- **User settings** — `getCurrentModel()`, `getDefaultProvider()` from `src/utils/settings.ts`
+- **Runtime detection** — `detectProviderForModel(modelId)` from `src/providers/runtime.ts`
+- **Catalog lookup** — `getModelByTier()`, `getModelsForProvider()` from `src/models/registry.ts`
 
-Every `try/catch` MUST log `err.message` + context. Empty `catch {}` or `catch { return null; }` is forbidden — it swallows errors and makes debugging impossible. For HTTP calls, also log status code and response body. See `CLAUDE.md` "No Silent Catch Rule" for the full pattern.
+If a model/provider cannot be resolved from these sources, **throw an error** — do NOT fall back to a hardcoded string like `?? "anthropic"`. The only acceptable string literals are in:
+- Type union definitions (`type ProviderId = "anthropic" | "openai" | ...`)
+- Test fixtures and test assertions
+- `catalog.json` itself
+- `pricing.ts` static reference pricing table (read-only data, not routing decisions)
 
-## Permission Mode Threat Model
+## UI / harness changes — self-verify
 
-- `safe`: every tool call (bash, file, computer, etc.) requires explicit user approval before execution. Dangerous patterns (rm -rf /, external curl/wget, chmod 777, eval/exec, etc.) force approval even under auto-edit. All decisions + context (redacted cmd/path) are written to decision-log via appendAudit (permission-mode.ts:83).
-- `auto-edit`: read/write/edit/grep/list_directory auto-approve; bash + computer tools still require confirmation; any dangerous bash command forces approval.
-- `yolo`: all tools auto-approve (full power, no prompts). However, dangerous commands and every shuru sandbox wrap always emit `yolo-override` / `permission-override` entry with redacted command + effectiveSettings to decision-log (see bash.ts:567 prepareCommand + appendAudit; Task 2 instrumentation).
-- Audit is always-on for privileged paths: `usage security-audit --since 7d --json` (or 1h/30m) surfaces yolo sessions, high-risk cmds (secrets redacted), approval overrides, shuru executions, and other taken decisions. Review `~/.muonroi-cli/usage/decision-log-*.jsonl` before production use.
-- shuru sandbox: when enabled, every command is wrapped + logged (effective net/mounts + redacted cmd); degrades gracefully on non-macOS with warning (bash.ts:489).
-- Recommendation: treat yolo as "audit-then-trust"; never use on untrusted or high-stakes prompts. Cross-refs: 01-security-hardening-PLAN.md:134-150 (Task 4), src/utils/permission-mode.ts:36 (toolNeedsApproval + context), src/tools/bash.ts:598 (wrapCommandForShuru), usage security-audit (reuses decision-log events from Tasks 1-3).
+Unit tests do not cover modal lifecycle, slash-menu navigation, askcard flow, focus chain or toast
+levels. When you touch a **watched surface** also run self-verify:
 
-## Agent Interruption & Prioritization Rule
+- Watched surfaces: `src/ui/**/*.tsx`, `src/ui/**/*.ts`, `src/self-qa/**/*.ts`,
+  `src/agent-harness/**/*.ts`, `packages/agent-harness-opentui/**/*.ts`.
+- Tier 1 (heuristic, ~30s): `bun run src/index.ts self-verify --since HEAD~1 --max 4` (also run by
+  `.husky/pre-push` when a push touches watched surfaces; skip with `SELF_VERIFY_PRE_PUSH=0`).
+- Tier 2 (LLM-in-the-loop): `bun run src/index.ts self-verify --agentic --goal "<user-visible flow>" --llm "<model id from catalog>" --turns 8`.
+- New user-visible elements get a `<Semantic id role …>` wrapper and a `tests/harness/*.spec.ts`.
 
-When the agent is performing a task and the user interrupts (e.g., by pressing Escape to halt, or by streaming/entering a new message), the agent must prioritize the unfinished work:
-- Read and analyze the user's input to deduce if they want to discard the current work or if it's a new request.
-- If the user's input introduces a different task, prioritize completing the current in-progress task first to ensure a stable, completed state before starting the new task.
+Full manual (driver API, event-driven specs, selector grammar, MCP `tui.*` path, transports,
+known caveats, env knobs): **`docs/agent-harness/HARNESS-GUIDE.md`**.
 
-## Ponytail Rule (Lazy Senior Developer)
+## When you finish a feature (pre-PR checklist)
 
-**"The best code is the code you never wrote."** 
-To prevent over-engineering, code bloat, and unnecessary dependencies, all agents MUST adopt a "Lazy Senior Developer" mindset. Before writing custom logic or introducing third-party libraries, follow this Decision Ladder:
-1. Can this be solved using the language's Standard Library?
-2. Can this be solved using native platform features (e.g., standard browser APIs instead of UI libraries)?
-3. Can this be solved in a concise, one-line manner?
-4. **YAGNI (You Aren't Gonna Need It):** Is this feature/abstraction absolutely necessary right now? If not, do not write it.
-5. Make the absolute smallest correct change to fix the issue or implement the requirement. 
+1. `bunx tsc --noEmit` (0 errors)
+2. `bunx vitest run` + `bunx vitest -c vitest.harness.config.ts run tests/harness/` (native on Windows; WSL is an optional POSIX cross-check)
+3. For UI/harness surfaces: ensure `<Semantic>` wrapper + `tests/harness/*.spec.ts`
+4. Run `bun run lint:semantic` (and `lint:harness-skips`)
+5. Self-verify on touched watched surfaces when relevant.
 
-Only fall back to generating complex custom code or adding dependencies when the above options have been exhausted.
+### Adding a new TUI component (quick)
+
+- Wrap root with `<Semantic id="..." role="..." name="..." isModal?>`
+- Mirror `focus`/`value`/`selected` for interactive elements.
+- Add matching harness spec + fixture if LLM involved.
+- Run the spec on Windows (named pipe); optionally also on WSL (fd 3/4).
+- Update `scripts/.semantic-wrap-allow.txt` only for intentional non-wrapped files.
 
 ## Architecture notes
 
@@ -113,14 +94,18 @@ Only fall back to generating complex custom code or adding dependencies when the
   - `src/ee/bridge.ts:pilContext()` — unified `/api/pil-context` call with circuit breaker
   - Layer 1 calls `pilContext` when flag=1 and local classify confidence < 0.7;
     legacy multi-call path remains as permanent brain-unreachable fallback.
-  - EE compaction checkpoints (Context checkpoint summary with ✔ DONE progress) are persisted on B3/B4, retrievable via layer3 searchByText + ee.query (MCP), and injected into enriched for anti-mù recall. Layer 1 enriches raw for long sessions; layer3 emits `<!-- ee-checkpoint-injected:<sha> -->` dedup markers.
+  - EE compaction checkpoints (Context checkpoint summary with ✔ DONE progress) are persisted on B3/B4, retrievable via layer3 searchByText + the native `ee_query` tool, and injected into enriched for anti-mù recall. Layer 1 enriches raw for long sessions; layer3 emits `<!-- ee-checkpoint-injected:<sha> -->` dedup markers.
 - Council: `/council` triggers multi-model debate with dynamic prompts and convergence detection
 - Auto-compact: after every turn, context is silently compressed to keep token costs flat
 - Provider detection: prefix-based fallback for models not in static catalog (deepseek-* -> deepseek, gpt-* -> openai, etc.)
 
-## Background Execution Rule (Task & Subagent Spawning)
+## Read on demand
 
-To avoid timeouts, hanging, or blocking the main developer thread, all agents must leverage asynchronous background execution:
-- **Subagents**: When invoking a subagent via `invoke_subagent`, immediately stop calling tools and end the turn. Do not poll the inbox or wait in a loop.
-- **Long-Running Bash Commands**: Proactively spawn long-running shell processes in the background (e.g., set a small `WaitMsBeforeAsync` or run in the background). Let the CLI system track logs, details, and allow the user to inspect or terminate them via the TUI, rather than blocking the active thread.
-
+| Topic | Doc |
+|---|---|
+| Agent harness manual (E2E specs, driver, MCP `tui.*`, events, caveats) | `docs/agent-harness/HARNESS-GUIDE.md` |
+| Native FLOW depth pipeline, hard mutation gate (heavy only), BB-aware `/ideal` | `docs/architecture/FLOW-PIPELINE.md` |
+| Permission modes (safe / auto-edit / yolo), audit, catastrophic-command block | `docs/architecture/PERMISSION-MODEL.md` |
+| Cost forensics, metered gate (`call_accounting` SQL views, env knobs) | `docs/cost/METERED-GATE.md` |
+| Harness wire protocol / transports | `docs/agent-harness/PROTOCOL.md`, `docs/agent-harness/TRANSPORTS.md` |
+| EE ingestion / EE-down behavior | `docs/agent-harness/EE-INGESTION.md`, `docs/ee/EE-DOWN-BEHAVIOR.md` |

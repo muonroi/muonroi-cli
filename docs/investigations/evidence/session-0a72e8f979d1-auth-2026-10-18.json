@@ -1,0 +1,426 @@
+{
+  "capturedAt": "2026-10-18T08:15:06.536135+00:00",
+  "session": "0a72e8f979d1",
+  "boundary": "Local source/build repair. Isolated fake credentials, actual SDK transport and child process. No live subscription expiry/quota depletion, no deployment/push.",
+  "bunVersion": "1.3.13",
+  "incidentJobs": [
+    {
+      "id": "clever-silver-otter",
+      "modelId": "deepseek-v4-flash",
+      "providerId": "deepseek",
+      "status": "error",
+      "startedAt": "2026-10-18T07:33:57.874Z",
+      "completedAt": "2026-10-18T07:34:03.219Z",
+      "error": "Task failed: HTTP 401: Authentication Fails, Your api key: ****ROBE is invalid (request_id: 81123856-29ff-4eb8-acc3-f3d344e483f8)"
+    },
+    {
+      "id": "gentle-teal-badger",
+      "modelId": "deepseek-v4-flash",
+      "providerId": "deepseek",
+      "status": "error",
+      "startedAt": "2026-10-18T07:33:59.962Z",
+      "completedAt": "2026-10-18T07:34:04.108Z",
+      "error": "Task failed: HTTP 401: Authentication Fails, Your api key: ****ROBE is invalid (request_id: fda79a8f-ae46-4f4b-9ec5-e4d93b1e61f6)"
+    },
+    {
+      "id": "nimble-indigo-sparrow",
+      "modelId": "deepseek-v4-flash",
+      "providerId": "deepseek",
+      "status": "error",
+      "startedAt": "2026-10-18T07:34:02.578Z",
+      "completedAt": "2026-10-18T07:34:06.589Z",
+      "error": "Task failed: HTTP 401: Authentication Fails, Your api key: ****ROBE is invalid (request_id: 726fc6b2-c2b3-4ee0-8406-a0920b0fcc6e)"
+    }
+  ],
+  "freshTests": {
+    "files": 20,
+    "passed": 121,
+    "failed": 0,
+    "exitCode": 0,
+    "log": ".scratch/session-0a72e8f979d1/accepted-tests.log"
+  },
+  "checks": {
+    "typecheck": {
+      "exitCode": 0,
+      "log": ".scratch/session-0a72e8f979d1/typecheck.log"
+    },
+    "build": {
+      "exitCode": 0,
+      "log": ".scratch/session-0a72e8f979d1/build.log"
+    },
+    "semantic": {
+      "exitCode": 0,
+      "log": ".scratch/session-0a72e8f979d1/semantic.log"
+    }
+  },
+  "deepseekChild": {
+    "startedAt": "2026-10-18T08:14:03.271Z",
+    "boundary": "Actual built Bun child and SDK HTTP transport, isolated fake credentials and local provider fixture; no live quota claim",
+    "home": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session-0a72e8f979d1\\worker-home-PEgsUS",
+    "requests": [
+      {
+        "at": "2026-10-18T08:14:04.031Z",
+        "freshCredential": true,
+        "model": "deepseek-v4-flash",
+        "stream": false
+      },
+      {
+        "at": "2026-10-18T08:14:05.013Z",
+        "freshCredential": true,
+        "model": "deepseek-v4-flash",
+        "stream": true
+      }
+    ],
+    "job": {
+      "id": "gentle-emerald-sparrow",
+      "status": "complete"
+    },
+    "checks": {
+      "mainFresh": true,
+      "childFresh": true,
+      "noStaleRequests": true,
+      "childCompleted": true,
+      "outputReturned": true,
+      "noCredentialInReceipt": true
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T08:14:05.137Z"
+  },
+  "subscriptionChild": {
+    "startedAt": "2026-10-18T08:14:05.246Z",
+    "home": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session-0a72e8f979d1\\subscription-home-UPtuFn",
+    "boundary": "Built OAuth loader, API fallback and actual child inherited auth mode; local HTTP403 entitlement then deliberate HTTP400 fixture stop; no live subscription test",
+    "requests": [
+      {
+        "at": "2026-10-18T08:14:05.995Z",
+        "subscription": true,
+        "apiKey": false,
+        "stream": false,
+        "model": "gpt-6-luna"
+      },
+      {
+        "at": "2026-10-18T08:14:05.998Z",
+        "subscription": false,
+        "apiKey": true,
+        "stream": false,
+        "model": "gpt-6-luna"
+      },
+      {
+        "at": "2026-10-18T08:14:06.953Z",
+        "subscription": false,
+        "apiKey": true,
+        "stream": true,
+        "model": "gpt-6-luna"
+      }
+    ],
+    "primaryBefore": "subscription",
+    "modeAfter": "api-key",
+    "checks": {
+      "subscriptionRemainsStored": true,
+      "primaryWasSubscription": true,
+      "eligibleFailureSwitchedToAPI": true,
+      "mainTwoBoundedAttempts": true,
+      "childUsedOnlyAPI": true,
+      "childFixtureStopVisible": true,
+      "noRawCredentialInReceipt": true
+    },
+    "job": {
+      "id": "quiet-emerald-otter",
+      "status": "error"
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T08:14:07.067Z"
+  },
+  "nativeSelfverify": {
+    "startedAt": "2026-10-18T08:10:41.264Z",
+    "boundary": "Fresh built tools-MCP native selfverify, isolated home, actual Bun TUI, offline provider; boot evidence only",
+    "home": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session-0a72e8f979d1\\selfverify-VCKB1c",
+    "start": {
+      "runId": "8c56a4b4-56fd-4e70-b592-77e3f1dcab7a"
+    },
+    "status": {
+      "runId": "8c56a4b4-56fd-4e70-b592-77e3f1dcab7a",
+      "status": "done",
+      "kind": "tier1",
+      "startedAt": 1792311042362,
+      "finishedAt": 1792311043456,
+      "elapsedMs": 1094,
+      "logTail": [
+        "[self-verify] Planned 1 scenario(s): 1 drivable, 0 skipped",
+        "[self-qa] → smoke-boot: CLI boots and reaches idle within budget",
+        "[self-verify] Summary: 1/1 passed, 0 failed, 0 inconclusive, 0 skipped"
+      ],
+      "summary": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "inconclusive": 0,
+        "passRate": 1
+      }
+    },
+    "result": {
+      "scenarios": [
+        {
+          "id": "smoke-boot",
+          "description": "CLI boots and reaches idle within budget",
+          "derivedFrom": {
+            "files": ["src/ui/status-bar/index.tsx"],
+            "semanticIds": []
+          },
+          "steps": [
+            {
+              "op": "wait_for",
+              "idle": true,
+              "timeoutMs": 60000
+            }
+          ],
+          "expectations": [
+            {
+              "kind": "idleReached",
+              "withinMs": 60000
+            },
+            {
+              "kind": "noErrorToast"
+            }
+          ],
+          "budgetMs": 90000
+        }
+      ],
+      "runs": [
+        {
+          "scenario": {
+            "id": "smoke-boot",
+            "description": "CLI boots and reaches idle within budget",
+            "derivedFrom": {
+              "files": ["src/ui/status-bar/index.tsx"],
+              "semanticIds": []
+            },
+            "steps": [
+              {
+                "op": "wait_for",
+                "idle": true,
+                "timeoutMs": 60000
+              }
+            ],
+            "expectations": [
+              {
+                "kind": "idleReached",
+                "withinMs": 60000
+              },
+              {
+                "kind": "noErrorToast"
+              }
+            ],
+            "budgetMs": 90000
+          },
+          "events": [],
+          "finalFrame": {
+            "mode": "live",
+            "version": "0.4.0",
+            "seq": 0,
+            "ts": 1792311043386,
+            "nodes": []
+          },
+          "startedAt": 1792311042372,
+          "endedAt": 1792311043455,
+          "timedOut": false,
+          "crashed": false,
+          "idleObserved": 1,
+          "syncTimeouts": [],
+          "mounted": true,
+          "childAlive": true,
+          "stderrTail": "[mock-model] loadMockModelFromDir: installed mock from D:\\sources\\Core\\muonroi-cli\\dist\\src\\self-qa\\fixtures\\llm\\default.json (provider=mock, modelId=mock-model)\n"
+        }
+      ],
+      "results": [
+        {
+          "verdict": "pass",
+          "scenarioId": "smoke-boot",
+          "durationMs": 1083,
+          "checks": [
+            {
+              "expectation": {
+                "kind": "idleReached",
+                "withinMs": 60000
+              },
+              "passed": true,
+              "reason": "Idle reached in 1083ms after 1 idle sentinel(s) (budget 60000ms)"
+            },
+            {
+              "expectation": {
+                "kind": "noErrorToast"
+              },
+              "passed": true,
+              "reason": "No error-level toasts observed"
+            }
+          ]
+        }
+      ],
+      "summary": {
+        "total": 1,
+        "passed": 1,
+        "failed": 0,
+        "inconclusive": 0,
+        "passRate": 1
+      },
+      "skipped": [],
+      "emittedSpecs": [],
+      "durationMs": 1086
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T08:10:43.630Z"
+  },
+  "registryRepair": {
+    "storePath": "C:\\Users\\phila\\.muonroi-cli\\.env",
+    "storeBytesUnchanged": true,
+    "registryRepair": [
+      {
+        "name": "DEEPSEEK_API_KEY",
+        "probeValuePresent": true,
+        "storeHasValue": true,
+        "action": "restored_from_unchanged_CLI_store",
+        "probeValueRemains": false,
+        "matchesCLIStore": true
+      },
+      {
+        "name": "OPENAI_API_KEY",
+        "probeValuePresent": true,
+        "storeHasValue": false,
+        "action": "removed_probe_value_no_store_value",
+        "probeValueRemains": false,
+        "matchesCLIStore": true
+      }
+    ],
+    "limit": "Restored canonical CLI-store values; no pre-probe registry snapshot existed."
+  },
+  "finalProbeIsolation": {
+    "deepseekExit": 0,
+    "subscriptionExit": 0,
+    "registryUnchanged": true,
+    "testGuard": "NODE_ENV=test before credential writes",
+    "capturedAt": "2026-10-18T08:14:07.0991264Z"
+  },
+  "isolationFollowup": {
+    "files": 2,
+    "passed": 8,
+    "failed": 0,
+    "exitCode": 0,
+    "overlapsMainSuite": true
+  },
+  "frozenFiles": 2482,
+  "freezeSha256": "285c2547feb0366e8df159f3e51db26695c455014ada56d6c8eb8032a196c12d",
+  "executedModules": {
+    "index.js": "95d0076f3a34e0ccf881bd0efc39b011c53e6671091eb9ffbb5de5869b23087c",
+    "orchestrator/orchestrator.js": "b525a4df40233328767cb10019abf6088523ffbc665af535c5e75a08819785fc",
+    "orchestrator/delegations.js": "c0f5b2823bddc5e1934e53f6bcf7b1ef537bd4073de7b3dc4a7f337e47c95f6f",
+    "orchestrator/council-manager.js": "4f609aa9baeb22775b1cb47f65046480e796704af1040fa26c1e795feb58c6e0",
+    "council/llm.js": "f9b33928c91faa5bd3dbf48e359b39e224ef447c4eaa718aec6ea018250a904b",
+    "providers/runtime.js": "d4af030ec8cddf30e321edc412458f7e6d47ee5dfa2cce73bbd777b76841399b",
+    "providers/subscription-fallback.js": "939ab35fccb4f4092011958fe56ce9d13fafaa70b0d6ea851c3c4e36be58ef89",
+    "providers/credential-setup.js": "00073108ad7b01fa6094fc334636d6824a21811a039442fba5d6481c9d0f8c31"
+  },
+  "artifacts": {
+    "accepted-tests.log": {
+      "sha256": "c6aeafb59a94621493262c69cc07c688c440f40dab4966ff05a1918bc9401224",
+      "bytes": 1942
+    },
+    "auth-focused.log": {
+      "sha256": "174f73156f1ef88d73b5b6f86a6313466a96743c49b7d8accba6cfdb6b200cc4",
+      "bytes": 1926
+    },
+    "auth-regression.log": {
+      "sha256": "d0e000efe2ea126367a54bea95e9b552016cf8c712e19d89f940a23860e46d0c",
+      "bytes": 1928
+    },
+    "build.log": {
+      "sha256": "cfa56f373ba930006143d615f8ae8d50dfebcbddbd6e26430ae83733316f6e88",
+      "bytes": 7510
+    },
+    "coexistence-before.log": {
+      "sha256": "27136f48e077f4db7eb067c77721254de37eaf1138f895295bf1ea68dd36cd1e",
+      "bytes": 3746
+    },
+    "compiled-subscription-worker.json": {
+      "sha256": "beb82176a4e5ca9be40603868cae7dbc5f3edb56a02c9d45ea38e9697a9c8d5c",
+      "bytes": 1277
+    },
+    "compiled-subscription-worker.log": {
+      "sha256": "6c010e16364c48b185e449a6fe5b5317f5259b2bf10590d981d2cc37fb7dc9d7",
+      "bytes": 2138
+    },
+    "compiled-worker.json": {
+      "sha256": "f53c213807e7c18418c5e829bdf73b68f13b373d0d33b81c2a55f906c75c26e9",
+      "bytes": 904
+    },
+    "compiled-worker.log": {
+      "sha256": "58ba4d3f376d6fd48904cc795a1f09225ea7b4275967be5affedf35b146d3f10",
+      "bytes": 856
+    },
+    "council-mode-after.log": {
+      "sha256": "2df532e86ef07373817f6fa11097a4f73d47fe485c10893bf9ebcc50d4341fe1",
+      "bytes": 1926
+    },
+    "council-mode-before.log": {
+      "sha256": "52ef8a159971af6458479fff06b32126848f810fd23ac00ff9a392ee2658de8c",
+      "bytes": 11790
+    },
+    "credentials.redacted.json": {
+      "sha256": "7b64c828e7c749e2e8e9991859a22aa24a252ae518fbdf71ae40ba95263a4027",
+      "bytes": 1107
+    },
+    "freeze.json": {
+      "sha256": "285c2547feb0366e8df159f3e51db26695c455014ada56d6c8eb8032a196c12d",
+      "bytes": 360306
+    },
+    "isolated-probes.json": {
+      "sha256": "00a089dd1a6f7795be7847aa52d5a2c1ad5e545ea757de61ec8658476b85972a",
+      "bytes": 208
+    },
+    "isolation-followup.log": {
+      "sha256": "4986fc8dc36b3bf531ba512d8276070807272a391e1ce06420f94b5cc095a214",
+      "bytes": 1922
+    },
+    "jobs.redacted.json": {
+      "sha256": "bfc366b5f52436235087543b2b147ecbe6ac3f1377aeca3dc57a3bbcdaa3ca38",
+      "bytes": 2106
+    },
+    "native-selfverify.json": {
+      "sha256": "44e15c13c55a0a76e45e3fd4ee9e5a32addd7ca42e648fbc21d9d7cc493ca1bb",
+      "bytes": 3736
+    },
+    "native-selfverify.log": {
+      "sha256": "0282efe9a78b00f2409a0eade9f8fb9b69148edd8407bf88dfffdf49bdef7137",
+      "bytes": 180
+    },
+    "registry-repair.json": {
+      "sha256": "92d1776063787281d33c282f4cf2f858e0184f8956f65496052747f58810680a",
+      "bytes": 657
+    },
+    "reproducer-after.log": {
+      "sha256": "13363c4cea18eb4c131419f926423da2bba56592aa9e992a84e14247b0b5da29",
+      "bytes": 1922
+    },
+    "reproducer-before.log": {
+      "sha256": "c73042521f240bfd6f9694306511c339bcfa30cbc6caa1572c1d3d4668d349d9",
+      "bytes": 4010
+    },
+    "semantic.log": {
+      "sha256": "c6486fcfd41e5cd194524a2551b2cc2214eaba6fdc6f463ddec41bd3238f8255",
+      "bytes": 1216
+    },
+    "subscription-http.log": {
+      "sha256": "fa294cb72fa36361cbdec649cd33eccb67de12e5f8a49fc0b2c40cd50800beed",
+      "bytes": 1922
+    },
+    "typecheck.log": {
+      "sha256": "67468dda6b4ba38ae0589724ee3d784b09653d0c51b2ecace07b2c8c4cf5290c",
+      "bytes": 638
+    }
+  },
+  "limits": [
+    "No new paid-provider calls; no assertion about actual current plan support or reset time.",
+    "Subscription child deliberately stops at fixture HTTP400 after proving API authentication.",
+    "TUI selfverify proves boot only; no new key-modal driving claim.",
+    "121 focused tests are not a full repository suite."
+  ]
+}

@@ -15,8 +15,8 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 /**
  * Returns the sibling on-disk directory for a session — used as an audit log
@@ -30,7 +30,7 @@ import * as path from "node:path";
  *                       ~/.muonroi-cli.
  */
 export async function getSessionDir(sessionId: string, homeOverride?: string): Promise<string> {
-  const home = homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+  const home = homeOverride ?? muonroiHome();
   const dir = path.join(home, "sessions", sessionId);
   await fs.mkdir(dir, { recursive: true });
   return dir;

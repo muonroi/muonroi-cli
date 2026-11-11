@@ -18,6 +18,19 @@
  * bash call where output might need to be queried — including the first.
  *
  * Escape hatch: `MUONROI_DISABLE_CHEAP_MODEL_PLAYBOOK=1` for A/B testing.
+ *
+ * Rules removed 2026-11 because the host or another surface now owns them:
+ * - "use task(agent=explore) for broad research": workers never hold `task`
+ *   (orchestration-policy.ts WORKER_FORBIDDEN); main's delegation policy is
+ *   ORCHESTRATOR_CONTRACT.
+ * - "prefer grep, LSP for symbols": the native-capabilities block states it
+ *   (context-modules.ts buildTaskContextCore, read_file/grep line).
+ * - "do NOT retry an identical failing call": the host refuses the repeat
+ *   before it runs (orchestrator/repeat-failure-refusal.ts).
+ * - ANTI-MÙ / PRESERVE_FULL_CONTEXT / KEEP_TOOL_IDS: carried by the host's
+ *   pre-compaction warning (scope-reminder.ts buildCheckpointReminder).
+ * Rule 1 stays despite overlapping the bash description: front-loading it is
+ * what fixed session 622fdeb8f658 (see above).
  */
 
 import type { ModelInfo } from "../types/index.js";
@@ -31,38 +44,25 @@ import type { ShellKind } from "../utils/shell.js";
  */
 export const CHEAP_MODEL_PLAYBOOK = `[CRITICAL TOOL-USE RULES — read before invoking any tool; these override defaults that follow]
 
-1. Bash output is AUTOMATICALLY cached. Every \`bash\` call returns a \`run_id\`
-   (e.g. \`bash-1\`) you can re-query via \`bash_output_get(run_id, mode=tail|head|grep|lines)\`.
-   - When you want only the last N lines: do NOT pipe \`| tail -N\`. Run the
-     bare command, then call \`bash_output_get(run_id, mode=tail, lines=N)\`.
-   - Same for \`| head\`, \`| grep PATTERN\`, \`> file\`. Pipes/redirects HIDE
-     the full output from the cache; \`bash_output_get\` reads from the cache
-     without re-running.
-   - This applies to EVERY bash call, not just retries.
+1. Bash output is cached with a \`run_id\` (e.g. \`bash-1\`). Read slices via
+   \`bash_output_get(run_id, mode=tail|head|grep|lines)\`.
+   - Use returned output directly when sufficient. Retrieve missing slices
+     when needed; do not re-run a command for slicing.
+   - Keep full build/test/failure output: run unfiltered and inspect the cache.
+     Focused read-only pipes are allowed for intended filtered output;
+     only emitted output is cached. Preserve failure exit codes.
    - To VIEW a file use \`read_file\` (start_line/end_line) — never sed/cat a
      file. \`bash_output_get\` is for COMMAND output, not files.
 
-2. Before reading more than 3 files to understand a topic, delegate to
-   \`task(agent="explore")\`. The sub-agent returns a compressed summary;
-   you save reading tokens.
-
-3. Use the \`grep\` tool (ripgrep) for content search — NOT \`bash\` with
-   \`grep\` / \`find\` piped.
-
-4. When a tool returns \`ERROR: ...\`, do NOT retry the identical call.
-   Pick a different tool, change inputs meaningfully, or stop and report.
-
-5. Fix the ROOT CAUSE, never mask a failure to make it "pass"
+2. Fix the ROOT CAUSE, never mask a failure to make it "pass"
    (\`continue-on-error\`, swallowed try/catch, skipped/deleted test, \`|| true\`).
    If a step fails from a missing secret/config, make it CONDITIONAL (skip when
    absent) so it still runs when present — do NOT blanket-ignore it.
 
-6. For a build / CI / test failure, read the ACTUAL failure log or stack trace
+3. For a build / CI / test failure, read the ACTUAL failure log or stack trace
    BEFORE hypothesizing — fix the real error, not a guess from source alone.
 
-7. ANTI-MÙ / COMPACTION (for long sessions): On pre-warn or "[context compacted at step...", emit PRESERVE_FULL_CONTEXT (full veto) or lighter KEEP_TOOL_IDS: id1,id2 (from stub id=) to protect specific high-value results. read_file/grep/lsp/bash on src/PLAN/error are auto-kept (idea 1). Use ee.query tool with "tool-artifact id=XXX" for on-demand full. Self-check "task finished?" / "compacted yet?". Use EE checkpoints. On long sessions, call the 'compact' tool to compress history and continue (don't stop).
-
-8. CITATIONS: only write a \`file:line\` you can SEE in a read_file result
+4. CITATIONS: only write a \`file:line\` you can SEE in a read_file result
    (\`N |\` prefix; header \`of TOTAL\`). Never guess a line or reuse one file's
    numbers for another. Unsure → re-read or omit the line.
 

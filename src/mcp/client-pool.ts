@@ -27,7 +27,12 @@
  */
 
 import type { ToolSet } from "ai";
+import { recordIntegrationHealth } from "../utils/integration-health.js";
+import { logger, redactSecrets } from "../utils/logger.js";
 import type { McpServerConfig } from "../utils/settings.js";
+import { MCP_KEY_REQUIREMENTS, noticeNeedsKeyOnce, partitionEnabledServers } from "./key-requirements.js";
+import { publishNeedsKey } from "./needs-key-bus.js";
+import { onMcpOAuthSignedIn } from "./oauth-provider.js";
 import {
   type ConnectedServer,
   connectOneServer,
@@ -35,12 +40,12 @@ import {
   type McpBuildOptions,
   type McpToolBundle,
 } from "./runtime.js";
-import { MCP_KEY_REQUIREMENTS, noticeNeedsKeyOnce, partitionEnabledServers } from "./key-requirements.js";
-import { publishNeedsKey } from "./needs-key-bus.js";
+import { mcpIdentityEnvironment } from "./stdio-identity.js";
 import { validateMcpServerConfig } from "./validate.js";
 
 interface PoolEntry {
   key: string;
+  serverId: string;
   promise: Promise<ConnectedServer>;
   /**
    * The resolved server, set once `promise` fulfils. Lets the in-turn self-heal
@@ -51,6 +56,61 @@ interface PoolEntry {
 }
 
 const pool = new Map<string, PoolEntry>();
+const authFailures = new Map<string, { until: number; error: Error; serverId: string }>();
+const AUTH_RETRY_DELAY_MS = 60000;
+
+/**
+ * A completed OAuth sign-in invalidates everything the pool concluded while
+ * the server was unauthenticated: lift its 60s auth pause (otherwise the
+ * post-sign-in warm-up is rejected by the very pause the sign-in fixes) and
+ * drop any client connected without the new tokens.
+ */
+onMcpOAuthSignedIn((serverId) => {
+  for (const [key, f] of authFailures) if (f.serverId === serverId) authFailures.delete(key);
+  for (const [key, entry] of pool) {
+    if (entry.serverId !== serverId) continue;
+    pool.delete(key);
+    void entry.promise.then(
+      (cs) => {
+        cs.cleanup?.();
+        return cs.client.close();
+      },
+      (err: unknown) => {
+        logger.file("debug", "mcp", `[mcp:pool] superseded connect for '${serverId}' had failed: ${String(err)}`);
+      },
+    );
+  }
+});
+
+function isAuthFailure(error: unknown): boolean {
+  const status =
+    (error as { status?: number; statusCode?: number } | null)?.status ??
+    (error as { statusCode?: number } | null)?.statusCode;
+  return (
+    status === 401 ||
+    /\bHTTP\s*401\b|\binvalid_token\b|\bunauthorized\b/i.test(error instanceof Error ? error.message : String(error))
+  );
+}
+
+function pauseForAuth(server: McpServerConfig, key: string, cause: unknown): Error {
+  const detail = redactSecrets(cause instanceof Error ? cause.message : String(cause));
+  const error = new Error(
+    `mcp_auth_required: ${server.id}: ${detail.slice(0, 1200)}. Configure this server's Authorization header or sign in via /mcp. Unchanged configuration will not reconnect for 60s; changed configuration reconnects immediately. No credentials were changed by the CLI.`,
+  );
+  authFailures.set(key, { until: Date.now() + AUTH_RETRY_DELAY_MS, error, serverId: server.id });
+  recordIntegrationHealth({
+    component: `mcp:${server.id}`,
+    check: "authentication",
+    status: "unavailable",
+    detail: error.message,
+  });
+  logger.file("warn", "mcp", "MCP authentication rejected; automatic reconnect paused", {
+    serverId: server.id,
+    detail,
+    retryAfterMs: AUTH_RETRY_DELAY_MS,
+  });
+  return error;
+}
 
 /**
  * Stable identity for a connected server. Includes cwd (stdio servers like
@@ -66,6 +126,7 @@ function serverKey(s: McpServerConfig): string {
     url: s.url ?? null,
     headers: s.headers ?? null,
     env: s.env ?? null,
+    identity: s.transport === "stdio" ? mcpIdentityEnvironment() : null,
     cwd: s.cwd ?? process.cwd(),
   });
 }
@@ -102,10 +163,23 @@ function isConnectionError(e: unknown): boolean {
 /** Connect a server (or reuse the live cached client). Evicts on connect failure. */
 function getOrConnect(server: McpServerConfig, opts?: McpBuildOptions): Promise<ConnectedServer> {
   const key = serverKey(server);
+  const blocked = authFailures.get(key);
+  // An explicit interactive sign-in must remain usable after an anonymous failure.
+  if (blocked && blocked.until > Date.now() && !opts?.onOAuthRequired) return Promise.reject(blocked.error);
+  authFailures.delete(key);
   const existing = pool.get(key);
   if (existing) return existing.promise;
-  const promise = connectOneServer(server, opts);
-  const entry: PoolEntry = { key, promise };
+  const promise = connectOneServer(server, opts).catch((error) => {
+    recordIntegrationHealth({
+      component: `mcp:${server.id}`,
+      check: "connection",
+      status: "unavailable",
+      detail: String(error),
+    });
+    if (isAuthFailure(error)) throw pauseForAuth(server, key, error);
+    throw error;
+  });
+  const entry: PoolEntry = { key, serverId: server.id, promise };
   pool.set(key, entry);
   promise.then(
     // Record the resolved server so evictDeadServer can match by identity.
@@ -148,8 +222,14 @@ function wrapForSelfHeal(cs: ConnectedServer, key: string, server: McpServerConf
         try {
           return await base(args, options);
         } catch (e) {
+          if (isAuthFailure(e)) {
+            evictDeadServer(key, cs);
+            throw pauseForAuth(server, key, e);
+          }
           if (!isConnectionError(e)) throw e;
-          console.error(
+          logger.file(
+            "warn",
+            "mcp",
             `[mcp:pool] '${name}' hit a connection error — reconnecting '${server.id}' in-turn and retrying once: ${
               e instanceof Error ? e.message : String(e)
             }`,
@@ -161,7 +241,9 @@ function wrapForSelfHeal(cs: ConnectedServer, key: string, server: McpServerConf
           try {
             fresh = await getOrConnect(server, opts);
           } catch (reconnectErr) {
-            console.error(
+            logger.file(
+              "warn",
+              "mcp",
               `[mcp:pool] in-turn reconnect for '${server.id}' failed; surfacing original error: ${
                 reconnectErr instanceof Error ? reconnectErr.message : String(reconnectErr)
               }`,
@@ -262,12 +344,15 @@ export async function acquireMcpTools(servers: McpServerConfig[], opts?: McpBuil
     } else {
       // Still connecting at the deadline (a cold first-connect). It stays in the
       // pool and will be ready for a later turn — just excluded from THIS turn.
-      errors.push(`${slot.label}: not ready within ${deadlineMs}ms (still connecting — available next turn)`);
+      const waitedMs = critical.has(enabled[i]!.id)
+        ? Math.max(deadlineMs, opts?.criticalDeadlineMs ?? 8000)
+        : deadlineMs;
+      errors.push(`${slot.label}: not ready within ${waitedMs}ms (still connecting — available next turn)`);
     }
   }
 
   if (errors.length > 0) {
-    console.error(`[mcp:pool] ${errors.length} server(s) unavailable this turn: ${errors.join(" | ")}`);
+    logger.file("warn", "mcp", `[mcp:pool] ${errors.length} server(s) unavailable this turn: ${errors.join(" | ")}`);
   }
 
   return {
@@ -294,7 +379,11 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
       // Intentionally non-fatal: getOrConnect evicts the failed entry so a
       // real turn retries. Surface at debug level only (No Silent Catch).
       if (process.env.MUONROI_DEBUG_MCP) {
-        console.error(`[mcp:warm] background warmup failed for ${s.id}: ${e instanceof Error ? e.message : String(e)}`);
+        logger.file(
+          "warn",
+          "mcp",
+          `[mcp:warm] background warmup failed for ${s.id}: ${e instanceof Error ? e.message : String(e)}`,
+        );
       }
     });
 
@@ -333,21 +422,11 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
 
   if (validServers.length === 0) return;
 
-  // Synchronous warmup (fresh start): render ONE compact in-place progress line
-  // instead of a line per server — e.g. "⏳ Starting MCP servers (0/4): a, b, c".
+  // Startup diagnostics belong in the file even before the TUI takes over stdout.
   const total = validServers.length;
   const names = validServers.map((s) => s.id).join(", ");
-  const isTTY = Boolean(process.stdout.isTTY);
-  let done = 0;
   const failures: string[] = [];
-
-  const render = (): void => {
-    // \r + clear-line (\x1b[2K) rewrites the same terminal row each tick.
-    process.stdout.write(`\r\x1b[2K⏳ Starting MCP servers (${done}/${total}): ${names}`);
-  };
-
-  if (isTTY) render();
-  else console.log(`[MCP] Starting ${total} server(s): ${names}`);
+  logger.file("info", "mcp", `[MCP] Starting ${total} server(s): ${names}`);
 
   await Promise.all(
     validServers.map(async (s) => {
@@ -355,22 +434,14 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
         await getOrConnect(s);
       } catch (e) {
         failures.push(`${s.id}: ${e instanceof Error ? e.message : String(e)}`);
-      } finally {
-        done += 1;
-        if (isTTY) render();
       }
     }),
   );
 
   const ok = total - failures.length;
-  if (isTTY) {
-    process.stdout.write(`\r\x1b[2K✅ MCP servers ready (${ok}/${total})\n`);
-  } else {
-    console.log(`[MCP] ${ok}/${total} server(s) ready`);
-  }
-  // Compact failure summary (one line, not per-server spam) — keeps errors visible.
+  logger.file("info", "mcp", `[MCP] MCP servers ready (${ok}/${total})`);
   if (failures.length > 0) {
-    console.warn(`[MCP] ⚠️ ${failures.length} unavailable: ${failures.join(" | ")}`);
+    logger.file("warn", "mcp", `[MCP] ${failures.length} unavailable: ${failures.join(" | ")}`);
   }
 }
 
@@ -378,6 +449,7 @@ export async function warmMcpClients(servers: McpServerConfig[], syncAndLog = fa
 export async function closeAllMcpClients(): Promise<void> {
   const entries = [...pool.values()];
   pool.clear();
+  authFailures.clear();
   await Promise.all(
     entries.map(async (e) => {
       try {
@@ -394,6 +466,7 @@ export async function closeAllMcpClients(): Promise<void> {
 /** Test-only: reset pool state between cases. */
 export function __resetMcpClientPoolForTests(): void {
   pool.clear();
+  authFailures.clear();
 }
 
 /** Test-only: number of pooled (connecting or connected) entries. */

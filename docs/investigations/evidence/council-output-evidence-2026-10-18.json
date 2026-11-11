@@ -1,0 +1,82 @@
+{
+  "capturedAt": "2026-10-18T10:20:06.978801+00:00",
+  "historicalJob": "gentle-teal-falcon",
+  "report": "docs/investigations/council-output-evidence-2026-10-18.md",
+  "reproduction": {
+    "output-before": {
+      "failed": 5,
+      "passed": 1
+    },
+    "evidence-before": {
+      "failed": 3,
+      "passed": 1
+    }
+  },
+  "regressions": {
+    "files": 17,
+    "tests": 190,
+    "failed": 0,
+    "exit": 0,
+    "log": ".scratch\\council-output-evidence-20261018\\accepted-tests.log"
+  },
+  "compiled": {
+    "startedAt": "2026-10-18T10:18:17.316Z",
+    "boundary": "Fresh compiled council + actual AI SDK/native read_file + mock model + private durable delegation store. No live provider/MCP or participant-quality claim.",
+    "checks": {
+      "callerPromptReplacesDefault": true,
+      "customJSONSingleCall": true,
+      "retryPreservesCallerContract": true,
+      "sdkExecutedNativeRead": true,
+      "exactObservedIdentity": true,
+      "ownerCanRetrieveAfterCompletion": true,
+      "digestIsNotACallID": true,
+      "foreignOwnerRefused": true
+    },
+    "observed": {
+      "modelId": "deepseek-v4-flash",
+      "sdkCalls": 2,
+      "toolCallId": "compiled-native-read",
+      "artifactDigest": "b90f47eff43a110186155357762a5cbf01bef2f378f2ab5fe21b92d007086c0f",
+      "resultVersion": "66e673e1a1458683014b4217acf6bd352fba0f89c80a627fccd651d913e5676b"
+    },
+    "pass": true,
+    "finishedAt": "2026-10-18T10:18:18.102Z"
+  },
+  "nativeBoot": {
+    "passed": true,
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "runId": "d622d374-2be8-4c7f-b554-17a1af5b6141"
+  },
+  "checks": {
+    "typecheck": 0,
+    "build": 0,
+    "semantic": 0
+  },
+  "sha256": {
+    "src/council/prompts.ts": "6ab4af6ef601869b2b3b8060a83b53ea3bc6d72d04d598d9da137360ead4b01b",
+    "src/council/planner.ts": "b72ffd85e8e5f5e5144c50d06a7a80b63b28b58ff323a17a3d1488b3a9cc907b",
+    "src/council/llm.ts": "c84d3409d93e24b2ebd10cf5834f0fa57fdaf3e598fec789b33977a5dbdb021c",
+    "src/council/types.ts": "70d4369ed779bd88ce185d4389c5cedcf240f76fa200a0be84816623b588243f",
+    "src/council/index.ts": "aa737046e2d0b132423b74d7a67f7a9c5b679d6bea8af2e567a66d71b07e064d",
+    "src/orchestrator/orchestrator.ts": "5a556a2da0819515f8d22e3bd06fd42ca755eee99e1d13a4411309cfaa994ea3",
+    "src/orchestrator/delegations.ts": "f5d7c52e8172e15ffd8c1f11e4642053581171fb43a33b60d4a6c7ea5bec20c1",
+    "src/index.ts": "eb90e96130d5d81f375d1c1c5f4832e78120603420c516e2e06981e32c57c42d",
+    "dist/src/council/prompts.js": "d38ccfc4b36753721de4bd1a7865ea9e97f4b0f1b51120e1bb18636ae3184a98",
+    "dist/src/council/planner.js": "2255c9188929cbee822d003a152af5d33d33df900fba7d28cbe7315727dba714",
+    "dist/src/council/llm.js": "e466523ab014f2838569e3d225359c3d169d3614ec610ace7980a7fffa50cb48",
+    "dist/src/index.js": "9bb3c08f7d825ab0a53f94c05bde7c2d70041347579a49817c09f9fc8284cf06"
+  },
+  "limits": [
+    "Mock model/native file fixture, no paid council rerun",
+    "SDK-visible tool payloads retain existing output caps",
+    "Arbitrary natural-language contracts are not machine schemas",
+    "No independent reasoning quality/cost comparison or live MCP proof",
+    "No full suite, push or deployment"
+  ]
+}

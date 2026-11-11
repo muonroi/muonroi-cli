@@ -21,6 +21,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 // Captured `logger.warn` args, one entry per call.
 const warnCalls: Array<{ msg: string; ctx: Record<string, unknown> | undefined }> = [];
+const fileCalls: Array<{ level: string; msg: string; ctx: Record<string, unknown> | undefined }> = [];
 
 vi.mock("../../utils/logger.js", () => ({
   logger: {
@@ -30,6 +31,9 @@ vi.mock("../../utils/logger.js", () => ({
       warnCalls.push({ msg, ctx });
     }),
     error: vi.fn(),
+    file: vi.fn((level: string, _ns: string, msg: string, ctx?: Record<string, unknown>) => {
+      fileCalls.push({ level, msg, ctx });
+    }),
   },
 }));
 
@@ -54,11 +58,14 @@ vi.mock("../../providers/runtime.js", async (importOriginal) => {
   };
 });
 
+import { generateTextStreamed } from "../../providers/streamed-generate.js";
 import { proposeCompaction } from "../compaction.js";
 
 describe("proposeCompaction — malformed proposer JSON must not throw (contract: return null)", () => {
   beforeEach(() => {
     warnCalls.length = 0;
+    fileCalls.length = 0;
+    vi.mocked(generateTextStreamed).mockClear();
     mockResponseText = '{"shouldCompact":false,"reason":"not needed","actions":[]}';
   });
 
@@ -69,15 +76,33 @@ describe("proposeCompaction — malformed proposer JSON must not throw (contract
     // ("Unexpected token ...") instead of resolving to null.
     await expect(proposeCompaction("stub-model", [{ role: "user", content: "hi" }])).resolves.toBeNull();
 
-    const warnCall = warnCalls.find((c) => c.msg === "Failed to parse or validate proposer JSON");
-    expect(warnCall).toBeDefined();
-    expect(typeof warnCall!.ctx?.error).toBe("string");
+    const parseDiagnostic = fileCalls.find((c) => c.msg === "Skipped non-JSON proposer envelope");
+    expect(parseDiagnostic).toBeDefined();
+    expect(typeof parseDiagnostic!.ctx?.error).toBe("string");
+    expect(fileCalls).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        msg: "Compaction proposer rejected; using heuristic fallback",
+        ctx: expect.objectContaining({ reason: "invalid-or-ambiguous-proposal", textChars: mockResponseText.length }),
+      }),
+    );
+    expect(warnCalls).toEqual([]);
+    expect(generateTextStreamed).toHaveBeenCalledOnce();
   });
 
   it("returns null (not a thrown TypeError) when the proposer's actions array contains a malformed entry", async () => {
     mockResponseText = '{"shouldCompact":true,"reason":"go","actions":[null]}';
 
     await expect(proposeCompaction("stub-model", [{ role: "user", content: "hi" }])).resolves.toBeNull();
+    expect(fileCalls).toContainEqual(
+      expect.objectContaining({
+        level: "warn",
+        msg: "Compaction proposer rejected; using heuristic fallback",
+        ctx: expect.objectContaining({ reason: "invalid-or-ambiguous-proposal", textChars: mockResponseText.length }),
+      }),
+    );
+    expect(warnCalls).toEqual([]);
+    expect(generateTextStreamed).toHaveBeenCalledOnce();
   });
 
   it("still parses a well-formed proposer response correctly (no regression)", async () => {
@@ -91,5 +116,8 @@ describe("proposeCompaction — malformed proposer JSON must not throw (contract
       reason: "context is large",
       actions: [{ messageIndex: 0, action: "drop", reason: "stale" }],
     });
+    expect(warnCalls).toEqual([]);
+    expect(fileCalls).toEqual([]);
+    expect(generateTextStreamed).toHaveBeenCalledOnce();
   });
 });

@@ -23,18 +23,21 @@
  *     late-subscribe replay covers events emitted between spawn and subscribe.
  */
 
-import { resolve } from "node:path";
+import { existsSync } from "node:fs";
 import type { Driver } from "@muonroi/agent-harness-core/driver";
 import { createDriver } from "@muonroi/agent-harness-core/driver";
 import type { LiveEvent, LiveFrame } from "@muonroi/agent-harness-core/protocol";
 import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidechannel";
 import { spawnAgentTui } from "../agent-harness/test-spawn.js";
+import { SELF_QA_ENTRY, SELF_QA_FIXTURES } from "./runtime-paths.js";
 import type { Scenario, ScenarioRun, ScenarioStep } from "./types.js";
+import { validateSelfVerifyRequest } from "./validate-request.js";
 
 /** Cap on the retained stderr tail — enough for a stack trace, not a log dump. */
 const STDERR_TAIL_CHARS = 4_000;
 
 export type OrchestratorOptions = {
+  cwd?: string;
   /** Path to muonroi-cli entry file. Default: resolved src/index.ts of this repo. */
   entry?: string;
   /** Path to mock-llm fixture dir. Default: tests/harness/fixtures/llm. */
@@ -51,8 +54,11 @@ export type OrchestratorOptions = {
 
 export async function runScenarios(scenarios: Scenario[], opts: OrchestratorOptions = {}): Promise<ScenarioRun[]> {
   const log = opts.log ?? (() => {});
-  const entry = opts.entry ?? resolve("src/index.ts");
-  const mockDir = opts.mockLlmDir ?? resolve("tests/harness/fixtures/llm");
+  const entry = opts.entry ?? SELF_QA_ENTRY;
+  const mockDir = opts.mockLlmDir ?? SELF_QA_FIXTURES;
+  const invalid = validateSelfVerifyRequest({ kind: "tier1", mockLlmDir: opts.mockLlmDir });
+  if (invalid) throw new Error(invalid);
+  if (!existsSync(mockDir)) throw new Error(`Self-QA fixture directory does not exist: ${mockDir}`);
   const batchBudget = opts.batchBudgetMs ?? 5 * 60_000;
   const batchStart = Date.now();
 
@@ -77,7 +83,7 @@ export async function runScenarios(scenarios: Scenario[], opts: OrchestratorOpti
       break;
     }
     log(`[self-qa] → ${scenario.id}: ${scenario.description}`);
-    runs.push(await runOneScenario(scenario, { args, env, entry, mockDir, log }));
+    runs.push(await runOneScenario(scenario, { args, env, entry, mockDir, log, cwd: opts.cwd }));
   }
 
   return runs;
@@ -91,13 +97,20 @@ export async function runScenarios(scenarios: Scenario[], opts: OrchestratorOpti
  */
 async function runOneScenario(
   scenario: Scenario,
-  ctx: { args: string[]; env: Record<string, string>; entry: string; mockDir: string; log: (m: string) => void },
+  ctx: {
+    args: string[];
+    env: Record<string, string>;
+    entry: string;
+    mockDir: string;
+    log: (m: string) => void;
+    cwd?: string;
+  },
 ): Promise<ScenarioRun> {
   const startedAt = Date.now();
 
   let spawnResult: Awaited<ReturnType<typeof spawnAgentTui>>;
   try {
-    spawnResult = await spawnAgentTui(ctx.args, { spawnOpts: { env: ctx.env } });
+    spawnResult = await spawnAgentTui(ctx.args, { spawnOpts: { env: ctx.env, cwd: ctx.cwd } });
   } catch (err) {
     const trace = err instanceof Error ? (err.stack ?? err.message) : String(err);
     ctx.log(`[self-qa] Spawn failed for ${scenario.id}: ${trace}`);

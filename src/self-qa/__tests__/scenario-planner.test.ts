@@ -48,6 +48,22 @@ describe("scenario-planner", () => {
   });
 
   describe("planScenarios", () => {
+    it("submits a message before waiting for the conditional transcript log", () => {
+      const scenario = planScenarios({ diffFilesOverride: ["src/ui/app.tsx"], maxScenarios: 64 }).find(
+        (s) => s.id === "passive-log",
+      );
+      expect(scenario).toBeDefined();
+      expect(scenario?.reachable).not.toBe(false);
+      expect(scenario?.steps[0]).toMatchObject({ op: "wait_for", selector: "role=textbox", guard: true });
+      const submitIndex = scenario!.steps.findIndex((s) => s.op === "press" && s.key === "Enter");
+      const logWaitIndex = scenario!.steps.findIndex((s) => s.op === "wait_for" && s.selector === "id=log");
+      expect(submitIndex).toBeGreaterThan(0);
+      expect(logWaitIndex).toBeGreaterThan(submitIndex);
+      expect(scenario!.steps[submitIndex - 1]).toMatchObject({ op: "type" });
+      expect(scenario?.expectations).toContainEqual({ kind: "selectorPresent", selector: "id=log" });
+      expect(scenario?.expectations).toContainEqual({ kind: "noErrorToast" });
+    });
+
     it("returns smoke-boot only when no files changed", () => {
       const scn = planScenarios({ diffFilesOverride: [] });
       expect(scn).toHaveLength(1);

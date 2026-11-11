@@ -75,12 +75,14 @@ export async function rewarmProviderFactory(id: ProviderId): Promise<boolean> {
     } catch (err) {
       // No stored key is the normal OAuth case, so this is not an error —
       // but log it: a keychain fault here silently downgrades auth.
-      logger.debug("cli", `[provider-warm] key read failed for ${id}: ${(err as Error)?.message}`, { error: err });
+      logger.file("debug", "cli", `[provider-warm] key read failed for ${id}: ${(err as Error)?.message}`, {
+        error: err,
+      });
       apiKey = undefined;
     }
 
     await createProviderFactoryAsync(id, { ...(apiKey ? { apiKey } : {}), ...(baseURL ? { baseURL } : {}) });
-    logger.info("cli", `[provider-warm] rebuilt ${id} factory after a credential change`, { providerId: id });
+    logger.file("info", "cli", `[provider-warm] rebuilt ${id} factory after a credential change`, { providerId: id });
 
     // A new credential invalidates the auth blocks recorded against the old
     // one. Without this the rebuilt factory is used for fresh calls while the
@@ -96,22 +98,27 @@ export async function rewarmProviderFactory(id: ProviderId): Promise<boolean> {
       ]);
       const cleared = clearAuthBlocksWhere((info) => detectProviderForModel(info.modelId) === id);
       if (cleared > 0) {
-        logger.info("cli", `[provider-warm] cleared ${cleared} auth block(s) for ${id} after the credential change`, {
-          providerId: id,
-          cleared,
-        });
+        logger.file(
+          "info",
+          "cli",
+          `[provider-warm] cleared ${cleared} auth block(s) for ${id} after the credential change`,
+          {
+            providerId: id,
+            cleared,
+          },
+        );
       }
     } catch (err) {
       // Never let blocklist hygiene fail the rebuild — the factory is already
       // replaced and that is the load-bearing half.
-      logger.warn("cli", `[provider-warm] could not clear auth blocks for ${id}: ${(err as Error)?.message}`, {
+      logger.file("warn", "cli", `[provider-warm] could not clear auth blocks for ${id}: ${(err as Error)?.message}`, {
         error: err,
         providerId: id,
       });
     }
     return true;
   } catch (err) {
-    logger.warn("cli", `[provider-warm] failed to rebuild factory for ${id}: ${(err as Error)?.message}`, {
+    logger.file("warn", "cli", `[provider-warm] failed to rebuild factory for ${id}: ${(err as Error)?.message}`, {
       error: err,
       providerId: id,
     });
@@ -153,7 +160,7 @@ export async function warmProviderFactories(): Promise<WarmResult> {
           const { getOAuthProviderConfig } = await import("./auth/registry.js");
           hasOAuth = !!(await getOAuthProviderConfig(id));
         } catch (err) {
-          logger.debug("cli", `[provider-warm] OAuth probe failed for ${id}: ${(err as Error)?.message}`, {
+          logger.file("debug", "cli", `[provider-warm] OAuth probe failed for ${id}: ${(err as Error)?.message}`, {
             error: err,
           });
         }
@@ -172,7 +179,7 @@ export async function warmProviderFactories(): Promise<WarmResult> {
       } catch (err) {
         // Never let one provider's credential problem break boot: absent from
         // the registry is exactly the pre-warm status quo.
-        logger.warn("cli", `[provider-warm] failed to build factory for ${id}: ${(err as Error)?.message}`, {
+        logger.file("warn", "cli", `[provider-warm] failed to build factory for ${id}: ${(err as Error)?.message}`, {
           error: err,
           providerId: id,
         });
@@ -181,7 +188,7 @@ export async function warmProviderFactories(): Promise<WarmResult> {
     }),
   );
 
-  logger.info("cli", `[provider-warm] registry warmed: ${warmed.join(", ") || "(none)"}`, {
+  logger.file("info", "cli", `[provider-warm] registry warmed: ${warmed.join(", ") || "(none)"}`, {
     warmed,
     skipped,
   });

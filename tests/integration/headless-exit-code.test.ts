@@ -141,6 +141,10 @@ function runHeadless(row: Row, home: string, childCwd: string): Promise<RunResul
         // its own session DB. Without this the runs are neither hermetic nor fast.
         HOME: home,
         USERPROFILE: home,
+        // The suite pins MUONROI_CLI_HOME (vitest-setup.ts) and every store,
+        // the session DB included, follows it — so without this the three
+        // children would share the worker's one DB despite separate HOMEs.
+        MUONROI_CLI_HOME: join(home, ".muonroi-cli"),
       },
     });
 

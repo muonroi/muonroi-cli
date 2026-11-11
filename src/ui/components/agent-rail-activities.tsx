@@ -58,14 +58,24 @@ export function finishedSummary(done: number, failed: number): string | null {
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
-export function AgentRailActivities({
+export function AgentRailActivities({ activities, ...props }: AgentRailActivitiesProps) {
+  return (
+    <>
+      <RailActivityGroup {...props} activities={activities.filter((a) => a.kind !== "background")} name="Agents" />
+      <RailActivityGroup {...props} activities={activities.filter((a) => a.kind === "background")} name="Shells" />
+    </>
+  );
+}
+
+function RailActivityGroup({
   activities,
   selected,
   onSelect,
   onOpenJobs,
   width,
   t,
-}: AgentRailActivitiesProps) {
+  name,
+}: AgentRailActivitiesProps & { name: "Agents" | "Shells" }) {
   if (activities.length === 0) return null;
 
   const { running: runningRows, done, failed } = partitionForRail(activities);
@@ -74,8 +84,8 @@ export function AgentRailActivities({
 
   return (
     <Region
-      id="agent-rail-activities"
-      name="Agents"
+      id={name === "Agents" ? "agent-rail-activities" : "shell-rail-activities"}
+      name={name}
       value={`${activities.length}`}
       props={{
         count: activities.length,
@@ -88,7 +98,7 @@ export function AgentRailActivities({
     >
       <box flexDirection="column" flexShrink={0}>
         <text fg={t.textMuted} attributes={1}>
-          {running > 0 ? `Agents (${running} running)` : "Agents"}
+          {running > 0 ? `${name} (${running} running)` : name}
         </text>
         {runningRows.map((a) => {
           const isOpen = selected === a.id;
@@ -121,7 +131,11 @@ export function AgentRailActivities({
           );
         })}
         {summary && (
-          <ListItem id="rail-agent-finished" name={summary} value={`${done + failed}`}>
+          <ListItem
+            id={name === "Agents" ? "rail-agent-finished" : "rail-shell-finished"}
+            name={summary}
+            value={`${done + failed}`}
+          >
             <box flexDirection="row" onMouseDown={() => onOpenJobs?.()}>
               <text>
                 <span style={{ fg: failed > 0 ? t.diffRemovedFg : t.diffAddedFg }}>{failed > 0 ? "✗ " : "✓ "}</span>

@@ -103,6 +103,44 @@ describe("/ideal slash parser", () => {
     expect(r.flags.forceCouncil).toBeUndefined();
   });
 
+  it("an idea that quotes command flags keeps them verbatim instead of failing as unknown options", () => {
+    // Bench run ideal4-ee-local-20261110-081950: "… bunx tsc --noEmit pass …" never started.
+    const r = parseIdealArgs([
+      "--force-council",
+      "make",
+      "setup",
+      "simple.",
+      "Done",
+      "when",
+      "bunx",
+      "tsc",
+      "--noEmit",
+      "passes",
+      "and",
+      "npm",
+      "test",
+      "--",
+      "--watch=false",
+      "works",
+    ]);
+    expect(r.subcommand).toBe("start");
+    expect(r.warnings.filter((w) => w.startsWith("error"))).toEqual([]);
+    expect(r.idea).toBe("make setup simple. Done when bunx tsc --noEmit passes and npm test -- --watch=false works");
+    expect(r.flags.forceCouncil).toBe(true);
+  });
+
+  it("/ideal's own flags still work AFTER the idea (the harness form) next to unknown quoted ones", () => {
+    const r = parseIdealArgs(["build", "a", "counter", "--max-sprints", "1", "--force-council", "--noEmit"]);
+    expect(r.subcommand).toBe("start");
+    expect(r.idea).toBe("build a counter --noEmit");
+    expect(r.flags.forceCouncil).toBe(true);
+    expect(r.flags.maxSprints).toBe(1);
+    const eq = parseIdealArgs(["--done-threshold=0.8", "idea", "--stack", "bun"]);
+    expect(eq.flags.doneThreshold).toBe(0.8);
+    expect(eq.flags.stack).toBe("bun");
+    expect(eq.idea).toBe("idea");
+  });
+
   it("--force-council appears in --help text", () => {
     expect(getIdealHelpText().includes("--force-council")).toBe(true);
   });

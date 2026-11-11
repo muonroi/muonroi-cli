@@ -54,13 +54,28 @@ import { anchorIsProvablyGone, type DedupCallContext, readCallContext, toIdSet }
  * source content never produces a matching hash and dedup silently never fires.
  *
  * To let C3 key off the RAW pre-cap content while still SERVING the capped
- * output, the cap stashes the raw string under this Symbol on its result object.
- * A Symbol key is invisible to `JSON.stringify` (and thus to the provider wire),
- * so it can never leak into the model payload even if the dedup layer is
- * disabled and never strips it. `cross-turn-dedup.ts` reads it as the hash
- * source.
+ * output, the cap records the raw string in a WeakMap keyed by its result
+ * object; `cross-turn-dedup.ts` reads it back via {@link rawForDedup}.
+ *
+ * It used to be a Symbol-keyed PROPERTY on the result object, on the theory that
+ * a Symbol never reaches the wire. It did reach the prompt: the AI SDK turns an
+ * object tool result into `{type:"json", value: <that object>}` in the response
+ * messages, and zod 4's `z.record` walks `Reflect.ownKeys`, so the Symbol key
+ * failed `ModelMessage[]` validation (`invalid_key` at `output.value`). The step
+ * loop never re-validates, so the run continued — until the worker's forced
+ * final synthesis re-submitted the history and died with "Invalid prompt: The
+ * messages do not match the ModelMessage[] schema". Measured: all five such
+ * worker failures in sessions 4edc02516a92 (gentle-ivory-badger,
+ * clever-amber-heron, keen-ivory-heron, steady-indigo-heron, eager-teal-wolf)
+ * reached forced synthesis after ≥1 object-shaped edit/write result. A side
+ * table leaves the served object a plain JSON value.
  */
-export const RAW_FOR_DEDUP: unique symbol = Symbol("muonroi.rawForDedup");
+const rawByResult = new WeakMap<object, string>();
+
+/** Raw pre-cap output recorded for a capped result object, if any. */
+export function rawForDedup(result: unknown): string | undefined {
+  return result && typeof result === "object" ? rawByResult.get(result) : undefined;
+}
 
 export interface SubAgentCapOptions {
   /** Total chars of tool output the sub-agent may receive before the cap kicks in fully. */
@@ -252,10 +267,12 @@ function compressResult(state: SubAgentCapState, raw: unknown, call?: DedupCallC
     const obj = raw as Record<string, unknown>;
     if (typeof obj.output === "string") {
       const rawOutput = obj.output;
-      // H5: stash the RAW pre-cap output under a Symbol so the outer cross-turn
-      // dedup keys off it (not the trimmed, marker-bearing capped output). The
-      // Symbol never serializes to the model wire.
-      return { ...obj, output: compressForCap(state, rawOutput, call), [RAW_FOR_DEDUP]: rawOutput };
+      // H5: record the RAW pre-cap output in the side table so the outer
+      // cross-turn dedup keys off it (not the trimmed, marker-bearing capped
+      // output). The served object stays a plain JSON value (see rawByResult).
+      const capped = { ...obj, output: compressForCap(state, rawOutput, call) };
+      rawByResult.set(capped, rawOutput);
+      return capped;
     }
     // MCP tool result shape: { type: "content", value: [{type:"text", text}, ...] }.
     // Without this branch the whole payload escaped the cumulative tracker —

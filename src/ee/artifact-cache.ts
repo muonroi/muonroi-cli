@@ -21,8 +21,8 @@
  */
 
 import { appendFile, mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 const DEFAULT_MAX_ENTRIES = 100;
 /** Per-entry cap so one giant output can't dominate the footprint. */
@@ -44,7 +44,7 @@ function diskEnabled(): boolean {
   return process.env.MUONROI_ARTIFACT_CACHE_DISK !== "0";
 }
 function diskPath(): string {
-  return diskPathOverride ?? path.join(os.homedir(), ".muonroi-cli", "artifact-cache.jsonl");
+  return diskPathOverride ?? path.join(muonroiHome(), "artifact-cache.jsonl");
 }
 
 /** Extract the id from a "tool-artifact id=<id>" / "full tool result id=<id>" query. */

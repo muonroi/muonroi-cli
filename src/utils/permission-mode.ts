@@ -11,6 +11,13 @@ import { appendDecisionLog } from "../usage/decision-log.js";
 
 export type PermissionMode = "safe" | "auto-edit" | "yolo";
 
+export function parsePermissionMode(value: string): PermissionMode {
+  const mode = value.trim().toLowerCase();
+  if (mode === "auto") return "auto-edit";
+  if (mode === "safe" || mode === "auto-edit" || mode === "yolo") return mode;
+  throw new Error("Permission mode must be safe, auto (auto-edit), or yolo.");
+}
+
 /**
  * Set of tool names that are auto-approved in auto-edit mode.
  * These are read/write file operations that are considered safe to run
@@ -22,6 +29,7 @@ export const AUTO_EDIT_ALLOWED: ReadonlySet<string> = new Set([
   "edit_file",
   "grep",
   "list_directory",
+  "worker_message",
 ]);
 
 /**
@@ -191,8 +199,11 @@ export function toolNeedsApproval(
     return false;
   }
   if (mode === "auto-edit") {
-    // bash auto-approves when non-dangerous; only dangerous bash needs approval
-    if (toolName === "bash") return dangerous(context?.command);
+    // bash auto-approves when non-dangerous; only dangerous bash needs approval.
+    // run_gate (src/tools/run-gate.ts) executes a recipe command on the host just
+    // like bash, and its input carries that exact `command`, so it follows the
+    // same rule. safe mode below still always asks.
+    if (toolName === "bash" || toolName === "run_gate") return dangerous(context?.command);
     return !AUTO_EDIT_ALLOWED.has(toolName);
   }
   // "safe" — always confirm; dangerous patterns explicitly require (no bypass)

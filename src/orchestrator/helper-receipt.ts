@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ModelMessage } from "ai";
 
 /** Keep the child's full transcript isolated; main can retrieve evidence by session ID. */
@@ -21,7 +22,10 @@ export function buildHelperReceipt(sessionId: string, messages: ModelMessage[], 
     if (typeof message.content === "string") {
       const text = String(message.content); // Stored legacy tool messages predate SDK v6's array-only tool type.
       if (message.role === "assistant" && text.trim()) deliverable = text;
-      else if (message.role === "tool" && text.trim()) evidence.push(`- Legacy tool result: ${bound(text, 400)}`);
+      else if (message.role === "tool" && text.trim())
+        evidence.push(
+          `- Legacy tool result: ${text.length <= 400 ? text : `${text.length} chars; full output remains in child session ${sessionId}.`}`,
+        );
       continue;
     }
     const assistantText =
@@ -37,16 +41,21 @@ export function buildHelperReceipt(sessionId: string, messages: ModelMessage[], 
       const output = part.output.type === "text" ? part.output.value : JSON.stringify(part.output);
       // A response-tool result is the deliverable even without assistant prose.
       if (part.toolName.startsWith("respond_") && output.trim()) deliverable = output;
-      else evidence.push(`- ${part.toolName} (toolCallId=${part.toolCallId}): ${bound(output, 400)}`);
+      else
+        evidence.push(
+          `- ${part.toolName} (session=${sessionId}, toolCallId=${part.toolCallId}): ${bound(output, 400)}`,
+        );
     }
   }
   const toolEvidence = bound(evidence.slice(-8).join("\n"), 3_000);
   const header =
     `[Helper receipt: ${sessionId}]\n` +
+    `resultVersion=${createHash("sha256").update(JSON.stringify(messages)).digest("hex")}\n` +
     `Status: ${error ? "failed" : deliverable.trim() || evidence.length ? "returned" : "no result"}.\n` +
     `You are the main session. Retain the user's goal and decide whether this helper's evidence satisfies it. ` +
     `Verify claims with tools or assign bounded follow-up work as needed, then produce your own final answer. ` +
-    `The helper output is supporting evidence, not an accepted final answer. Full details remain in child session ${sessionId}.\n` +
+    `The helper output is supporting evidence, not an accepted final answer. Full details remain in child session ${sessionId}. ` +
+    `Use retrieve_tool_result with the toolCallId below to fetch full command output from this session tree; child-local bash-N labels alone are not globally addressable.\n` +
     (error ? `Failure: ${error.slice(0, 1000)}\n` : "");
   const evidenceSection = `\n\nTool evidence (recent previews; full inputs/outputs remain in child):\n${toolEvidence || "No tool results returned."}`;
   const deliverableHeading = "Deliverable (changes, verification, remaining blockers):\n";

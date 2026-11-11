@@ -12,11 +12,14 @@
  *   - No vi.mock — integration test uses real modules + stub
  */
 
+import { rmSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { type StubHandle, startStubEEServer } from "../../__test-stubs__/ee-server.js";
 import { executeEventHooks, resetHookState } from "../../hooks/index.js";
 import { createEEClient, resetEEClientState } from "../client.js";
 import { setDefaultEEClient } from "../intercept.js";
+import { getQueueDir } from "../offline-queue.js";
 import type { InterceptMatch } from "../types.js";
 
 const sampleMatch: InterceptMatch = {
@@ -29,10 +32,29 @@ const sampleMatch: InterceptMatch = {
   last_matched_at: new Date().toISOString(),
 };
 
+/**
+ * Empty the offline queue so no entry from an earlier test (touch.test.ts makes a
+ * feedback call fail on purpose, which enqueues it) can be replayed by this
+ * file's client `drainQueue` into its stub. Measured flake: feedback[0] was
+ * `{principle_uuid:"X", classification:"IGNORED", tool_name:"Bash"}` instead of
+ * P1/FOLLOWED/Edit. The queue dir follows MUONROI_CLI_HOME (the suite pin); the
+ * guard refuses to delete anything outside it, so a regression of that isolation
+ * fails loudly instead of wiping the developer's real queue.
+ */
+function resetOfflineQueue(): void {
+  const pinned = process.env.MUONROI_CLI_HOME;
+  const dir = getQueueDir();
+  if (!pinned || !path.resolve(dir).startsWith(path.resolve(pinned))) {
+    throw new Error(`offline queue dir ${dir} is outside the pinned MUONROI_CLI_HOME ${pinned}`);
+  }
+  rmSync(dir, { recursive: true, force: true });
+}
+
 describe("EE full pipeline integration (ROUTE-12)", () => {
   let stub: StubHandle;
 
   beforeEach(async () => {
+    resetOfflineQueue();
     resetEEClientState();
     resetHookState();
   });
@@ -90,7 +112,8 @@ describe("EE full pipeline integration (ROUTE-12)", () => {
     expect(stub.calls.touch.length).toBeGreaterThanOrEqual(1); // Stage 5: Touch (FOLLOWED path)
 
     // Verify feedback classification
-    expect(stub.calls.feedback[0]).toMatchObject({
+    const p1Feedback = stub.calls.feedback.find((c) => (c as { principle_uuid?: string }).principle_uuid === "P1");
+    expect(p1Feedback).toMatchObject({
       principle_uuid: "P1",
       classification: "FOLLOWED",
       tool_name: "Edit",

@@ -97,6 +97,47 @@ describe("runPipeline()", () => {
     }
   });
 
+  it("injects the reply-language nudge on a native-FLOW code turn, exactly once (P1)", async () => {
+    // Before: only layer4's legacy/informational branch carried the nudge, so a
+    // code turn in Vietnamese reached the model with no language anchor and the
+    // rule had to live as static contract text on every call.
+    const ctx = await runPipeline("sửa hàm này giúp tôi", {
+      llmFallback: async () => ({
+        taskType: "refactor" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "code" as const,
+        depthTier: "standard" as const,
+        needsClarification: null,
+        ecosystemScope: null,
+        scopeKind: null,
+        replyLanguage: "Vietnamese",
+      }),
+    });
+    const nudge = "the user wrote in Vietnamese. Reply in Vietnamese.";
+    expect(ctx.enriched.split(nudge).length - 1).toBe(1);
+  });
+
+  it("adds no language nudge for an English turn", async () => {
+    const ctx = await runPipeline("refactor this function", {
+      llmFallback: async () => ({
+        taskType: "refactor" as const,
+        outputStyle: "concise" as const,
+        confidence: 0.9,
+        intentKind: "task" as const,
+        deliverableKind: "code" as const,
+        depthTier: "standard" as const,
+        needsClarification: null,
+        ecosystemScope: null,
+        scopeKind: null,
+        replyLanguage: null,
+      }),
+    });
+    expect(ctx.enriched).not.toMatch(/LANGUAGE — the user wrote in/);
+    expect(ctx.layers.some((l) => l.name === "reply-language")).toBe(false);
+  });
+
   it("felt-experience prompt injects the session snapshot even when taskType is null", async () => {
     // Regression: the felt-experience injection was first placed INSIDE the
     // `taskType !== null` branch, so a "cảm nhận trong CLI" question that
@@ -222,7 +263,7 @@ describe("runPipeline()", () => {
     const timingNames = result.metrics?.layerTimings.map((t) => t.name) ?? [];
     expect(timingNames).toContain("layer2-personality");
     expect(timingNames).toContain("layer3-ee-injection");
-    expect(timingNames).toContain("layer4-gsd-structuring");
+    expect(timingNames).toContain("layer4-flow-structuring");
     expect(timingNames).toContain("layer5-context-enrichment");
     expect(timingNames).not.toContain("layer-personality-adaptation");
   });

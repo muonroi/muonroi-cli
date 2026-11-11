@@ -28,7 +28,7 @@ export function relativizePath(p: string): string {
   let normalized = p.replace(/\\/g, "/");
   const home = os.homedir().replace(/\\/g, "/");
   const normalizedHome = home.endsWith("/") ? home.slice(0, -1) : home;
-  if (normalized.startsWith(normalizedHome)) {
+  if (normalized === normalizedHome || normalized.startsWith(normalizedHome + "/")) {
     normalized = "~" + normalized.slice(normalizedHome.length);
   }
   return normalized;

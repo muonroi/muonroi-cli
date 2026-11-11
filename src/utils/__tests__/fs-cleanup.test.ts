@@ -5,7 +5,7 @@
  * removals alone. Two things were wrong with them beyond the missing retries:
  *
  *   1. Three sit in a `finally` block (install-manager.ts:641,
- *      export-reachability.ts:1013, spike-gsd-boot.ts:38). A throw from `finally`
+ *      export-reachability.ts:1013, spike-flow-boot.ts:38). A throw from `finally`
  *      REPLACES the function's return value, so a transient ENOTEMPTY on a
  *      scratch directory surfaces as the operation itself failing — a successful
  *      self-update reported as a crash, a clean reachability analysis reported as
@@ -105,7 +105,7 @@ describe("the finally-block hazard the three finally sites had", () => {
       }
     }
     // This is the shape install-manager.ts:641, export-reachability.ts:1013 and
-    // spike-gsd-boot.ts:38 shipped: the caller never sees "the real result".
+    // spike-flow-boot.ts:38 shipped: the caller never sees "the real result".
     expect(() => withRawRemoval()).toThrow(/null bytes/);
   });
 

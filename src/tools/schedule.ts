@@ -1,29 +1,8 @@
 import { spawn } from "child_process";
 import { closeSync, promises as fs, openSync } from "fs";
-import os from "os";
 import path from "path";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { getCurrentModel } from "../utils/settings";
-
-/**
- * Root of the muonroi home.
- *
- * Priority: MUONROI_CLI_HOME env → os.homedir()/.muonroi-cli — the same
- * `muonroiHome()` convention already used by src/storage/config.ts,
- * src/usage/ledger.ts, src/chat/channel-manager.ts et al.
- *
- * These were module-level `const`s (`path.join(os.homedir(), …)`) evaluated at
- * import, which is why adding the env var alone would NOT have redirected them:
- * a const is frozen before any test can set anything, so the suite-wide pin in
- * `src/__test-stubs__/vitest-setup.ts` could never reach this module and
- * `ensureSchedulesDir()` / `writeScheduleDaemonPid()` wrote into the developer's
- * real `~/.muonroi-cli`. `src/lsp/npm-cache.ts:20-28` records what that class of
- * trap already cost once. Resolving per call is what makes the isolation
- * reachable; `home-pin-direct-homedir.test.ts` re-points the env var AFTER
- * import and fails if anyone freezes these again.
- */
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
-}
 
 function schedulesDir(): string {
   return path.join(muonroiHome(), "schedules");

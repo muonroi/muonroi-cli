@@ -306,7 +306,7 @@ export function createModelClarificationProposer(modelId: string): ModelClarific
         : "";
 
       const special = isMetaAnalysisPrompt(input.raw)
-        ? `\nIf the request is a self-evaluation, meta-analysis or review of the CLI by the agent running inside it, do NOT ask about repo path, current directory, absolute path, local repo location or "which directory". Scope is always the full project root. Focus questions and recommends on which CLI internals (PIL, discovery, tools, compaction, EE, model BE, loop guard) to evaluate or specific improvements to assess after fixes. Use the enrichment context.`
+        ? `\nFor CLI self-evaluation, the working directory can be a consumer repository rather than CLI source. Use usage_forensics for CLI SQLite usage, errors and available request measurements; do not search application build/test logs as CLI provider evidence. Capability descriptions are not measured payloads. Use known cwd and enrichment instead of asking for paths already supplied; report unavailable CLI source or measurements explicitly. Ask only for missing evidence or a real decision needed for the requested evaluation.`
         : "";
       const osLabel = process.platform === "win32" ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux";
       const envHeader =

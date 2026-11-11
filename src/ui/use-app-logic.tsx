@@ -27,7 +27,10 @@ import { Semantic, SemanticProvider, useAgentInputBridge } from "@muonroi/agent-
 import type { KeyEvent, ScrollBoxRenderable, TextareaRenderable } from "@opentui/core";
 import { decodePasteBytes, type PasteEvent, parseKeypress } from "@opentui/core";
 import { useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import { approvalOpenEvent } from "./approval-card-events.js";
+import { isApprovalAllowed, toggleApprovalSelection, useLiveState } from "./live-state.js";
 import os from "os";
+import { recordInternalExperience } from "./utils/internal-activity.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { COUNCIL_ANSWER_DISMISSED } from "../council/types.js";
 import { clearLastSurfacedMatches, getDefaultEEClient, getLastSurfacedMatches } from "../ee/intercept.js";
@@ -41,8 +44,10 @@ import { subscribeNeedsKey } from "../mcp/needs-key-bus";
 import { parseEnvLines, parseHeaderLines } from "../mcp/parse-headers";
 import { toMcpServerId, validateMcpServerConfig } from "../mcp/validate";
 import type { AskUserAskInfo } from "../orchestrator/ask-user.js";
+import type { ToolApprovalAskInfo } from "../orchestrator/tool-approval.js";
 import { ASK_USER_DISMISSED, buildAskUserQuestion } from "../orchestrator/ask-user.js";
 import { createCompactionSummaryMessage } from "../orchestrator/compaction.js";
+import { AUTOPILOT_STOP_TEXT } from "../orchestrator/ideal-autopilot.js";
 import { Agent } from "../orchestrator/orchestrator";
 import {
   buildCompactResumeMessage,
@@ -56,6 +61,7 @@ import type { HaltChunk, ProductStatusCardData, RecoveryOption } from "../produc
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import { saveProviderCredentials, workspaceIdError } from "../providers/credential-setup.js";
 import type { ApiKeyPromptState } from "./modals/model-picker-modal.js";
+import { pageWorkerApprovalPreview } from "./modals/wallet-picker-modal.js";
 import { getConfiguredProviders, setKeyForProvider } from "../providers/keychain.js";
 import type { ProviderId } from "../providers/types.js";
 import { buildAdoptExistingContinuationPrompt, buildIdealContinuationPrompt } from "../scaffold/continuation-prompt.js";
@@ -103,6 +109,7 @@ import {
   isBackgroundAutoWakeEnabled,
 } from "../utils/background-jobs.js";
 import { logger } from "../utils/logger.js";
+import { signInMcpOAuth } from "../mcp/oauth-signin.js";
 import {
   type CustomSubagentConfig,
   getApiKey,
@@ -127,7 +134,8 @@ import {
   setModelDisabled,
   setProviderDisabled,
 } from "../utils/settings";
-import { discoverSkills, formatSkillsForChat } from "../utils/skills";
+import { runSkillCreateFlow } from "../utils/skill-authoring.js";
+import { resolveSkillSlashCommand } from "../utils/skill-invocation.js";
 import { formatSubagentName } from "../utils/subagent-display";
 import { checkForUpdate, runUpdate, type UpdateCheckResult } from "../utils/update-checker";
 import { setRetryReporter } from "../utils/visible-retry.js";
@@ -168,6 +176,7 @@ import {
 import { computeMcpRunInfo, findLastCollapsibleIndex, MessageView } from "./components/message-view.js";
 import { type AgentActivity, collectAgentActivities, orderForJobsView } from "./utils/agent-activities.js";
 import { groupToolEntries } from "./utils/group-tool-entries.js";
+import { reconcileTranscript } from "./utils/local-entries.js";
 import {
   initialPointToExistingFormState,
   PointToExistingFormCard,
@@ -214,12 +223,14 @@ import { resolvePickerProviders } from "./picker-providers.js";
 import { formatPlanAnswers, initialPlanQuestionsState, PlanQuestionsPanel, type PlanQuestionsState } from "./plan";
 import { buildScheduleBrowseRows, ScheduleBrowserModal } from "./schedule-modal";
 import {
+  filterSlashMenuItems,
+  resolveLiveSlashSelection,
   SLASH_MENU_ITEMS,
-  SLASH_MENU_ITEMS_ARROW_ORDER,
   type SlashMenuItem,
   VISIBLE_SLASH_MENU_ITEMS,
 } from "./slash/menu-items.js";
-import { dispatchSlash } from "./slash/registry.js";
+import { dispatchSlash, listSlashCommands } from "./slash/registry.js";
+import { handlePermissionsSlash } from "./slash/permissions.js";
 import { StatusBar } from "./status-bar/index.js";
 import { getCompactTuiSelectionText } from "./terminal-selection-text";
 import { dark } from "./theme";
@@ -241,6 +252,7 @@ import "./slash/ideal.js";
 import "./slash/export.js";
 import "./slash/status.js";
 import "./slash/ponytail.js";
+import "./slash/skills.js";
 import {
   CONNECT_CHANNELS,
   getSandboxVisibleRows,
@@ -259,7 +271,7 @@ import type {
 
 export type { AppStartupConfig } from "./types.js";
 
-import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../gsd/flags.js";
+import { isCouncilSurfaceEnabled, isScrollLockEnabled } from "../workflow/flags.js";
 import { stripCouncilNoise } from "./council-preamble.js";
 import {
   getCatalogProviderIds,
@@ -301,6 +313,7 @@ import {
   buildEeConnectActions,
   connectHostedEE,
   connectLocalEE,
+  connectSetupLocalEE,
   defaultEeConnectDeps,
 } from "./ee-connect-controller.js";
 import { subscribeLspSetup } from "../lsp/lsp-setup-bus.js";
@@ -733,10 +746,19 @@ export function useAppLogic(props: AppLogicProps) {
     statusBarStore.setState({
       provider: agent.getProviderId(),
       model: agent.getModel(),
+      permission_mode: agent.effectivePermissionMode,
     });
-  }, [agent.getModel, agent.getProviderId]);
+  }, [agent.getModel, agent.getProviderId, agent.effectivePermissionMode]);
   // Wire status bar subscriptions once at boot (Plan 06)
-  useEffect(() => wireStatusBar(), []);
+  useEffect(
+    () =>
+      wireStatusBar(
+        agent.getExecutionRole() === "orchestrator"
+          ? () => ({ provider: agent.getProviderId(), model: agent.getModel() })
+          : undefined,
+      ),
+    [agent],
+  );
 
   // Agent-mode: wire addPostProcessFn so each renderer pass triggers a registry
   // snapshot → LiveFrame diff → JSONL write on fd 3.
@@ -761,7 +783,7 @@ export function useAppLogic(props: AppLogicProps) {
 
   // ─── Phase 21 / Plan 02 — Toast subscriber ────────────────────────────────
   // Hook into the same agentRuntime.emitEvent sink used by `logEeFailure` so
-  // EE failures (and any explicit `kind: "toast"` event) surface visually.
+  // EE diagnostics remain file-only; explicit actionable toast events stay visual.
   //
   // Implementation: monkey-patch `agentRuntime.emitEvent` once on mount to tee
   // events into a local React state setter. When agentRuntime is absent (no
@@ -796,12 +818,16 @@ export function useAppLogic(props: AppLogicProps) {
     setActiveToast({ level, text, id: toastIdRef.current });
   }, []);
 
-  // Route visible-retry progress ("[retry] rate-limited (429) — waiting Xs …")
-  // through the toast surface. Without this it falls back to a raw
-  // process.stderr.write, which under OpenTUI's raw-mode alt-screen paints over
-  // the composer input frame (user-reported bad UX).
+  // Keep automatic rate-limit retries in diagnostics; other retry notices use
+  // the toast surface so raw stderr cannot paint over the composer.
   useEffect(() => {
-    setRetryReporter((message, level) => pushToast(level === "warn" ? "warn" : "info", message));
+    setRetryReporter((message, level, options) => {
+      if (options?.kind === "rate-limit") {
+        logger.warn("ui", message);
+        return;
+      }
+      pushToast(level === "warn" ? "warn" : "info", message);
+    });
     return () => setRetryReporter(null);
   }, [pushToast]);
 
@@ -836,7 +862,7 @@ export function useAppLogic(props: AppLogicProps) {
           const text = source.startsWith("bb-retrieval")
             ? "running without BB context (EE slow or down)"
             : `EE ${kind}: ${source}`;
-          pushToast("warn", text);
+          logger.file("debug", "ui", text);
         }
       }
     },
@@ -902,6 +928,18 @@ export function useAppLogic(props: AppLogicProps) {
     return () => agent.setSteerDrain(null);
   }, [agent]);
 
+  // A message drained into a request the turn watchdog then killed was never
+  // answered. Put it back at the FRONT of the queue so finishTurnProcessing sends
+  // it as the next turn instead of the user's words vanishing (session
+  // 7f24048ad75d). Wired unconditionally: with steering off nothing is drained.
+  useEffect(() => {
+    agent.setSteerRestore((texts) => {
+      queuedMessagesRef.current.unshift(...texts.map((text) => ({ text, displayText: text })));
+      setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+    });
+    return () => agent.setSteerRestore(null);
+  }, [agent]);
+
   const dismissToast = useCallback(() => setActiveToast(null), []);
   // ─── /Phase 21 toast subscriber ────────────────────────────────────────────
 
@@ -926,6 +964,7 @@ export function useAppLogic(props: AppLogicProps) {
     setModelPickerFocus,
     providerChipIndex,
     setProviderChipIndex,
+    providerChipIndexRef,
     reasoningEffortByModel,
     setReasoningEffortByModel,
   } = useModelPicker(agent.getModel());
@@ -934,6 +973,7 @@ export function useAppLogic(props: AppLogicProps) {
     setShowSessionPicker,
     sessionPickerIndex,
     setSessionPickerIndex,
+    sessionPickerIndexRef,
     sessions: sessionPickerList,
     setSessions: setSessionPickerList,
   } = useSessionPicker();
@@ -995,8 +1035,8 @@ export function useAppLogic(props: AppLogicProps) {
   const [apiKeyPrompt, setApiKeyPrompt] = useState<ApiKeyPromptState | null>(null);
 
   // ── OAuth subscription login (browser-based) for openai / xai ───────────
-  // One auth mode per provider: a successful OAuth login clears any stored API
-  // key for that provider (exclusivity). Runs the registry login() flow, which
+  // A successful OAuth login keeps any stored API key as a backup.
+  // Runs the registry login() flow, which
   // opens the browser and resolves when the loopback callback completes.
   const [oauthProviders, setOAuthProviders] = useState<ReadonlySet<ProviderId>>(() => new Set());
   const [oauthLogin, setOAuthLogin] = useState<{ provider: ProviderId; error: string | null } | null>(null);
@@ -1033,13 +1073,12 @@ export function useAppLogic(props: AppLogicProps) {
     setOAuthLogin(null);
   }, []);
 
-  // Sync React model state with status bar store so chat input reflects
-  // per-turn router upgrades (brain EE upgrade, warm/cold routing, etc.)
+  // Report the actual main model. Worker selection does not replace main.
   useEffect(() => {
     return statusBarStore.subscribe((s) => {
-      if (s.model) setModel(s.model);
+      if (s.model) setModel(agent.getModel());
     });
-  }, [setModel]);
+  }, [agent, setModel]);
   const initialHasApiKey = agent.hasApiKey();
   const [hasApiKey, setHasApiKey] = useState(initialHasApiKey);
   const [messages, setMessages] = useState<ChatEntry[]>(() => groupToolEntries(agent.getChatEntries()));
@@ -1060,18 +1099,19 @@ export function useAppLogic(props: AppLogicProps) {
   const [mode, setModeState] = useState<AgentMode>(agent.getMode());
   const [showSandboxPicker, setShowSandboxPicker] = useState(false);
   const [sandboxSettings, setSandboxSettingsState] = useState<SandboxSettings>(() => agent.getSandboxSettings());
-  const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex] = useState(0);
+  // Live (see live-state.ts): Enter/←/→ change the row the cursor is on.
+  const [sandboxSettingsFocusIndex, setSandboxSettingsFocusIndex, sandboxSettingsFocusIndexRef] = useLiveState(0);
   const [sandboxSettingsEditing, setSandboxSettingsEditing] = useState<string | null>(null);
   const [sandboxSettingsEditBuffer, setSandboxSettingsEditBuffer] = useState("");
   const [showWalletPicker, setShowWalletPicker] = useState(false);
   const [walletSettings, setWalletSettings] = useState<Record<string, unknown>>({});
-  const [walletFocusIndex, setWalletFocusIndex] = useState(0);
+  const [walletFocusIndex, setWalletFocusIndex, walletFocusIndexRef] = useLiveState(0);
   const [walletDisplayInfo, setWalletDisplayInfo] = useState<WalletDisplayInfo>({
     address: null,
     ethBalance: null,
     usdcBalance: null,
   });
-  const [pendingPaymentApproval, setPendingPaymentApproval] = useState<{
+  type PaymentApprovalCard = {
     url: string;
     description: string;
     security: string;
@@ -1080,9 +1120,28 @@ export function useAppLogic(props: AppLogicProps) {
     amount: string;
     network: string;
     asset: string;
-    approvalId?: string;
+    /** Main agent's own must-confirm tool call (safe mode); resolved via toolApprovalQueueRef. */
+    toolApproval?: ToolApprovalAskInfo;
+    workerApproval?: import("../orchestrator/worker-approval.js").WorkerApprovalView;
     selected: number;
-  } | null>(null);
+  };
+  // Live mirror read by handleKey: the approve/deny decision must follow the
+  // row the user moved to, never the last render (Down+Enter in one stdin
+  // chunk approved before this — see live-state.ts). Every writer goes through
+  // the live setter, so the ref is never behind React state.
+  const [pendingPaymentApproval, setPendingPaymentApproval, pendingPaymentApprovalRef] =
+    useLiveState<PaymentApprovalCard | null>(null);
+  // Main-agent tool approvals awaiting a decision, FIFO. The card shows the head;
+  // each entry's resolve() unblocks the tool's execute inside the live turn.
+  const toolApprovalQueueRef = useRef<
+    Array<{ info: ToolApprovalAskInfo; resolve: (verdict: "allow" | "deny") => void }>
+  >([]);
+  const workerApprovalDecisionsRef = useRef(new Set<string>());
+  const workerApprovalScrollRef = useRef<ScrollBoxRenderable>(null);
+  useEffect(() => {
+    agent.setWorkerApprovalController(true);
+    return () => agent.setWorkerApprovalController(false);
+  }, [agent]);
   const [pendingCouncilQuestion, setPendingCouncilQuestion] = useState<CouncilQuestionData | null>(null);
   const [councilCardState, setCouncilCardState] = useState<CouncilCardState | null>(null);
   const [preflightCardState, setPreflightCardState] = useState<CouncilCardState | null>(null);
@@ -1301,11 +1360,15 @@ export function useAppLogic(props: AppLogicProps) {
   const { store: storeQuote, getPartnerLast } = usePairQuoteBuffer();
   const [productStatus, setProductStatus] = useState<ProductStatusCardData | null>(null);
   const [activeHaltCard, setActiveHaltCard] = useState<HaltChunk | null>(null);
-  const [haltSelectedIndex, setHaltSelectedIndex] = useState(0);
+  // Live: Enter on the halt card must run the option the cursor is on (the list
+  // includes destructive Abort) even when ↑/↓ and Enter share a stdin chunk.
+  const [haltSelectedIndex, setHaltSelectedIndex, haltSelectedIndexRef] = useLiveState(0);
   // A — most recent sprint number seen on a product_status_card, used to title
   // the recovery card ("Sprint N failed") when an /ideal run throws mid-run.
   const lastProductSprintNRef = useRef<number | null>(null);
-  const [initNewForm, setInitNewForm] = useState<InitNewFormState | null>(null);
+  // Live: handleKey reads initNewFormRef so a ↑/↓+Enter burst scaffolds the stack/
+  // template the cursor is on, not the one from the last render (live-state.ts).
+  const [initNewForm, setInitNewForm, initNewFormRef] = useLiveState<InitNewFormState | null>(null);
   const lastInitNewStepRef = useRef<string | null>(null);
 
   // E2 — start/clear post-answer heartbeat. Renders "⏳ Waiting for next phase...
@@ -1403,10 +1466,13 @@ export function useAppLogic(props: AppLogicProps) {
    * `setHaltSelectedIndex(0)`, and on the CB-3 card index 0 is "Init new
    * project" — a scaffold, pre-selected on a tree that already exists.
    */
-  const openHaltCard = useCallback((halt: HaltChunk) => {
-    setActiveHaltCard(halt);
-    setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
-  }, []);
+  const openHaltCard = useCallback(
+    (halt: HaltChunk) => {
+      setActiveHaltCard(halt);
+      setHaltSelectedIndex(deriveHaltRecommendation(halt).index);
+    },
+    [setHaltSelectedIndex],
+  );
   // TEST SEAM — inject a synthetic halt chunk on boot when --inject-halt is set.
   // This lets harness E2E specs verify the recovery card without a real CB-3 run.
   useEffect(() => {
@@ -1530,7 +1596,11 @@ export function useAppLogic(props: AppLogicProps) {
   const [copyFlashId, setCopyFlashId] = useState(0);
   const [expandedMessages, setExpandedMessages] = useState<Set<number>>(() => new Set());
   const [activeSubagent, setActiveSubagent] = useState<SubagentStatus | null>(null);
-  const [pqs, setPqs] = useState<PlanQuestionsState>(initialPlanQuestionsState());
+  // Live: handleKey and submitPlanAnswers read pqsRef. A single-question plan
+  // sets the answer and submits in the SAME handler call, so a closure read
+  // submitted the plan without the answer just picked; a Tab/Down+Enter burst
+  // acted on the previous tab/row (see live-state.ts).
+  const [pqs, setPqs, pqsRef] = useLiveState<PlanQuestionsState>(initialPlanQuestionsState());
   const pasteCounterRef = useRef(0);
   const pasteBlocksRef = useRef<PasteBlock[]>([]);
   const apiKeyInputRef = useRef<TextareaRenderable>(null);
@@ -1564,15 +1634,11 @@ export function useAppLogic(props: AppLogicProps) {
   // panel with Ctrl+B. Defaults visible; the rail also auto-hides below 100 cols
   // (decided in app.tsx where terminal width is known).
   const [railVisible, setRailVisible] = useState(true);
-  // True when the user is pinned to (or near) the bottom. Mirrors OpenTUI's
-  // private `_hasManualScroll`: once the user scrolls up, sticky-bottom stops
-  // and this returns false, so our explicit scrolls back off. Falls back to a
-  // geometric at-bottom check if the private field is ever absent.
+  // The pill follows visible scroll geometry. The private manual-scroll flag
+  // can remain set after reaching the tail or after a layout change.
   const isPinnedToBottom = useCallback((): boolean => {
     const sb = scrollRef.current;
     if (!sb) return true;
-    const manual = (sb as unknown as { _hasManualScroll?: boolean })._hasManualScroll;
-    if (typeof manual === "boolean") return !manual;
     const vpH = (sb.viewport as unknown as { height?: number }).height ?? 0;
     return sb.scrollTop + vpH >= sb.scrollHeight - 2;
   }, []);
@@ -1645,7 +1711,11 @@ export function useAppLogic(props: AppLogicProps) {
   const hasApiKeyRef = useRef(initialHasApiKey);
   const showApiKeyModalRef = useRef(false);
   const queuedMessagesRef = useRef<QueuedMessage[]>([]);
-  const processMessageRef = useRef<(text: string, displayText?: string) => Promise<void> | void>(() => {});
+  const processMessageRef = useRef<
+    (text: string, displayText?: string, internalActivity?: boolean | "autopilot") => Promise<void> | void
+  >(() => {});
+  // Host autopilot step for an orchestrator-role /ideal run; assigned below `processMessage`.
+  const idealAutopilotStepRef = useRef<(turn: { error?: string | null; transient?: boolean }) => void>(() => {});
   const [queuedMessages, setQueuedMessages] = useState<string[]>([]);
   const modeInfoRef = useRef<(typeof MODES)[number]>(MODES[0]);
   const activeRunIdRef = useRef(0);
@@ -1919,6 +1989,21 @@ export function useAppLogic(props: AppLogicProps) {
       case "not-now":
         dismissEeConnectCard(true);
         return;
+      case "setup-local":
+        setEeConnectMode("validating");
+        setEeConnectError(null);
+        void (async () => {
+          const result = await connectSetupLocalEE(defaultEeConnectDeps());
+          if (result.ok) {
+            statusBarStore.setState({ ee_status: "ok" });
+            pushToast("info", "Local Experience Engine connected — recall is live for this session.");
+            dismissEeConnectCard(false);
+          } else {
+            setEeConnectError(result.error);
+            setEeConnectMode("actions");
+          }
+        })();
+        return;
     }
   }, [dismissEeConnectCard, pushToast]);
 
@@ -2133,35 +2218,9 @@ export function useAppLogic(props: AppLogicProps) {
     : [...modelList];
 
   const filteredModelIds = filteredModels.map((m) => m.id);
-  // Autocomplete shows the curated primary surface. When the user types a
-  // query we widen the search to ALL items (including hidden ones) so power
-  // users can still discover commands that were intentionally dehoisted.
-  const filteredSlashItems = slashSearchQuery
-    ? (() => {
-        const q = slashSearchQuery.toLowerCase();
-        // Rank by exactness so the command the user TYPED wins: exact label/id
-        // (0) > label/id prefix (1) > label substring (2) > description
-        // substring (3). Without ranking, a command whose DESCRIPTION contains
-        // the query (e.g. /ee "…status…") sorts above the exact match the user
-        // typed (/status) and Enter runs the wrong command. See VERIFY F5/F6.
-        const rank = (item: SlashMenuItem): number => {
-          const label = item.label.toLowerCase();
-          const id = item.id.toLowerCase();
-          if (label === q || id === q) return 0;
-          if (label.startsWith(q) || id.startsWith(q)) return 1;
-          if (label.includes(q)) return 2;
-          if (item.description.toLowerCase().includes(q)) return 3;
-          return 99;
-        };
-        return SLASH_MENU_ITEMS.map((item, i) => ({ item, r: rank(item), i }))
-          .filter((x) => x.r < 99)
-          .sort((a, b) => a.r - b.r || a.i - b.i)
-          .map((x) => x.item);
-      })()
-    : // Empty query (just "/"): primary surface first, then the rest so the
-      // full command set is reachable by arrow-scroll — the dropdown viewport
-      // scrolls, keeping the splash lean while nothing stays unreachable.
-      SLASH_MENU_ITEMS_ARROW_ORDER;
+  // Autocomplete shows the curated primary surface; a typed query widens the
+  // ranked search to ALL items (see filterSlashMenuItems).
+  const filteredSlashItems = filterSlashMenuItems(slashSearchQuery);
   const slashInputIsMatched = useMemo(() => {
     if (!showSlashMenu) return false;
     // Match the LEADING command token, not the whole query, so the composer
@@ -2221,7 +2280,7 @@ export function useAppLogic(props: AppLogicProps) {
     setSandboxSettingsEditing(null);
     setSandboxSettingsEditBuffer("");
     setShowSandboxPicker(true);
-  }, []);
+  }, [setSandboxSettingsFocusIndex]);
 
   const openWalletPicker = useCallback(() => {
     setWalletFocusIndex(0);
@@ -2229,7 +2288,7 @@ export function useAppLogic(props: AppLogicProps) {
     setShowWalletPicker(true);
     // Wallet UI disabled — Stripe billing pending.
     setWalletDisplayInfo({ address: null, ethBalance: null, usdcBalance: null });
-  }, []);
+  }, [setWalletFocusIndex]);
 
   const toggleProviderEnabled = useCallback(
     (provider: ProviderId) => {
@@ -2261,8 +2320,8 @@ export function useAppLogic(props: AppLogicProps) {
       setDefaultProvider(provider);
       setDefaultProviderState(provider);
       agent.setModel(modelId);
-      setModel(modelId);
-      statusBarStore.setState({ model: modelId, provider });
+      setModel(agent.getModel());
+      statusBarStore.setState({ model: agent.getModel(), provider });
       saveProjectSettings({ model: modelId });
       saveUserSettings({ defaultModel: modelId, defaultProvider: provider });
     },
@@ -2304,10 +2363,14 @@ export function useAppLogic(props: AppLogicProps) {
     }
     setApiKeyPrompt({ ...apiKeyPrompt, saving: true, error: null });
     try {
-      const ok = await saveProviderCredentials(apiKeyPrompt.provider, {
-        apiKey: key,
-        ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
-      });
+      const ok = await saveProviderCredentials(
+        apiKeyPrompt.provider,
+        {
+          apiKey: key,
+          ...(step === "workspace" ? { workspaceId: apiKeyPrompt.value.trim() } : {}),
+        },
+        agent,
+      );
       if (!ok) {
         setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: "Could not store credentials. Please retry setup." });
         return;
@@ -2326,7 +2389,7 @@ export function useAppLogic(props: AppLogicProps) {
       console.error(`[providers] ${apiKeyPrompt.provider} credential setup failed: ${(e as Error).message}`);
       setApiKeyPrompt({ ...apiKeyPrompt, saving: false, error: (e as Error).message });
     }
-  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider]);
+  }, [apiKeyPrompt, refreshProvidersWithKey, setAsDefaultProvider, agent]);
 
   const startProviderOAuth = useCallback(
     async (provider: ProviderId, activateAfterLogin = false) => {
@@ -2352,24 +2415,14 @@ export function useAppLogic(props: AppLogicProps) {
         if (attempt.signal.aborted || oauthCancelRef.current) return;
         const { saveTokens } = await import("../providers/auth/token-store.js");
         await saveTokens(provider, tokens);
-        // Exclusivity: OAuth login clears any stored API key for this provider.
-        try {
-          const { clearEnvVar } = await import("../providers/env-store.js");
-          const { ENV_BY_PROVIDER } = await import("../providers/keychain.js");
-          clearEnvVar(ENV_BY_PROVIDER[provider]);
-        } catch (err) {
-          console.error(
-            `[providers] could not clear the stored ${provider} key after OAuth login: ${
-              err instanceof Error ? err.message : String(err)
-            }`,
-          );
-        }
+        // Keep the configured API key as a subscription fallback.
         // The factory bakes in the auth it saw when it was built, so the tokens
         // we just saved reach nothing until it is rebuilt — that is why signing
         // in only took effect after restarting the session.
         try {
           const { rewarmProviderFactory } = await import("../providers/warm.js");
           await rewarmProviderFactory(provider);
+          if (agent.getProviderId() === provider) await agent.refreshAuthentication();
         } catch (err) {
           console.error(
             `[providers] ${provider} signed in but its factory could not be rebuilt; a restart may be needed: ${
@@ -2598,6 +2651,28 @@ export function useAppLogic(props: AppLogicProps) {
     void agent
       .getBackgroundJobSnapshot()
       .then((snap) => {
+        // Human approvals must progress even while main is awaiting a worker.
+        // Snapshot polling is independent of model notification consumption.
+        setPendingPaymentApproval((current) => {
+          if (current && !current.workerApproval) return current;
+          const pending = snap.workerApprovals ?? [];
+          if (current?.workerApproval && pending.some((r) => r.id === current.workerApproval!.id)) return current;
+          const request = pending.find((r) => !workerApprovalDecisionsRef.current.has(r.id));
+          return request
+            ? {
+                url: `${request.jobId}: ${request.toolName}`,
+                description: `${request.preview}\ncall=${request.toolCallId}\nsha256=${request.inputDigest}\ndeadline=${request.deadlineAt}`,
+                security: "",
+                securityLabel: "",
+                securityUrl: "",
+                amount: "",
+                network: "",
+                asset: "",
+                selected: 0,
+                workerApproval: request,
+              }
+            : null;
+        });
         // Polled every tick — only a real change may re-render the rail.
         const key = JSON.stringify(snap);
         if (key === backgroundSnapshotKeyRef.current) return;
@@ -2609,7 +2684,7 @@ export function useAppLogic(props: AppLogicProps) {
           error: err instanceof Error ? err.message : String(err),
         });
       });
-  }, [agent]);
+  }, [agent, setPendingPaymentApproval]);
   const agentActivities = useMemo(
     () => collectAgentActivities(messages, activeToolCalls, backgroundSnapshot),
     [messages, activeToolCalls, backgroundSnapshot],
@@ -3225,7 +3300,7 @@ export function useAppLogic(props: AppLogicProps) {
       setActiveToolCalls([]);
       setTimeout(scrollToBottom, 10);
     },
-    [scrollToBottom],
+    [scrollToBottom, setPqs],
   );
 
   const syncTelegramTurnEntries = useCallback((activeTurn: ActiveTurnState) => {
@@ -3340,9 +3415,11 @@ export function useAppLogic(props: AppLogicProps) {
   // ONLY from the model's tool input; the CLI synthesises nothing) and blocks
   // until the human answers or dismisses. The resolved string becomes the tool
   // result the agent reads to decide its next step.
-  useEffect(() => {
-    agent.setAskUserHandler(async (info: AskUserAskInfo) => {
-      return new Promise<string>((resolve) => {
+  // The same card also serves UI-initiated questions (/skill-create), so the
+  // opener is shared: answer/Esc drain through askUserResolversRef either way.
+  const openAskUserCard = useCallback(
+    (info: AskUserAskInfo) =>
+      new Promise<string>((resolve) => {
         const qid = `ask-user-${Date.now()}`;
         askUserResolversRef.current.set(qid, resolve);
         const question = buildAskUserQuestion(info, qid);
@@ -3358,16 +3435,166 @@ export function useAppLogic(props: AppLogicProps) {
             optionCount: question.options?.length ?? 0,
             defaultIndex: question.defaultIndex ?? 0,
           });
-        } catch {
-          /* best-effort */
+        } catch (err) {
+          logger.warn("ui", "[ask-user] askcard-open harness event failed", {
+            questionId: qid,
+            error: err instanceof Error ? err.message : String(err),
+          });
         }
-      });
-    });
+      }),
+    [setPendingCouncilQuestionSync, setCouncilCardStateSync],
+  );
+  useEffect(() => {
+    agent.setAskUserHandler(openAskUserCard);
     return () => {
       agent.setAskUserHandler(null);
       askUserResolversRef.current.clear();
     };
-  }, [agent, setPendingCouncilQuestionSync, setCouncilCardStateSync]);
+  }, [agent, openAskUserCard]);
+
+  // Safe-mode approval for main's own tool calls (read_file/grep). The tool's
+  // execute awaits this promise INSIDE the live turn, so approve → the tool runs
+  // and its result reaches the model; deny → a denial result. Replaces the old
+  // SDK pause + "[Payment approved]" resume that left the call without a result.
+  const toolApprovalCard = useCallback(
+    (info: ToolApprovalAskInfo) => ({
+      url: info.toolName,
+      description: info.preview,
+      security: "",
+      securityLabel: "",
+      securityUrl: "",
+      amount: "",
+      network: "",
+      asset: "",
+      toolApproval: info,
+      selected: 0,
+    }),
+    [],
+  );
+  // Harness events for the approval card: it blocks a turn on a human exactly
+  // like a question card, so it announces itself with askcard-open (see
+  // approval-card-events.ts) and closes with answered / cancel / withdrawn.
+  // `approvalEventIdRef` is the id of the card whose open event is still unclosed.
+  const approvalEventIdRef = useRef<string | null>(null);
+  const closeApprovalEvent = useCallback(
+    (
+      close:
+        | { kind: "answered"; allowed: boolean }
+        | { kind: "cancel" }
+        | { kind: "withdrawn"; reason: string; notice: string },
+      onlyQuestionId?: string,
+    ) => {
+      const questionId = approvalEventIdRef.current;
+      if (!questionId || (onlyQuestionId && onlyQuestionId !== questionId)) return;
+      approvalEventIdRef.current = null;
+      try {
+        if (close.kind === "answered") {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-answered",
+            questionId,
+            answerKind: "choice",
+            answerText: close.allowed ? "allow" : "deny",
+          });
+        } else if (close.kind === "cancel") {
+          agentRuntime?.emitEvent({ t: "event", kind: "askcard-cancel", questionId });
+        } else {
+          agentRuntime?.emitEvent({
+            t: "event",
+            kind: "askcard-withdrawn",
+            questionId,
+            reason: close.reason,
+            notice: close.notice,
+          });
+        }
+      } catch (err) {
+        logger.warn("ui", "[approval-card] close harness event failed", {
+          questionId,
+          closeKind: close.kind,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [],
+  );
+  useEffect(() => {
+    const open = approvalOpenEvent(pendingPaymentApproval);
+    const openId = approvalEventIdRef.current;
+    // Same card (Allow/Deny toggle replaces the object, not the identity).
+    if (openId && openId === open?.questionId) return;
+    // The previous card went away without a recorded answer (worker request
+    // expired, replaced by another approval, agent swap).
+    closeApprovalEvent({
+      kind: "withdrawn",
+      reason: "card-removed",
+      notice: "Approval card removed before an answer was recorded.",
+    });
+    if (!open) return;
+    approvalEventIdRef.current = open.questionId;
+    try {
+      agentRuntime?.emitEvent(open);
+    } catch (err) {
+      logger.warn("ui", "[approval-card] askcard-open harness event failed", {
+        questionId: open.questionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }, [pendingPaymentApproval, closeApprovalEvent]);
+  const settleToolApproval = useCallback(
+    (info: ToolApprovalAskInfo, verdict: "allow" | "deny") => {
+      const queue = toolApprovalQueueRef.current;
+      const idx = queue.findIndex((entry) => entry.info === info);
+      if (idx < 0) {
+        logger.file("warn", "ui", "Tool approval settled twice or after reset — ignored", {
+          toolName: info.toolName,
+          toolCallId: info.toolCallId,
+        });
+        return;
+      }
+      const [entry] = queue.splice(idx, 1);
+      entry!.resolve(verdict);
+      const next = queue[0];
+      setPendingPaymentApproval(next ? toolApprovalCard(next.info) : null);
+    },
+    [toolApprovalCard, setPendingPaymentApproval],
+  );
+  useEffect(() => {
+    const queue = toolApprovalQueueRef.current;
+    agent.setToolApprovalHandler(
+      (info: ToolApprovalAskInfo, signal?: AbortSignal) =>
+        new Promise<"allow" | "deny">((resolve) => {
+          queue.push({ info, resolve });
+          // Show it unless another main tool approval already owns the card; a
+          // worker approval yields (the snapshot poll re-offers it afterwards).
+          setPendingPaymentApproval((current) => (current?.toolApproval ? current : toolApprovalCard(info)));
+          // The turn was cancelled while the card was open: nobody awaits the
+          // answer any more, so withdraw the card instead of leaving it stale.
+          signal?.addEventListener(
+            "abort",
+            () => {
+              if (queue.some((entry) => entry.info === info)) {
+                closeApprovalEvent(
+                  {
+                    kind: "withdrawn",
+                    reason: "turn-aborted",
+                    notice: "Turn cancelled while the tool approval was open.",
+                  },
+                  `tool-approval-${info.toolCallId}`,
+                );
+                settleToolApproval(info, "deny");
+              }
+            },
+            { once: true },
+          );
+        }),
+    );
+    return () => {
+      agent.setToolApprovalHandler(null);
+      // Never strand an awaiting execute: unmount/agent swap denies what is open.
+      for (const entry of queue.splice(0)) entry.resolve("deny");
+      setPendingPaymentApproval((current) => (current?.toolApproval ? null : current));
+    };
+  }, [agent, toolApprovalCard, settleToolApproval, closeApprovalEvent, setPendingPaymentApproval]);
 
   const finalizeActiveTurn = useCallback(
     ({ wasInterrupted = false, hadError = false }: { wasInterrupted?: boolean; hadError?: boolean } = {}) => {
@@ -3392,16 +3619,10 @@ export function useAppLogic(props: AppLogicProps) {
       if (!wasInterrupted && !hadError) {
         if (activeTurn.kind === "local" && activeTurn.agent.getSessionId()) {
           setMessages((prev) => {
-            const fresh = activeTurn.agent.getChatEntries();
-            let prevUserIdx = 0;
-            for (let i = 0; i < fresh.length; i++) {
-              if (fresh[i]!.type !== "user") continue;
-              while (prevUserIdx < prev.length && prev[prevUserIdx]!.type !== "user") prevUserIdx++;
-              if (prevUserIdx < prev.length) {
-                fresh[i] = { ...fresh[i]!, content: prev[prevUserIdx]!.content };
-                prevUserIdx++;
-              }
-            }
+            // Saved history is the base; host-local output (`local` entries:
+            // /help, /ideal status, …) was never saved and is merged back in by
+            // timestamp, else this rebuild deleted it (see utils/local-entries.ts).
+            const fresh = reconcileTranscript(activeTurn.agent.getChatEntries(), prev);
             // The persisted transcript has one tool_result per call and no
             // tool_group, so this resync used to wipe the group the live turn
             // built and leave a flat "→ <tool>" line per call on screen — the
@@ -3949,8 +4170,12 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [openApiKeyModal, startTelegramBridge]);
 
+  // Raw, stdin and semantic key listeners share this owner snapshot. Keep it
+  // stable for the key that dismisses a modal, even when its state refs close.
+  const modalKeyboardOwnerRef = useRef<ModalSurfaceId | null>(null);
   const interruptActiveRun = useCallback(
     (key?: KeyEvent) => {
+      if (modalKeyboardOwnerRef.current || showSlashMenuRef.current) return false;
       // S5 — steer mode owns Escape: backing out of a steering instruction must
       // not abort the debate you were about to steer. Guarded HERE as well as in
       // the key reducer because this runs from a separate `_internalKeyInput`
@@ -3979,6 +4204,18 @@ export function useAppLogic(props: AppLogicProps) {
       // guard the typing-jump listener already has.
       if (pendingCouncilQuestionRef.current || preflightCardStateRef.current) {
         return false;
+      }
+      // Between turns an armed /ideal autopilot is still running (waiting for a
+      // worker, or about to start the next turn): Esc is the user taking over.
+      if (!isProcessingRef.current && agent.isIdealAutopilotRunning()) {
+        agent.yieldIdealAutopilot("user_interrupt");
+        setMessages((prev) => [
+          ...prev,
+          buildAssistantEntry(`⟲ /ideal autopilot stopped — ${AUTOPILOT_STOP_TEXT.user_interrupt}`, { local: true }),
+        ]);
+        key?.preventDefault();
+        key?.stopPropagation();
+        return true;
       }
       if (!isProcessingRef.current) return false;
       key?.preventDefault();
@@ -4125,11 +4362,17 @@ export function useAppLogic(props: AppLogicProps) {
     replacePasteBlocks([]);
     queuedMessagesRef.current = [];
     setQueuedMessages([]);
-  }, [agent, clearLiveTurnUi, replacePasteBlocks]);
+  }, [agent, clearLiveTurnUi, replacePasteBlocks, setPqs]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: getSide, resolveStyle, storeQuote are stable hooks/callbacks that do not need to be in the dep array — adding them would cause unnecessary re-creation of processMessage on every render
   const processMessage = useCallback(
-    async (text: string, displayText?: string, images?: Array<{ path: string; mediaType: string; base64: string }>) => {
+    async (
+      text: string,
+      displayText?: string,
+      images?: Array<{ path: string; mediaType: string; base64: string }>,
+      // true = hidden host turn (background wake); "autopilot" = host turn that stays visible in the transcript.
+      internalActivity: boolean | "autopilot" = false,
+    ) => {
       if (!text.trim() || isProcessingRef.current) return;
       if (taskListClearTimerRef.current) {
         clearTimeout(taskListClearTimerRef.current);
@@ -4141,20 +4384,22 @@ export function useAppLogic(props: AppLogicProps) {
       isProcessingRef.current = true;
       setIsProcessing(true);
 
+      // No turn is in flight here (guarded above), so an aborted controller still
+      // on the agent is the corpse of a killed turn — drop it or this turn throws
+      // in its routing preamble before it records anything.
+      agent.releaseStaleAbort();
+
       const sessionInfo = agent.getSessionInfo();
       if (sessionInfo?.updatedAt) {
         const lastUpdated = new Date(sessionInfo.updatedAt).getTime();
         const diffMs = Date.now() - lastUpdated;
         const diffMins = Math.floor(diffMs / (60 * 1000));
         if (diffMins >= 10) {
-          pushToast(
-            "warn",
-            `⚠️ Lần tương tác cuối cách đây ${diffMins} phút. Cache của DeepSeek có thể đã bị giải phóng (Cache Miss).`,
-          );
+          pushToast("info", `Đang tiếp tục phiên sau ${diffMins} phút không hoạt động.`);
         }
       }
 
-      if (!sessionTitle)
+      if (!sessionTitle && !internalActivity)
         agent
           .generateTitle((displayText ?? text).trim())
           .then(setSessionTitle)
@@ -4162,24 +4407,25 @@ export function useAppLogic(props: AppLogicProps) {
       await coordinatorRef.current.run(async () => {
         const color = modeInfoRef.current.color;
         beginLiveTurn({ kind: "local", agent, modeColor: color });
-        setMessages((prev) => [...prev, buildUserEntry((displayText ?? text).trim(), { modeColor: color })]);
+        setMessages((prev) => [
+          ...prev,
+          buildUserEntry((displayText ?? text).trim(), { modeColor: color, internal: internalActivity === true }),
+        ]);
         setTimeout(scrollToBottom, 50);
         await new Promise((r) => setTimeout(r, 0));
         let turnHadError = false;
+        let turnErrorText = "";
+        // True while every error this turn was a turn-watchdog kill (transient) — the
+        // /ideal autopilot retries such a turn instead of ending the run.
+        let turnErrorsAllWatchdog = true;
         let turnHadAuthError = false;
         try {
-          // Register EE sink BEFORE the stream loop so experience_warning/injected chunks
-          // reach the TUI render path. Deregistered in finally to prevent stale closure.
-          setActiveEeYield((eeChunk) => {
-            if (eeChunk.type === "experience_warning") {
-              applyLocalAssistantDelta(
-                `\n⚠ [Experience] ${eeChunk.experienceWarning?.message ?? eeChunk.content ?? ""}\nWhy: ${eeChunk.experienceWarning?.why ?? ""}\n`,
-              );
-            } else if (eeChunk.type === "experience_injected") {
-              applyLocalAssistantDelta(formatExperienceInjectedBlock(eeChunk.experienceInjected ?? {}));
-            }
-          });
-          for await (const chunk of agent.processMessage(text.trim(), undefined, images)) {
+          // Main retains the full EE guidance; UI decoration is file-only.
+          setActiveEeYield(recordInternalExperience);
+          for await (const chunk of agent.processMessage(text.trim(), undefined, images, {
+            internalActivity: internalActivity === true,
+            autopilotContinuation: internalActivity === "autopilot",
+          })) {
             // A council spliced into a NORMAL agent turn (convene_council /
             // auto-council route through tool-engine's runCouncilV2, not through
             // the /council or /ideal slash loops) delivers its chunks here. This
@@ -4262,29 +4508,6 @@ export function useAppLogic(props: AppLogicProps) {
                     },
                   ]);
                   setTimeout(scrollToBottom, 10);
-                }
-                break;
-              case "tool_approval_request":
-                if (chunk.toolCall && chunk.approvalId) {
-                  let args: Record<string, string> = {};
-                  try {
-                    args = JSON.parse(chunk.toolCall.function.arguments);
-                  } catch {
-                    /* ignore */
-                  }
-                  const pc = chunk.paymentPrecheck;
-                  setPendingPaymentApproval({
-                    url: args?.url ?? "",
-                    description: pc?.description ?? "",
-                    security: pc?.security ?? "",
-                    securityLabel: pc?.securityLabel ?? "",
-                    securityUrl: pc?.securityUrl ?? "",
-                    amount: pc?.amount ?? "",
-                    network: pc?.network ?? "",
-                    asset: pc?.asset ?? "",
-                    approvalId: chunk.approvalId,
-                    selected: 0,
-                  });
                 }
                 break;
               case "council_question":
@@ -4462,6 +4685,8 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
               case "error":
                 turnHadError = true;
+                turnErrorText ||= (chunk.content || "Unknown error").slice(0, 300);
+                if (!chunk.isWatchdogStall) turnErrorsAllWatchdog = false;
                 if (chunk.isAuthError) {
                   turnHadAuthError = true;
                 }
@@ -4475,12 +4700,8 @@ export function useAppLogic(props: AppLogicProps) {
                 });
                 break;
               case "experience_warning":
-                applyLocalAssistantDelta(
-                  `\n⚠ [Experience] ${chunk.experienceWarning?.message ?? chunk.content ?? ""}\nWhy: ${chunk.experienceWarning?.why ?? ""}\n`,
-                );
-                break;
               case "experience_injected":
-                applyLocalAssistantDelta(formatExperienceInjectedBlock(chunk.experienceInjected ?? {}));
+                recordInternalExperience(chunk);
                 break;
               case "halt":
                 if (chunk.haltChunk) {
@@ -4545,16 +4766,26 @@ export function useAppLogic(props: AppLogicProps) {
                 break;
             }
           }
-        } catch {
+        } catch (turnErr) {
           turnHadError = true;
+          turnErrorsAllWatchdog = false;
+          // A turn that throws used to leave only "An unexpected error occurred." on
+          // screen and nothing in any log (session 7f24048ad75d: 21 turns died this way).
+          const turnErrMessage = turnErr instanceof Error ? turnErr.message : String(turnErr);
+          turnErrorText ||= `unexpected error: ${turnErrMessage}`.slice(0, 300);
+          logger.error("ui", "processMessage turn threw", {
+            message: turnErrMessage,
+            stack: (turnErr as Error)?.stack?.split("\n").slice(0, 3),
+          });
           if (!isStale()) {
-            contentAccRef.current += "\nAn unexpected error occurred.";
+            const shown = `An unexpected error occurred: ${turnErrMessage.slice(0, 200)}`;
+            contentAccRef.current += `\n${shown}`;
             setStreamContent(contentAccRef.current);
             agentRuntime?.emitEvent({
               t: "event",
               kind: "toast",
               level: "error",
-              text: "An unexpected error occurred.",
+              text: shown,
             });
           }
         } finally {
@@ -4589,6 +4820,13 @@ export function useAppLogic(props: AppLogicProps) {
           // commands (it streams text to the model), so the compaction must be
           // performed inline here — not by re-dispatching "/compact" as a prompt.
           const finalContent = contentAccRef.current.trim();
+          // A turn of an armed /ideal run ended: the host decides whether to start the
+          // next one. Not for a proactive compaction — its resume turn ends through here.
+          if (!wasInterrupted && !finalContent.startsWith("/compact"))
+            idealAutopilotStepRef.current({
+              error: turnHadError ? turnErrorText : null,
+              transient: turnHadError && turnErrorsAllWatchdog,
+            });
           if (finalContent.startsWith("/compact")) {
             const _pc = detectProactiveCompactRequest(finalContent);
             const _resume = buildCompactResumeMessage(_pc.instructions);
@@ -4611,6 +4849,7 @@ export function useAppLogic(props: AppLogicProps) {
                     appendCompaction(sessionId, nextSeq, cr.summary, cr.tokensBeforeCompress);
                   }
                   agent.setMessages([createCompactionSummaryMessage(cr.summary)]);
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
@@ -4659,8 +4898,59 @@ export function useAppLogic(props: AppLogicProps) {
     }
   }, [hasApiKey, initialMessage, processMessage]);
   useEffect(() => {
-    processMessageRef.current = processMessage;
+    processMessageRef.current = (text, displayText, internalActivity) =>
+      processMessage(text, displayText, undefined, internalActivity);
   }, [processMessage]);
+
+  // Host autopilot of an orchestrator-role /ideal run (orchestrator/ideal-autopilot.ts).
+  // Called when a turn of the run ends. The agent decides from host-observable facts
+  // (root goal complete? budget? progress? workers running?); this only applies it:
+  // start the next turn as a visible host turn, or say why the run stopped. A no-op
+  // for any session without an armed autopilot.
+  useEffect(() => {
+    idealAutopilotStepRef.current = (turn) => {
+      // A turn (typed, queued, another host turn) already owns the composer: the user is driving.
+      if (isProcessingRef.current) return;
+      // Something the user typed during the turn is still queued (the /ideal slash turn does not drain the queue): it wins.
+      if (queuedMessagesRef.current.length > 0) {
+        agent.yieldIdealAutopilot("user_message");
+        finishTurnProcessing();
+        return;
+      }
+      void (async () => {
+        const awaitingHuman =
+          pendingCouncilQuestionRef.current !== null ||
+          preflightCardStateRef.current !== null ||
+          askUserResolversRef.current.size > 0 ||
+          toolLoopCapResolversRef.current.size > 0 ||
+          safetyOverrideResolversRef.current.size > 0;
+        try {
+          const decision = await agent.idealAutopilotAfterTurn({
+            error: turn.error ?? null,
+            transient: turn.transient === true,
+            awaitingHuman,
+          });
+          if (decision.action === "continue") {
+            // Re-check after the await: the user may have typed or pressed Esc while the host measured.
+            if (isProcessingRef.current || !agent.isIdealAutopilotRunning()) return;
+            void processMessageRef.current(decision.prompt, decision.label, "autopilot");
+          } else if (decision.action === "stop") {
+            const text = `⟲ /ideal autopilot stopped — ${AUTOPILOT_STOP_TEXT[decision.reason]}${
+              decision.detail && decision.detail !== AUTOPILOT_STOP_TEXT[decision.reason] ? ` (${decision.detail})` : ""
+            }\n`;
+            setMessages((prev) => [...prev, buildAssistantEntry(text, { local: true })]);
+            pushToast(decision.reason === "complete" ? "info" : "warn", text.trim());
+            setTimeout(scrollToBottom, 10);
+          }
+        } catch (err) {
+          logger.error("ui", "/ideal autopilot step failed", {
+            error: err instanceof Error ? err.message : String(err),
+            stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+          });
+        }
+      })();
+    };
+  }, [agent, finishTurnProcessing, pushToast, scrollToBottom]);
 
   // Scaffold-checkpoint integration — wraps initNewProject() so a single helper
   // serves both submit branches (design-preview + bb-template) and the R-key
@@ -4791,7 +5081,7 @@ export function useAppLogic(props: AppLogicProps) {
         );
       }
     },
-    [agent],
+    [agent, setInitNewForm],
   );
   useEffect(
     () =>
@@ -4827,6 +5117,7 @@ export function useAppLogic(props: AppLogicProps) {
             ...notifications.map((message) => ({
               type: "assistant" as const,
               content: message,
+              internal: true,
               timestamp: new Date(),
             })),
           ]);
@@ -4836,7 +5127,8 @@ export function useAppLogic(props: AppLogicProps) {
           if (isBackgroundAutoWakeEnabled() && !isProcessingRef.current) {
             void processMessageRef.current(
               buildBackgroundWakePrompt(notifications),
-              backgroundWakeLabel(notifications.length),
+              backgroundWakeLabel(notifications),
+              true,
             );
           }
         })
@@ -5015,6 +5307,62 @@ export function useAppLogic(props: AppLogicProps) {
         processMessage(buildCustomSubagentSlashPrompt(customSubagentCommand.agentName, customSubagentCommand.prompt));
         return true;
       }
+      // /skill-create [name] [--project|--user] [description]: asks (askcard)
+      // only for what was not typed, then writes the SKILL.md scaffold.
+      if (c === "/skill-create" || c.startsWith("/skill-create ")) {
+        if (pendingCouncilQuestionRef.current) {
+          pushToast("warn", "Answer the open question first, then run /skill-create again.");
+          return true;
+        }
+        const argsText = cmd.trim().slice("/skill-create".length);
+        // Also makes the transcript (where askcards render) mount on a fresh session.
+        setMessages((prev) => [
+          ...prev,
+          buildUserEntry(cmd.trim()),
+          buildAssistantEntry("Creating an Agent Skill — answer the questions below (Esc cancels)."),
+        ]);
+        runSkillCreateFlow({
+          cwd: agent.getCwd(),
+          argsText,
+          ask: async (q) => {
+            const answer = await openAskUserCard({
+              question: q.question,
+              context: q.context,
+              options: q.options,
+              defaultIndex: q.defaultIndex,
+            });
+            return answer === ASK_USER_DISMISSED ? null : answer;
+          },
+        })
+          .then((result) => {
+            setMessages((prev) => [...prev, buildAssistantEntry(result.message)]);
+            if (result.ok) pushToast("info", "Skill created");
+          })
+          .catch((err: unknown) => {
+            const emsg = err instanceof Error ? err.message : String(err);
+            logger.warn("ui", "[/skill-create] flow failed", { error: emsg });
+            setMessages((prev) => [...prev, buildAssistantEntry(`/skill-create failed: ${emsg}`)]);
+          });
+        return true;
+      }
+      // /skill <name> [args] and /<skill-name> [args]: the rendered SKILL.md
+      // body becomes this turn's message. Commands that already own a name win.
+      const skillInvocation = resolveSkillSlashCommand(cmd, agent.getCwd(), (name) => {
+        return listSlashCommands().includes(name) || SLASH_MENU_ITEMS.some((item) => item.id === name);
+      });
+      if (skillInvocation) {
+        if (skillInvocation.kind === "error") {
+          setMessages((prev) => [...prev, buildAssistantEntry(skillInvocation.text)]);
+          return true;
+        }
+        if (isProcessingRef.current) {
+          queuedMessagesRef.current.push({ text: skillInvocation.message, displayText: skillInvocation.display });
+          setQueuedMessages(queuedMessagesRef.current.map((msg) => msg.displayText));
+          return true;
+        }
+        processMessage(skillInvocation.message, skillInvocation.display);
+        return true;
+      }
       // Plan 06: fallback to slash registry (dispatchSlash) for custom commands like /route
       if (c.startsWith("/")) {
         // Parse the ARGUMENTS off the raw input, not off `c`. `c` is
@@ -5043,6 +5391,8 @@ export function useAppLogic(props: AppLogicProps) {
           sessionId: agent.getSessionId() ?? undefined,
           getLiveEntries: () => messages,
           argsText,
+          getPermissionMode: () => agent.effectivePermissionMode,
+          setPermissionMode: (mode) => agent.setPermissionModeFromUser(mode),
         })
           .then(async (result) => {
             if (result === null) {
@@ -5070,6 +5420,7 @@ export function useAppLogic(props: AppLogicProps) {
                 }
                 const summaryMsg = createCompactionSummaryMessage(cr.summary);
                 agent.setMessages([summaryMsg]);
+                await agent.carryDelegationLedgerAfterCompaction();
                 setMessages(groupToolEntries(agent.getChatEntries()));
                 setMessages((prev) => [
                   ...prev,
@@ -5096,12 +5447,19 @@ export function useAppLogic(props: AppLogicProps) {
                     revertLatestCompaction(sessionId);
                   }
                   agent.setMessages(restoredMessages);
+                  // The restored pre-compaction history may carry a stale ledger snapshot; replace it
+                  // with the live registry state (same contract as /compact).
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   const text = lines.slice(2).join("\n");
                   setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                   return;
                 } catch (e) {
-                  // fallback
+                  // Fall through to the plain-text restore below.
+                  logger.warn("ui", "[/expand] JSON history restore failed; showing plain-text context", {
+                    sessionId,
+                    error: e instanceof Error ? e.message : String(e),
+                  });
                 }
               }
               const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
@@ -5124,6 +5482,7 @@ export function useAppLogic(props: AppLogicProps) {
                   seq === null
                     ? "No user message to pin."
                     : `Pinned user message (seq=${seq}). It will survive compaction.`,
+                  { local: true },
                 ),
               ]);
               return;
@@ -5135,6 +5494,7 @@ export function useAppLogic(props: AppLogicProps) {
                 ...prev,
                 buildAssistantEntry(
                   ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                  { local: true },
                 ),
               ]);
               return;
@@ -5144,7 +5504,7 @@ export function useAppLogic(props: AppLogicProps) {
               const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+                buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`, { local: true }),
               ]);
               return;
             }
@@ -5152,7 +5512,9 @@ export function useAppLogic(props: AppLogicProps) {
               const seqs = agent.getPinnedSeqs();
               setMessages((prev) => [
                 ...prev,
-                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+                buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`, {
+                  local: true,
+                }),
               ]);
               return;
             }
@@ -5181,13 +5543,22 @@ export function useAppLogic(props: AppLogicProps) {
                 payload.subcommand === "start"
                   ? `/ideal "${payload.idea ?? ""}"`
                   : `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`;
+              // status/abort are answered locally and at once; announcing a
+              // "Product loop starting…" for them described something that never ran.
+              const startsLoop = payload.subcommand !== "status" && payload.subcommand !== "abort";
+              const startingLine = startsLoop
+                ? "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n"
+                : "";
+              // status/abort never reach the model, so neither the echo nor the
+              // streamed answer is in saved history: mark them host-local so the
+              // end-of-turn rebuild keeps them (utils/local-entries.ts).
+              const localOnly = !startsLoop;
               setMessages((prev) => [
                 ...prev,
-                buildUserEntry(heading),
+                buildUserEntry(heading, localOnly ? { local: true } : undefined),
                 buildAssistantEntry(
-                  warningPrefix
-                    ? `${warningPrefix}\nProduct loop starting… (initializing council + discovery — first phase usually appears within 30s)\n`
-                    : "Product loop starting… (initializing council + discovery — first phase usually appears within 30s)\n",
+                  warningPrefix ? `${warningPrefix}\n${startingLine}` : startingLine,
+                  localOnly ? { local: true } : undefined,
                 ),
               ]);
               // Fresh product-loop run — clear any persisted council UI (phases,
@@ -5243,6 +5614,7 @@ export function useAppLogic(props: AppLogicProps) {
               // "esc to interrupt" affordance).
               isProcessingRef.current = true;
               setIsProcessing(true);
+              let slashErrorText: string | null = null;
               try {
                 const gen = (agent as any).runProductLoopV1(payload);
                 for await (const chunk of gen) {
@@ -5442,35 +5814,8 @@ export function useAppLogic(props: AppLogicProps) {
                       return { ...d, criteriaHistory, costHistory };
                     });
                   }
-                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                    });
-                  }
-                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                    });
+                  if (chunk.type === "experience_warning" || chunk.type === "experience_injected") {
+                    recordInternalExperience(chunk);
                   }
                   if (chunk.type === "halt" && chunk.haltChunk) {
                     // Surface the structured recovery card. The /ideal product-loop
@@ -5488,6 +5833,8 @@ export function useAppLogic(props: AppLogicProps) {
                       },
                     });
                   }
+                  // Not rendered here (it never was); only remembered so the /ideal autopilot stops on it.
+                  if (chunk.type === "error") slashErrorText ||= (chunk.content || "Unknown error").slice(0, 300);
                   if (chunk.type === "done") break;
                   if (process.env.MUONROI_DEBUG_LEADER === "1") {
                     process.stderr.write(`[ideal-chunk-done] type=${_chunkType}\n`);
@@ -5508,6 +5855,7 @@ export function useAppLogic(props: AppLogicProps) {
                 // Resume/Retry/Abort auto-detect the newest incomplete run (A/B)
                 // so the user never has to know the runId.
                 const errMsg = e instanceof Error ? e.message : String(e);
+                slashErrorText = errMsg.slice(0, 300);
                 const brokenSprintN =
                   payload.subcommand === "resume" ? undefined : (lastProductSprintNRef.current ?? undefined);
                 setMessages((prev) => [...prev, buildAssistantEntry(`Product loop error: ${errMsg}`)]);
@@ -5544,10 +5892,13 @@ export function useAppLogic(props: AppLogicProps) {
                 setProductStatus(null);
                 // Release the processing flag re-armed before the run so the
                 // composer returns to idle and a subsequent turn isn't blocked.
-                // Mirrors the /council finally below.
-                isProcessingRef.current = false;
-                setIsProcessing(false);
+                // Mirrors the /council finally below. finishTurnProcessing, not a bare
+                // reset: a message typed while this run was busy sits in the queue and
+                // was stranded there until some later turn happened to end.
+                finishTurnProcessing();
               }
+              // `/ideal start|resume` ran one turn of the run: the host decides about the next.
+              if (startsLoop) idealAutopilotStepRef.current({ error: slashErrorText });
               return;
             }
 
@@ -5578,17 +5929,7 @@ export function useAppLogic(props: AppLogicProps) {
               isProcessingRef.current = true;
               setIsProcessing(true);
               try {
-                // C2 (2026-08-06) — a human just typed this command, so NEITHER
-                // suppression applies: the S1 launch card asks what the run is
-                // for, and the post-debate surface (which holds the only two
-                // consumers of that intent lock — resolveRunKind and the
-                // planner/plan-review/post-plan-card path) must actually run.
-                // The old `convenePath: true, allowLaunchCard: true` showed the
-                // intent card and then skipped everything downstream of it, so
-                // picking "Implement — plan it, review it, then build" produced
-                // no planner, no PLAN.md, no review and no phase loop.
-                // Passing NO options is deliberate, not an omission — it is the
-                // same shape auto-council uses (src/orchestrator/tool-engine.ts).
+                // Main starts a durable council and yields its receipt immediately.
                 const gen = agent.runCouncilV2(topic);
                 for await (const chunk of gen) {
                   // Council emitted a chunk — clear the "Waiting for next phase"
@@ -5771,35 +6112,8 @@ export function useAppLogic(props: AppLogicProps) {
                       /* best-effort */
                     }
                   }
-                  if (chunk.type === "experience_warning" && chunk.experienceWarning) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}\n⚠ [Experience] ${chunk.experienceWarning!.message}\nWhy: ${chunk.experienceWarning!.why}\n`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(`⚠ [Experience] ${chunk.experienceWarning!.message}`)];
-                    });
-                  }
-                  if (chunk.type === "experience_injected" && chunk.experienceInjected) {
-                    setMessages((prev) => {
-                      const last = prev[prev.length - 1];
-                      if (last?.type === "assistant") {
-                        return [
-                          ...prev.slice(0, -1),
-                          {
-                            ...last,
-                            content: `${last.content ?? ""}${formatExperienceInjectedBlock(chunk.experienceInjected!)}`,
-                          },
-                        ];
-                      }
-                      return [...prev, buildAssistantEntry(formatExperienceInjectedBlock(chunk.experienceInjected!))];
-                    });
+                  if (chunk.type === "experience_warning" || chunk.type === "experience_injected") {
+                    recordInternalExperience(chunk);
                   }
                   if (chunk.type === "done") break;
                   // C (latency UX): re-arm the inter-chunk heartbeat so the long
@@ -5828,13 +6142,13 @@ export function useAppLogic(props: AppLogicProps) {
                 clearInterCardHeartbeat();
                 // Release the processing flag re-armed before the run so the
                 // composer returns to idle and a subsequent turn isn't blocked.
-                isProcessingRef.current = false;
-                setIsProcessing(false);
+                // Drains the follow-up queue too (see the /ideal finally above).
+                finishTurnProcessing();
               }
               return;
             }
 
-            setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+            setMessages((prev) => [...prev, buildAssistantEntry(result, { local: true })]);
           })
           .catch((err: unknown) => {
             // A slash handler that throws must never escape as an unhandled
@@ -5876,6 +6190,7 @@ export function useAppLogic(props: AppLogicProps) {
       setSessionPickerList,
       setSessionPickerIndex,
       setShowSessionPicker,
+      openAskUserCard,
     ],
   );
 
@@ -5912,6 +6227,7 @@ export function useAppLogic(props: AppLogicProps) {
             {
               type: "assistant",
               content: VISIBLE_SLASH_MENU_ITEMS.map((i) => `/${i.label} — ${i.description}`).join("\n"),
+              local: true,
               timestamp: new Date(),
             },
           ]);
@@ -5945,6 +6261,13 @@ export function useAppLogic(props: AppLogicProps) {
           break;
         case "update":
           runUpdateFromUi();
+          break;
+        case "skill-create":
+          handleCommand("/skill-create");
+          break;
+        case "skill":
+          inputRef.current?.clear();
+          inputRef.current?.insertText("/skill ");
           break;
         case "clear":
           agent.clearHistory();
@@ -5994,6 +6317,8 @@ export function useAppLogic(props: AppLogicProps) {
           // Dispatch to slash registry for registered commands (compact, cost, ee, route, plan, execute, discuss, expand, optimize, debug)
           dispatchSlash(item.id, [], {
             cwd: agent.getCwd(),
+            getPermissionMode: () => agent.effectivePermissionMode,
+            setPermissionMode: (mode) => agent.setPermissionModeFromUser(mode),
             tenantId: "local",
             defaultProvider: agent.getProviderId(),
             defaultModel: model,
@@ -6020,6 +6345,7 @@ export function useAppLogic(props: AppLogicProps) {
                   }
                   const summaryMsg = createCompactionSummaryMessage(cr.summary);
                   agent.setMessages([summaryMsg]);
+                  await agent.carryDelegationLedgerAfterCompaction();
                   setMessages(groupToolEntries(agent.getChatEntries()));
                   setMessages((prev) => [
                     ...prev,
@@ -6045,12 +6371,19 @@ export function useAppLogic(props: AppLogicProps) {
                       revertLatestCompaction(sessionId);
                     }
                     agent.setMessages(restoredMessages);
+                    // The restored pre-compaction history may carry a stale ledger snapshot; replace it
+                    // with the live registry state (same contract as /compact).
+                    await agent.carryDelegationLedgerAfterCompaction();
                     setMessages(groupToolEntries(agent.getChatEntries()));
                     const text = lines.slice(2).join("\n");
                     setMessages((prev) => [...prev, buildAssistantEntry(text)]);
                     return;
                   } catch (e) {
-                    // fallback
+                    // Fall through to the plain-text restore below.
+                    logger.warn("ui", "[/expand] JSON history restore failed; showing plain-text context", {
+                      sessionId,
+                      error: e instanceof Error ? e.message : String(e),
+                    });
                   }
                 }
                 const content = result.replace(/^__EXPAND__\n[^\n]*\n?/, "");
@@ -6071,6 +6404,7 @@ export function useAppLogic(props: AppLogicProps) {
                     seq === null
                       ? "No user message to pin."
                       : `Pinned user message (seq=${seq}). It will survive compaction.`,
+                    { local: true },
                   ),
                 ]);
                 return;
@@ -6082,6 +6416,7 @@ export function useAppLogic(props: AppLogicProps) {
                   ...prev,
                   buildAssistantEntry(
                     ok ? `Pinned message seq=${seq}.` : `Could not pin seq=${seq} (not found or not a user message).`,
+                    { local: true },
                   ),
                 ]);
                 return;
@@ -6091,7 +6426,7 @@ export function useAppLogic(props: AppLogicProps) {
                 const ok = Number.isFinite(seq) && agent.unpinMessageBySeq(seq);
                 setMessages((prev) => [
                   ...prev,
-                  buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`),
+                  buildAssistantEntry(ok ? `Unpinned seq=${seq}.` : `seq=${seq} was not pinned.`, { local: true }),
                 ]);
                 return;
               }
@@ -6099,7 +6434,9 @@ export function useAppLogic(props: AppLogicProps) {
                 const seqs = agent.getPinnedSeqs();
                 setMessages((prev) => [
                   ...prev,
-                  buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`),
+                  buildAssistantEntry(seqs.length === 0 ? "No pinned messages." : `Pinned seqs: ${seqs.join(", ")}`, {
+                    local: true,
+                  }),
                 ]);
                 return;
               }
@@ -6107,7 +6444,7 @@ export function useAppLogic(props: AppLogicProps) {
               // routed through handleCommand so both entry points share ONE
               // implementation. See that comment for what the removed branch did
               // differently (legacy runCouncilRound, wrong topic parse).
-              setMessages((prev) => [...prev, buildAssistantEntry(result)]);
+              setMessages((prev) => [...prev, buildAssistantEntry(result, { local: true })]);
             })
             .catch((err: unknown) => {
               // See the typed-slash .catch above: a throwing slash handler must
@@ -6253,6 +6590,8 @@ export function useAppLogic(props: AppLogicProps) {
     showTelegramPairModal,
   ]);
 
+  modalKeyboardOwnerRef.current = modalKeyboardOwner;
+
   const showPlanPanel = !!activePlan?.questions?.length;
   const planQuestions = activePlan?.questions ?? [];
   const isSinglePlan = planQuestions.length === 1 && planQuestions[0]?.type !== "multiselect";
@@ -6262,24 +6601,24 @@ export function useAppLogic(props: AppLogicProps) {
   const dismissPlan = useCallback(() => {
     setActivePlan(null);
     setPqs(initialPlanQuestionsState());
-  }, []);
+  }, [setPqs]);
 
   const submitPlanAnswers = useCallback(() => {
     if (!activePlan?.questions?.length) return;
-    const text = formatPlanAnswers(activePlan.questions, pqs.answers);
+    const text = formatPlanAnswers(activePlan.questions, pqsRef.current.answers);
     setActivePlan(null);
     setPqs(initialPlanQuestionsState());
     processMessage(text);
-  }, [activePlan, pqs.answers, processMessage]);
+  }, [activePlan, processMessage, pqsRef, setPqs]);
 
   const handlePlanSelect = useCallback(
     (q: PlanQuestion, idx: number, options: { id: string; label: string }[], showCustom: boolean) => {
       const isCustom = showCustom && idx === options.length;
       if (isCustom) {
         if (q.type === "multiselect") {
-          const customVal = pqs.customInputs[q.id] ?? "";
+          const customVal = pqsRef.current.customInputs[q.id] ?? "";
           if (customVal) {
-            const existing = (pqs.answers[q.id] as string[] | undefined) ?? [];
+            const existing = (pqsRef.current.answers[q.id] as string[] | undefined) ?? [];
             if (existing.includes(customVal)) {
               setPqs((s) => ({ ...s, answers: { ...s.answers, [q.id]: existing.filter((x) => x !== customVal) } }));
             } else {
@@ -6311,7 +6650,7 @@ export function useAppLogic(props: AppLogicProps) {
         setPqs((s) => ({ ...s, tab: s.tab + 1, selected: 0 }));
       }
     },
-    [pqs, isSinglePlan, submitPlanAnswers],
+    [pqsRef, setPqs, isSinglePlan, submitPlanAnswers],
   );
 
   const dismissBtw = useCallback(() => {
@@ -6324,6 +6663,11 @@ export function useAppLogic(props: AppLogicProps) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: setters from useMcpEditor/useModelPicker hooks are stable useState setters (stable identity across renders)
   const handleKey = useCallback(
     (key: KeyEvent) => {
+      // The approval card is read from its live ref, never the closure: an
+      // approve/deny must follow the row the user is on (see live-state.ts).
+      const approvalCardNow = pendingPaymentApprovalRef.current;
+      // Same for the init-new form: its pickers' Enter reads the live step/index.
+      const initNewFormNow = initNewFormRef.current;
       // Ctrl+G — mark the most-recent surfaced experience hints as noise.
       // Sends IRRELEVANT verdict with reason='wrong_task' for every match
       // in the last intercept batch. Default to wrong_task because we can't
@@ -6357,7 +6701,11 @@ export function useAppLogic(props: AppLogicProps) {
       // summary/tail and the full back-and-forth. Global (unbound elsewhere); a
       // no-op visually when no debate turns exist, so an unconditional toggle is
       // safe and avoids threading councilMessages into this useCallback.
-      if (key.name === "o" && key.ctrl && !key.meta) {
+      // NOT while /mcp is open: its own ctrl+o is "OAuth sign-in", and this
+      // handler runs first — its unconditional return made that key dead
+      // (harness mcp-oauth.spec: ctrl+o on a selected server never reached
+      // signInMcpOAuth — zero DCR registrations at the fixture server).
+      if (key.name === "o" && key.ctrl && !key.meta && !showMcpModalRef.current) {
         setCouncilTranscriptExpanded((v) => !v);
         return;
       }
@@ -6500,7 +6848,7 @@ export function useAppLogic(props: AppLogicProps) {
       // when the prompt input is empty, so End/PageUp/PageDown still edit text
       // while composing. End re-pins to the live tail; PageUp/PageDown page the
       // transcript by one viewport without disturbing the composer.
-      if (isScrollLockEnabled() && !key.ctrl && !key.meta) {
+      if (!approvalCardNow?.workerApproval && isScrollLockEnabled() && !key.ctrl && !key.meta) {
         const composerEmpty = !(inputRef.current?.plainText ?? "").trim();
         if (composerEmpty && (key.name === "pageup" || key.name === "pagedown" || key.name === "end")) {
           const sb = scrollRef.current;
@@ -6547,9 +6895,9 @@ export function useAppLogic(props: AppLogicProps) {
         // the same identifier (not a re-derivation from `activePlan`) keeps the
         // guard and the branch condition literally the same expression.
         planQuestions: showPlanPanel,
-        paymentApproval: pendingPaymentApproval !== null,
+        paymentApproval: approvalCardNow !== null,
         haltCard: activeHaltCard !== null,
-        initNewForm: initNewForm !== null,
+        initNewForm: initNewFormNow !== null,
         pointToExistingForm: pointToExistingForm !== null,
         askcard: pendingCouncilQuestionRef.current !== null,
         preflight: pendingCouncilPreflight !== null,
@@ -6575,6 +6923,18 @@ export function useAppLogic(props: AppLogicProps) {
       });
       reconcileModalOpenOrder(modalOpenOrderRef.current, openModalSurfacesNow);
       const modalOwnerNow = resolveModalKeyboardOwner(modalOpenOrderRef.current, openModalSurfacesNow);
+      if (
+        approvalCardNow?.workerApproval &&
+        modalOwnsKeyboard(modalOwnerNow, "payment-approval") &&
+        !key.ctrl &&
+        !key.meta &&
+        pageWorkerApprovalPreview(key, workerApprovalScrollRef.current)
+      )
+        return;
+      if (modalOwnerNow && isEscapeKey(key)) {
+        key.preventDefault();
+        key.stopPropagation();
+      }
 
       // Point-to-existing form intercepts all input while it owns the keyboard.
       if (pointToExistingForm && modalOwnsKeyboard(modalOwnerNow, "point-to-existing-form")) {
@@ -6685,14 +7045,14 @@ export function useAppLogic(props: AppLogicProps) {
         return;
       }
       // Init-new form intercepts all input while open.
-      if (initNewForm && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
-        if (initNewForm.step === "name") {
+      if (initNewFormNow && modalOwnsKeyboard(modalOwnerNow, "init-new-form")) {
+        if (initNewFormNow.step === "name") {
           if (isEscapeKey(key)) {
             setInitNewForm(null);
             return;
           }
           if (key.name === "return") {
-            const name = initNewForm.nameInput.trim();
+            const name = initNewFormNow.nameInput.trim();
             if (!name) {
               setInitNewForm((s) => (s ? { ...s, nameError: "Project name cannot be empty." } : s));
               return;
@@ -6714,7 +7074,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           return;
         }
-        if (initNewForm.step === "fe-stack") {
+        if (initNewFormNow.step === "fe-stack") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "name" } : s));
             return;
@@ -6731,13 +7091,13 @@ export function useAppLogic(props: AppLogicProps) {
           }
           if (key.name === "return") {
             // Plan 23-02 — when /ideal intent is captured, route through EE design.
-            if (initNewForm.intent.trim().length > 0) {
+            if (initNewFormNow.intent.trim().length > 0) {
               setInitNewForm((s) => (s ? { ...s, step: "designing", designError: null } : s));
               (async () => {
                 try {
                   const { designBBPackages } = await import("../ee/bb-design.js");
-                  const result = await designBBPackages(initNewForm.intent, {
-                    allowCommercial: initNewForm.allowCommercial,
+                  const result = await designBBPackages(initNewFormNow.intent, {
+                    allowCommercial: initNewFormNow.allowCommercial,
                   });
                   setInitNewForm((s) => {
                     if (!s) return s;
@@ -6766,7 +7126,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Plan 23-02 — EE designing step. Esc skips to manual menu; ignore other keys.
-        if (initNewForm.step === "designing") {
+        if (initNewFormNow.step === "designing") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
             return;
@@ -6774,7 +7134,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Plan 23-02 — EE design-preview step: navigate / toggle / confirm.
-        if (initNewForm.step === "design-preview") {
+        if (initNewFormNow.step === "design-preview") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "bb-template" } : s));
             return;
@@ -6805,7 +7165,7 @@ export function useAppLogic(props: AppLogicProps) {
           }
           if (key.sequence === "c" || key.sequence === "C") {
             // Toggle commercial flag + re-run design.
-            const nextAllowCommercial = !initNewForm.allowCommercial;
+            const nextAllowCommercial = !initNewFormNow.allowCommercial;
             setInitNewForm((s) =>
               s
                 ? {
@@ -6819,7 +7179,7 @@ export function useAppLogic(props: AppLogicProps) {
             (async () => {
               try {
                 const { designBBPackages } = await import("../ee/bb-design.js");
-                const result = await designBBPackages(initNewForm.intent, {
+                const result = await designBBPackages(initNewFormNow.intent, {
                   allowCommercial: nextAllowCommercial,
                 });
                 setInitNewForm((s) => {
@@ -6843,12 +7203,12 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           if (key.name === "return") {
-            const design = initNewForm.bbDesign;
+            const design = initNewFormNow.bbDesign;
             if (!design) return;
-            const selectedPackages = design.packageIds.filter((_, i) => initNewForm.packageToggles[i] ?? true);
-            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
-            const projectName = initNewForm.nameInput.trim();
-            const commercial = initNewForm.allowCommercial;
+            const selectedPackages = design.packageIds.filter((_, i) => initNewFormNow.packageToggles[i] ?? true);
+            const feStack = FE_STACK_OPTIONS[initNewFormNow.feStackIndex]?.value ?? "react";
+            const projectName = initNewFormNow.nameInput.trim();
+            const commercial = initNewFormNow.allowCommercial;
             const replayInputs = {
               projectName,
               feStack,
@@ -6862,7 +7222,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         // Task 6.2a — BB template picker step
-        if (initNewForm.step === "bb-template") {
+        if (initNewFormNow.step === "bb-template") {
           if (isEscapeKey(key)) {
             setInitNewForm((s) => (s ? { ...s, step: "fe-stack" } : s));
             return;
@@ -6878,9 +7238,9 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
           if (key.name === "return") {
-            const feStack = FE_STACK_OPTIONS[initNewForm.feStackIndex]?.value ?? "react";
-            const bbTemplate = BB_TEMPLATE_OPTIONS[initNewForm.bbTemplateIndex]?.info;
-            const projectName = initNewForm.nameInput.trim();
+            const feStack = FE_STACK_OPTIONS[initNewFormNow.feStackIndex]?.value ?? "react";
+            const bbTemplate = BB_TEMPLATE_OPTIONS[initNewFormNow.bbTemplateIndex]?.info;
+            const projectName = initNewFormNow.nameInput.trim();
             const replayInputs = { projectName, feStack, bbTemplate };
             void runScaffoldAttempt(replayInputs);
             return;
@@ -6889,19 +7249,19 @@ export function useAppLogic(props: AppLogicProps) {
         }
         // Error step — R retries with stored inputs (no debate re-run); any
         // other key dismisses. running ignores keys; done dismisses too.
-        if (initNewForm.step === "error") {
+        if (initNewFormNow.step === "error") {
           if (
-            initNewForm.errorRetryable &&
-            initNewForm.replayInputs &&
+            initNewFormNow.errorRetryable &&
+            initNewFormNow.replayInputs &&
             (key.name === "r" || key.sequence === "r" || key.sequence === "R")
           ) {
-            void runScaffoldAttempt(initNewForm.replayInputs);
+            void runScaffoldAttempt(initNewFormNow.replayInputs);
             return;
           }
           setInitNewForm(null);
           return;
         }
-        if (initNewForm.step === "done") {
+        if (initNewFormNow.step === "done") {
           setInitNewForm(null);
           return;
         }
@@ -6926,12 +7286,13 @@ export function useAppLogic(props: AppLogicProps) {
           // `deriveHaltRecommendation` returns -1 when every offered option is
           // destructive: nothing is pre-selected, so Enter must not stand in for
           // a choice the user never made. ↑/↓ moves onto the list first.
-          if (haltSelectedIndex < 0) return;
-          const chosen = activeHaltCard.recovery_options[haltSelectedIndex];
+          const haltIndexNow = haltSelectedIndexRef.current;
+          if (haltIndexNow < 0) return;
+          const chosen = activeHaltCard.recovery_options[haltIndexNow];
           if (chosen) {
             logUIInteraction(agent.getSessionId() ?? undefined, {
               subtype: "halt_card_answered",
-              data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltSelectedIndex },
+              data: { chosenId: chosen.id, chosenLabel: chosen.label, index: haltIndexNow },
             });
             if (chosen.id === "init_new") {
               // Abort any in-flight LLM stream so its text reply doesn't bleed
@@ -7289,7 +7650,11 @@ export function useAppLogic(props: AppLogicProps) {
         }
       }
       if (showPlanPanel && modalOwnsKeyboard(modalOwnerNow, "plan-questions")) {
-        const q = planQuestions[pqs.tab];
+        // Live reads (see pqsRef): a Tab/Down in the same stdin chunk has already
+        // moved the ref even though this closure still holds the last render.
+        const pqsNow = pqsRef.current;
+        const isPlanConfirmTabNow = !isSinglePlan && pqsNow.tab === planQuestions.length;
+        const q = planQuestions[pqsNow.tab];
 
         // Escape always dismisses
         if (isEscapeKey(key)) {
@@ -7298,14 +7663,14 @@ export function useAppLogic(props: AppLogicProps) {
         }
 
         // When editing custom text input
-        if (pqs.editing && !isPlanConfirmTab) {
+        if (pqsNow.editing && !isPlanConfirmTabNow) {
           if (key.name === "return") {
             const qId = q?.id;
             if (qId) {
-              const text = (pqs.customInputs[qId] ?? "").trim();
+              const text = (pqsNow.customInputs[qId] ?? "").trim();
               if (text) {
                 if (q.type === "multiselect") {
-                  const existing = (pqs.answers[qId] as string[] | undefined) ?? [];
+                  const existing = (pqsNow.answers[qId] as string[] | undefined) ?? [];
                   const next = existing.includes(text) ? existing : [...existing, text];
                   setPqs((s) => ({ ...s, editing: false, answers: { ...s.answers, [qId]: next } }));
                 } else if (q.type === "text") {
@@ -7366,7 +7731,7 @@ export function useAppLogic(props: AppLogicProps) {
         }
 
         // Confirm tab
-        if (isPlanConfirmTab) {
+        if (isPlanConfirmTabNow) {
           if (key.name === "return") {
             submitPlanAnswers();
             return;
@@ -7407,7 +7772,7 @@ export function useAppLogic(props: AppLogicProps) {
 
         // Enter — select current option
         if (key.name === "return") {
-          handlePlanSelect(q, pqs.selected, options, showCustom);
+          handlePlanSelect(q, pqsNow.selected, options, showCustom);
           return;
         }
 
@@ -7523,6 +7888,35 @@ export function useAppLogic(props: AppLogicProps) {
         }
         if (key.name === "e" && key.ctrl && row?.kind === "server") {
           editSavedMcp(row.server);
+          return;
+        }
+        if (key.name === "o" && key.ctrl && row?.kind === "server") {
+          const oauthServer = row.server;
+          signInMcpOAuth(oauthServer)
+            .then((started) => {
+              if (started.status === "authorized") {
+                pushToast("info", `${oauthServer.label}: signed in.`);
+                return;
+              }
+              pushToast(
+                "info",
+                started.browserOpened
+                  ? `${oauthServer.label}: finish sign-in in your browser.`
+                  : `${oauthServer.label}: open this URL to sign in: ${started.authUrl ?? "(none)"}`,
+              );
+              return started.completion.then((outcome) => {
+                pushToast(
+                  outcome.ok ? "info" : "error",
+                  outcome.ok
+                    ? `${oauthServer.label}: signed in — tools available next turn.`
+                    : `${oauthServer.label}: sign-in failed — ${outcome.error}`,
+                );
+              });
+            })
+            .catch((err) => {
+              logger.error("mcp", `oauth sign-in failed: ${err?.message}`, { serverId: oauthServer.id });
+              pushToast("error", `${oauthServer.label}: sign-in failed — ${err?.message ?? String(err)}`);
+            });
           return;
         }
         if (key.name === "x" && key.ctrl && row?.kind === "server") {
@@ -7860,7 +8254,15 @@ export function useAppLogic(props: AppLogicProps) {
             return;
           }
 
-          const item = filteredSlashItems[slashMenuIndex];
+          // Resolve against the LIVE composer text, not this render's menu
+          // state: "/exit"+Enter in one input batch otherwise ran item 0 of
+          // the unfiltered list (/permissions). See resolveLiveSlashSelection.
+          const live = resolveLiveSlashSelection(composerText, {
+            query: slashSearchQuery,
+            items: filteredSlashItems,
+            index: slashMenuIndex,
+          });
+          const item = live.items[live.index];
           if (item) {
             handleSlashMenuSelect(item);
             setSlashSearchQuery("");
@@ -7878,7 +8280,13 @@ export function useAppLogic(props: AppLogicProps) {
         if (key.name === "tab") {
           // Autocomplete: fill the input with "/<id> " and close the menu so
           // the user can keep typing message text (e.g. /ideate Tab <prompt>).
-          const item = filteredSlashItems[slashMenuIndex];
+          // Same stale-closure hazard as Enter — resolve from the live text.
+          const live = resolveLiveSlashSelection(inputRef.current?.plainText ?? "", {
+            query: slashSearchQuery,
+            items: filteredSlashItems,
+            index: slashMenuIndex,
+          });
+          const item = live.items[live.index];
           if (item) {
             const completion = `/${item.id} `;
             setShowSlashMenuSync(false);
@@ -7966,7 +8374,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "return") {
-          const picked = sessionPickerList[sessionPickerIndex];
+          const picked = sessionPickerList[sessionPickerIndexRef.current];
           if (!picked) {
             setShowSessionPicker(false);
             return;
@@ -8064,22 +8472,22 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
         if (key.name === "k") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p) setApiKeyPrompt({ provider: p, value: "", error: null });
           return;
         }
         if (key.name === "o") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p && oauthProviders.has(p)) void startProviderOAuth(p);
           return;
         }
         if (key.name === "space" || key.sequence === " ") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (p && providersWithKey.has(p)) toggleProviderEnabled(p);
           return;
         }
         if (key.name === "d" || key.name === "return") {
-          const p = configuredProviders[providerChipIndex];
+          const p = configuredProviders[providerChipIndexRef.current];
           if (!p) return;
           // Enter means "use this provider". With credentials that means making
           // it the default; with none it means signing in, which is the only
@@ -8093,24 +8501,84 @@ export function useAppLogic(props: AppLogicProps) {
         }
         return;
       }
-      if (pendingPaymentApproval && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
+      if (approvalCardNow && modalOwnsKeyboard(modalOwnerNow, "payment-approval")) {
+        if (approvalCardNow.workerApproval && !key.ctrl && !key.meta && ["a", "y"].includes(key.name.toLowerCase())) {
+          const mode = key.name.toLowerCase() === "a" ? "auto" : "yolo";
+          void Promise.resolve(
+            handlePermissionsSlash([mode], {
+              cwd: agent.getCwd(),
+              tenantId: "local",
+              defaultProvider: agent.getProviderId(),
+              defaultModel: model,
+              getPermissionMode: () => agent.effectivePermissionMode,
+              setPermissionMode: (next) => agent.setPermissionModeFromUser(next),
+            }),
+          )
+            .then((message) => {
+              pushToast("info", message);
+              refreshBackgroundSnapshot();
+            })
+            .catch((error) => {
+              logger.file("warn", "ui", "User permission change failed", { error: String(error) });
+              pushToast("error", String(error));
+            });
+          return;
+        }
         if (isEscapeKey(key)) {
+          const request = approvalCardNow.workerApproval;
+          closeApprovalEvent({ kind: "cancel" });
           setPendingPaymentApproval(null);
+          if (approvalCardNow.toolApproval) {
+            settleToolApproval(approvalCardNow.toolApproval, "deny");
+          } else if (request) {
+            workerApprovalDecisionsRef.current.add(request.id);
+            void agent
+              .respondToWorkerApproval(request, false)
+              .catch((err: unknown) => {
+                logger.file("warn", "ui", "Worker approval denial failed", {
+                  requestId: request.id,
+                  error: String(err),
+                });
+                pushToast("warn", err instanceof Error ? err.message : String(err));
+              })
+              .finally(() => {
+                workerApprovalDecisionsRef.current.delete(request.id);
+                refreshBackgroundSnapshot();
+              });
+          }
           return;
         }
         if (key.name === "up" || key.name === "down") {
-          setPendingPaymentApproval((p) => (p ? { ...p, selected: p.selected === 0 ? 1 : 0 } : p));
+          setPendingPaymentApproval((p) => (p ? { ...p, selected: toggleApprovalSelection(p.selected) } : p));
           return;
         }
         if (key.name === "return") {
-          const approved = pendingPaymentApproval.selected === 0;
-          const aid = pendingPaymentApproval.approvalId;
+          // Live ref, not the closure: a Down in the same stdin chunk has
+          // already moved the ref to Deny even though React has not re-rendered.
+          const approved = isApprovalAllowed(approvalCardNow.selected);
+          const toolApproval = approvalCardNow.toolApproval;
+          const request = approvalCardNow.workerApproval;
+          closeApprovalEvent({ kind: "answered", allowed: approved });
           setPendingPaymentApproval(null);
-          if (aid) {
-            agent.respondToToolApproval(aid, approved);
-            if (approved) {
-              processMessage("[Payment approved]");
-            }
+          if (request) {
+            workerApprovalDecisionsRef.current.add(request.id);
+            void agent
+              .respondToWorkerApproval(request, approved)
+              .catch((err: unknown) => {
+                logger.file("warn", "ui", "Worker approval decision failed", {
+                  requestId: request.id,
+                  error: String(err),
+                });
+                pushToast("warn", err instanceof Error ? err.message : String(err));
+              })
+              .finally(() => {
+                workerApprovalDecisionsRef.current.delete(request.id);
+                refreshBackgroundSnapshot();
+              });
+          } else if (toolApproval) {
+            // Resolves the awaiting execute in the SAME turn: the tool runs (or
+            // returns a denial result) and the model continues — no new turn.
+            settleToolApproval(toolApproval, approved ? "allow" : "deny");
           }
           return;
         }
@@ -8183,7 +8651,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        const focusedWalletRow = WALLET_ROWS[walletFocusIndex];
+        const focusedWalletRow = WALLET_ROWS[walletFocusIndexRef.current];
         if (!focusedWalletRow || focusedWalletRow.type === "readonly") return;
 
         if (key.name === "left" || key.name === "right") {
@@ -8256,7 +8724,7 @@ export function useAppLogic(props: AppLogicProps) {
           return;
         }
 
-        const focusedRow = visibleRows[sandboxSettingsFocusIndex];
+        const focusedRow = visibleRows[sandboxSettingsFocusIndexRef.current];
         if (!focusedRow) return;
 
         if (focusedRow.type === "toggle" && (key.name === "left" || key.name === "right")) {
@@ -8822,6 +9290,8 @@ export function useAppLogic(props: AppLogicProps) {
     const displayedModel = modelRef.current;
     if (displayedModel && displayedModel !== agent.getModel()) {
       agent.setModel(displayedModel);
+      setModel(agent.getModel());
+      statusBarStore.setState({ model: agent.getModel() });
     }
     // Submitting a fresh prompt is an explicit "engage the live tail" action —
     // re-pin even if the user had scrolled up to read history (scroll-lock).
@@ -8843,6 +9313,7 @@ export function useAppLogic(props: AppLogicProps) {
     setCouncilCardStateSync,
     setShowModelPicker,
     setModelPickerIndex,
+    setModel,
   ]);
 
   // Switch to the "messages" branch (which renders log + halt-card + init-new-form +
@@ -8979,6 +9450,7 @@ export function useAppLogic(props: AppLogicProps) {
     pendingCouncilPreflight,
     pendingCouncilQuestion,
     pendingPaymentApproval,
+    workerApprovalScrollRef,
     planQuestions,
     pointToExistingForm,
     pqs,

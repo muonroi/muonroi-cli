@@ -68,6 +68,7 @@ const mockLoadLatestCompaction = vi.fn();
 const mockGetNextMessageSequence = vi.fn(() => 1);
 const mockAppendCompaction = vi.fn();
 const mockLoadTranscriptState = vi.fn();
+const persistedChildTurns = new Map<string, { messages: any[]; seqs: number[] }>();
 const mockAppendMessages = vi.fn((sessId, msgs) => msgs.map((_: any, idx: number) => idx + 100));
 const mockMarkMessageCompleted = vi.fn();
 
@@ -76,7 +77,8 @@ vi.mock("../../storage/transcript.js", () => {
     loadLatestCompaction: (...args: any[]) => (mockLoadLatestCompaction as any).apply(null, args),
     getNextMessageSequence: (...args: any[]) => (mockGetNextMessageSequence as any).apply(null, args),
     appendCompaction: (...args: any[]) => (mockAppendCompaction as any).apply(null, args),
-    loadTranscriptState: (...args: any[]) => (mockLoadTranscriptState as any).apply(null, args),
+    loadTranscriptState: (...args: any[]) =>
+      persistedChildTurns.get(args[0]) ?? (mockLoadTranscriptState as any).apply(null, args),
     appendMessages: (...args: any[]) => (mockAppendMessages as any).apply(null, args),
     markMessageCompleted: (...args: any[]) => (mockMarkMessageCompleted as any).apply(null, args),
     buildChatEntries: vi.fn(() => []),
@@ -97,7 +99,8 @@ vi.mock("../../storage/index.js", () => {
     appendMessages: (...args: any[]) => (mockAppendMessages as any).apply(null, args),
     getNextMessageSequence: (...args: any[]) => (mockGetNextMessageSequence as any).apply(null, args),
     loadSessionChainTranscriptState: (...args: any[]) => (mockLoadTranscriptState as any).apply(null, args),
-    loadTranscriptState: (...args: any[]) => (mockLoadTranscriptState as any).apply(null, args),
+    loadTranscriptState: (...args: any[]) =>
+      persistedChildTurns.get(args[0]) ?? (mockLoadTranscriptState as any).apply(null, args),
     loadTranscript: vi.fn(() => []),
     buildChatEntries: vi.fn(() => []),
     getLastTodoWriteArgs: vi.fn(() => null),
@@ -175,6 +178,14 @@ vi.mock("../message-processor.js", () => {
       constructor(deps: any) {
         this.deps = deps;
       }
+      private appendOutput(...messages: any[]) {
+        this.deps.messages.push(...messages);
+        // The real processor persists its output. Handoff now reads that
+        // transcript by sequence number, rather than a mutable working array.
+        if (this.deps.session?.id === "session-child") {
+          persistedChildTurns.set("session-child", { messages, seqs: messages.map((_, i) => 100 + i) });
+        }
+      }
       async *run(userMessage: string) {
         if (
           this.deps.messages.some((m: any) => m.role === "system" && String(m.content).startsWith("[Helper receipt"))
@@ -192,7 +203,7 @@ vi.mock("../message-processor.js", () => {
           // Snapshot the child's seeded working set so the test can assert the
           // fork carried the kept raw tail, not just the compaction summary.
           (globalThis as any).__capturedSeed = [...this.deps.messages];
-          this.deps.messages.push(
+          this.appendOutput(
             { role: "assistant", content: "Sub-session final structured response" },
             { role: "tool", content: "Final tool outcome (should be copied)" },
           );
@@ -204,7 +215,7 @@ vi.mock("../message-processor.js", () => {
           if ((globalThis as any).__transientAttempts < 3) {
             throw new Error("fetch failed");
           }
-          this.deps.messages.push(
+          this.appendOutput(
             { role: "assistant", content: "Sub-session final structured response after retry" },
             { role: "tool", content: "Final tool outcome (should be copied)" },
           );
@@ -214,7 +225,7 @@ vi.mock("../message-processor.js", () => {
         if (userMessage === "test consult") {
           if (this.deps.consultParentSession) {
             const advice = await this.deps.consultParentSession("How to handle this error?");
-            this.deps.messages.push(
+            this.appendOutput(
               { role: "assistant", content: `Advice: ${advice}` },
               { role: "tool", content: "Final tool outcome (should be copied)" },
             );
@@ -225,7 +236,7 @@ vi.mock("../message-processor.js", () => {
         // Simulating writing messages during turn execution
         // Under a sub-session, we want to write intermediate clutter,
         // and check that only final assistant response gets absorbed.
-        this.deps.messages.push(
+        this.appendOutput(
           { role: "assistant", content: "Intermediate assistant prompt analysis" },
           { role: "tool", content: "Intermediate tool result that should be ignored" },
           { role: "assistant", content: "Sub-session final structured response" },
@@ -247,6 +258,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
   beforeEach(() => {
     process.env.MUONROI_FORCE_ROUTING_CLASSIFY = "1";
     vi.clearAllMocks();
+    persistedChildTurns.clear();
     (globalThis as any).__transientAttempts = 0;
     parentSessionState.messages = [{ role: "user" as const, content: "Hello parent" }];
     parentSessionState.seqs = [1];
@@ -262,6 +274,37 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     cleanup?.();
   });
 
+  it.each([
+    false,
+    true,
+  ])("cancels routing before main starts while preserving a nested owner's controller (%s)", async (nested) => {
+    let entered!: (signal: AbortSignal | undefined) => void;
+    let finish!: () => void;
+    const ready = new Promise<AbortSignal | undefined>((resolve) => {
+      entered = resolve;
+    });
+    mockClassifySubSessionAction.mockImplementationOnce((_model, _prompt, _context, signal) => {
+      entered(signal);
+      return new Promise((resolve) => {
+        finish = () => resolve(null);
+      });
+    });
+    const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
+      persistSession: true,
+      executionRole: "infrastructure",
+      session: "session-parent",
+    });
+    const owner = nested ? new AbortController() : null;
+    (agent as any).abortController = owner;
+    const pending = agent.processMessage("Cancel during routing").next();
+    const signal = await ready;
+    agent.abort();
+    finish();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(signal?.aborted).toBe(true);
+    expect((agent as any).abortController).toBe(owner);
+  });
+
   it("routes DIRECT_ANSWER directly without spawning a sub-session", async () => {
     mockClassifySubSessionAction.mockResolvedValue({
       action: "DIRECT_ANSWER",
@@ -271,6 +314,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -297,6 +341,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -321,13 +366,14 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     // - subsequent tool message(s): "Final tool outcome (should be copied)"
     // It should NOT contain:
     // - intermediate assistant: "Intermediate assistant prompt analysis"
-    // - intermediate tool: "Intermediate tool result that should be ignored"
+    // Tool previews remain bounded evidence; intermediate assistant prose is excluded.
     expect((agent as any).messages).toHaveLength(3); // Parent history + helper receipt + main answer
     expect((agent as any).messages[1].role).toBe("system");
     expect((agent as any).messages[1].content).toContain("Sub-session final structured response");
     expect((agent as any).messages[1].content).toContain("Final tool outcome (should be copied)");
     expect((agent as any).messages[2]).toEqual({ role: "assistant", content: "Main accepted helper evidence" });
-    expect(JSON.stringify((agent as any).messages)).not.toContain("Intermediate tool result");
+    expect(JSON.stringify((agent as any).messages)).not.toContain("Intermediate assistant prompt analysis");
+    expect((agent as any).messages[1].content).toContain("Intermediate tool result");
     expect(chunks.filter((c) => c.type === "done")).toHaveLength(1);
 
     // 4. Verify appendMessages was called to persist the absorbed turn in the parent
@@ -354,6 +400,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -387,6 +434,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -459,6 +507,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -491,6 +540,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
     mockDeliberateCompact.mockResolvedValueOnce({ summary: "   ", tokensBeforeCompress: 100 });
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
     (agent as any).messages = [{ role: "user", content: "Implement the approved migration plan" }];
@@ -511,6 +561,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -538,6 +589,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -586,6 +638,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -651,6 +704,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 
@@ -687,6 +741,7 @@ describe("Agent - Sub-Session Delegation & Absorption", () => {
 
     const agent = new Agent("sk-dummy", undefined, "deepseek-v4-flash", undefined, {
       persistSession: true,
+      executionRole: "infrastructure",
       session: "session-parent",
     });
 

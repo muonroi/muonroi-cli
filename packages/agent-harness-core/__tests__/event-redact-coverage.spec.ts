@@ -75,6 +75,18 @@ const REGRESSION_SAMPLES: LiveEvent[] = [
   { t: "event", kind: "disconnect", reason: "end", ts: 5 },
   { t: "event", kind: "stream-retry", attempt: 1, maxAttempts: 3, errorName: "E", errorMessage: "m", nextDelayMs: 1 },
   { t: "event", kind: "grounding-flag", claims: ["c"], count: 1, ts: 6 },
+  // The /ideal host autopilot: its stop `reason` is the one thing a driver needs.
+  {
+    t: "event",
+    kind: "ideal-autopilot",
+    action: "stop",
+    turn: 3,
+    maxTurns: 40,
+    noProgressStreak: 3,
+    reason: "no_progress",
+    spentUsd: null,
+    ts: 7,
+  },
 ];
 
 describe("redactEvent — the six previously-unlisted kinds", () => {
@@ -84,13 +96,12 @@ describe("redactEvent — the six previously-unlisted kinds", () => {
     }
   });
 
-  it.each(REGRESSION_SAMPLES.map((s) => [(s as { kind: string }).kind, s] as const))(
-    "%s does not arrive as a content-free {t, kind}",
-    (_kind, sample) => {
-      const out = asRecord(redactEvent(sample));
-      expect(Object.keys(out).length).toBeGreaterThan(2);
-    },
-  );
+  it.each(
+    REGRESSION_SAMPLES.map((s) => [(s as { kind: string }).kind, s] as const),
+  )("%s does not arrive as a content-free {t, kind}", (_kind, sample) => {
+    const out = asRecord(redactEvent(sample));
+    expect(Object.keys(out).length).toBeGreaterThan(2);
+  });
 });
 
 // ---------------------------------------------------------------------------

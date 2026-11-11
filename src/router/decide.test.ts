@@ -165,7 +165,7 @@ describe("promotion cap", () => {
     globalThis.disabledProvidersList = ["deepseek", "openai", "xai"];
     const opts = {
       ...BASE_OPTS,
-      pil: { domain: null, taskType: "plan", confidence: 0.75, gsdPhase: null } as DecideOpts["pil"],
+      pil: { domain: null, taskType: "plan", confidence: 0.75, flowPhase: null } as DecideOpts["pil"],
     };
 
     (globalThis as { routingPromoteMax?: string }).routingPromoteMax = "balanced";
@@ -195,10 +195,10 @@ describe("route cache is scoped to the active model/provider", () => {
   //   id 293 @03:40:23 routing/promoted  default=deepseek-v4-flash → gpt-5.4
   //   id 392 @03:51:34 routing/promoted  default=deepseek-v4-flash → gpt-5.4
   // all three with the byte-identical reason "pil:debug(0.75)" — the signature
-  // of a REPLAYED decision. routeCacheKey hashed only domain|taskType|gsdPhase,
+  // of a REPLAYED decision. routeCacheKey hashed only domain|taskType|flowPhase,
   // so a decision computed under the old default was served after the switch and
   // sent the user straight back to the provider they had just abandoned.
-  const pil = { domain: null, taskType: "debug", confidence: 0.75, gsdPhase: null } as DecideOpts["pil"];
+  const pil = { domain: null, taskType: "debug", confidence: 0.75, flowPhase: null } as DecideOpts["pil"];
 
   beforeEach(() => {
     globalThis.disabledProvidersList = [];
@@ -236,7 +236,7 @@ describe("PIL step-0 uses the real taskType→tier map", () => {
   // populated the route cache. taskTypeToTier (src/pil/task-tier-map.ts) is the
   // canonical map — decide() already uses taskTypeToRole from the same module.
   const pilFor = (taskType: string) =>
-    ({ domain: null, taskType, confidence: 0.75, gsdPhase: null }) as DecideOpts["pil"];
+    ({ domain: null, taskType, confidence: 0.75, flowPhase: null }) as DecideOpts["pil"];
 
   beforeEach(() => {
     globalThis.disabledProvidersList = [];
@@ -286,7 +286,7 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
   // Resolve tier fixtures from the current catalog; new releases may change IDs.
   const tierModel = (tier: "fast" | "balanced" | "premium") => getTestModelForProvider("openai", tier);
   const pilFor = (taskType: string) =>
-    ({ domain: null, taskType, confidence: 0.75, gsdPhase: null }) as DecideOpts["pil"];
+    ({ domain: null, taskType, confidence: 0.75, flowPhase: null }) as DecideOpts["pil"];
   const openai = (extra: Partial<DecideOpts> = {}): DecideOpts => ({
     ...BASE_OPTS,
     defaultModel: tierModel("balanced"),
@@ -305,6 +305,44 @@ describe("tier evidence: bounded demotion, route history, escalation", () => {
   it("demotes a documentation turn below the session model down to routingDemoteMin", async () => {
     const d = await decide("write docs for the ledger module", openai({ pil: pilFor("documentation") }));
     expect(d.model).toBe(tierModel("fast"));
+  });
+
+  it("suggest keeps the served model and records the bounded local candidate", async () => {
+    const d = await decide(
+      "write docs for the ledger module",
+      openai({ routingMode: "suggest", pil: pilFor("documentation") }),
+    );
+    expect(d.model).toBe(tierModel("balanced"));
+    expect(d.suggestedModel).toBe(tierModel("fast"));
+    expect(d.routingMode).toBe("suggest");
+    expect(routerStore.getState().eeTier).toBe("balanced");
+  });
+
+  it("never replays an auto cache decision into suggest or fixed", async () => {
+    const opts = openai({ pil: pilFor("documentation") });
+    expect((await decide("write docs", { ...opts, routingMode: "auto" })).model).toBe(tierModel("fast"));
+    expect((await decide("write docs", { ...opts, routingMode: "suggest" })).model).toBe(tierModel("balanced"));
+    const fixed = await decide("write docs", { ...opts, routingMode: "fixed" });
+    expect(fixed.model).toBe(tierModel("balanced"));
+    expect(fixed.reason).toBe("routing-mode-fixed");
+  });
+
+  it("recomputes a cached choice after the user's demotion bound changes", async () => {
+    const opts = openai({ routingMode: "auto", pil: pilFor("documentation") });
+    expect((await decide("write docs", opts)).model).toBe(tierModel("fast"));
+    (globalThis as { routingDemoteMin?: string }).routingDemoteMin = "off";
+    expect((await decide("write docs", opts)).model).toBe(tierModel("balanced"));
+  });
+
+  it("forcedModel wins over suggest and prior failure evidence", async () => {
+    routerStore.setState({ recentFailures: 2 });
+    const d = await decide(
+      "write docs",
+      openai({ routingMode: "suggest", forcedModel: tierModel("fast"), pil: pilFor("plan") }),
+    );
+    expect(d.model).toBe(tierModel("fast"));
+    expect(d.routingMode).toBe("fixed");
+    expect(d.suggestedModel).toBeUndefined();
   });
 
   it("routingDemoteMin=off keeps the session model as the floor", async () => {

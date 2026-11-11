@@ -179,13 +179,20 @@ function matchesTier(m: ModelInfo, tier: "fast" | "balanced" | "premium"): boole
   return m.tier === tier || m.routingTiers?.includes(tier) === true;
 }
 
-export function getModelByTier(tier: "fast" | "balanced" | "premium", preferProvider?: string): ModelInfo | undefined {
-  if (preferProvider) {
-    return MODELS.find(
-      (m) => matchesTier(m, tier) && m.provider === preferProvider && isTierRoutable(m) && canServeTextRequests(m),
-    );
-  }
-  return MODELS.find((m) => matchesTier(m, tier) && isTierRoutable(m) && canServeTextRequests(m));
+export function getModelByTier(
+  tier: "fast" | "balanced" | "premium",
+  preferProvider?: string,
+  /** Extra eligibility filter (e.g. "not disabled by the user"); registry stays settings-agnostic. */
+  accept: (m: ModelInfo) => boolean = () => true,
+): ModelInfo | undefined {
+  return MODELS.find(
+    (m) =>
+      matchesTier(m, tier) &&
+      (!preferProvider || m.provider === preferProvider) &&
+      isTierRoutable(m) &&
+      canServeTextRequests(m) &&
+      accept(m),
+  );
 }
 
 /**
@@ -204,7 +211,7 @@ export function getModelsForProvider(providerId: string): ModelInfo[] {
  * The provider's models that can serve a text request, in catalog order.
  *
  * This is the accessor for every text-task selector — council panels, role
- * assignment, router fallbacks, GSD tier promotion. Filtering only removes
+ * assignment, router fallbacks, FLOW tier promotion. Filtering only removes
  * candidates that cannot answer a text prompt at all; relative order and every
  * text model's eligibility are untouched, so existing fallback behaviour for
  * text models is unchanged.
@@ -260,9 +267,13 @@ export function getWebResearchModel(reachableIds?: ReadonlySet<string>): ModelIn
  * lists a text model first, which is why this was never hit — but that is
  * catalog ordering, not a guarantee.
  */
-export function getFirstCatalogModel(): ModelInfo {
-  const m = MODELS.find(canServeTextRequests);
-  if (!m) throw new Error("No text-capable models in catalog. Check src/models/catalog.json or catalog endpoint.");
+export function getFirstCatalogModel(accept: (m: ModelInfo) => boolean = () => true): ModelInfo {
+  const m = MODELS.find((row) => canServeTextRequests(row) && accept(row));
+  if (!m)
+    throw new Error(
+      "No text-capable models in catalog, or every one is disabled in settings. " +
+        "Check src/models/catalog.json, the catalog endpoint, or enable a provider.",
+    );
   return m;
 }
 

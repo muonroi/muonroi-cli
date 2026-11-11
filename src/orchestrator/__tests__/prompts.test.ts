@@ -3,6 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 describe("prompts.ts limit helpers", () => {
   const tmpHome = path.join(os.tmpdir(), `muonroi-cli-prompts-${process.pid}-${Date.now()}`);
   const origHome = process.env.HOME;
@@ -16,6 +19,7 @@ describe("prompts.ts limit helpers", () => {
     fs.mkdirSync(tmpHome, { recursive: true });
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
     delete process.env.MUONROI_MAX_TOOL_ROUNDS;
     delete process.env.MUONROI_HARD_MAX_TOOL_ROUNDS;
     delete process.env.MUONROI_MAX_LLM_CALLS_PER_TURN;
@@ -30,6 +34,8 @@ describe("prompts.ts limit helpers", () => {
 
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
 
     if (origEnvMaxRounds === undefined) delete process.env.MUONROI_MAX_TOOL_ROUNDS;
     else process.env.MUONROI_MAX_TOOL_ROUNDS = origEnvMaxRounds;

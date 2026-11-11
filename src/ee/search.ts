@@ -12,7 +12,10 @@
  * so callers map null → an "EE unavailable" outcome rather than throwing.
  */
 
-import type { EERecallEntry, EERecallResponse, EESearchResponse } from "./types.js";
+import os from "node:os";
+import { logger } from "../utils/logger.js";
+import { isConcreteEEProject } from "./native-context.js";
+import type { EERecallEntry, EERecallHttpFailure, EERecallResponse, EESearchResponse } from "./types.js";
 
 /** Char-budget bounds for the agent-facing recall index. */
 const RECALL_FORMAT_MIN_CHARS = 500;
@@ -39,6 +42,12 @@ function clampRecallChars(n: number | undefined): number {
  * region, and appends a one-line footer with the true count + truncation notice.
  */
 export function formatRecallForAgent(resp: EERecallResponse, opts: { query?: string; maxChars?: number } = {}): string {
+  if (
+    ["[ee_scope_unverified]", "[ee_project_required]", "[ee_request_rejected]"].some((prefix) =>
+      resp.text?.startsWith(prefix),
+    )
+  )
+    return resp.text!;
   const maxChars = clampRecallChars(opts.maxChars);
   const q = opts.query ? ` for "${String(opts.query).slice(0, 80)}"` : "";
   if (!resp.text || resp.count === 0) {
@@ -129,7 +138,7 @@ export async function searchEE(
  */
 export async function recallEE(
   query: string,
-  opts: { project?: string; cwd?: string; sourceSession?: string; timeoutMs?: number } = {},
+  opts: { project?: string; cwd?: string; sourceSession?: string; timeoutMs?: number; strictProject?: boolean } = {},
 ): Promise<EERecallResponse | null> {
   const { createEEClient } = await import("./client.js");
   const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
@@ -137,22 +146,127 @@ export async function recallEE(
   const baseUrl = getCachedServerBaseUrl() ?? undefined;
   const sourceSession = opts.sourceSession ?? process.env.EXP_SESSION;
   const cwd = opts.cwd ?? process.cwd();
+  const { resolveEERepository } = await import("./project-identity.js");
+  const repository = opts.strictProject && !opts.project ? resolveEERepository(cwd) : undefined;
+  const failure: { http?: EERecallHttpFailure } = {};
   const result = await createEEClient({ baseUrl, authToken }).recall(query, {
     project: opts.project,
+    repository,
+    strictProject: opts.strictProject,
     cwd,
     sourceSession,
     timeoutMs: opts.timeoutMs,
+    onHttpError: (value) => {
+      failure.http = value;
+    },
   });
+  if (!result && failure.http) {
+    const { status, projectRequired } = failure.http;
+    const text = projectRequired
+      ? `[ee_project_required] EE rejected recall with HTTP 400: it could not resolve the attempted strict scope ${JSON.stringify({ cwd, ...(opts.project ? { project: opts.project } : {}) })}. ` +
+        'Repeating the same unresolved scope or changing query text does not resolve the project mapping. Use native ee_query({"action":"projects"}) to discover exact slugs from /api/projects; choose only the intended repository, then pass its slug as project. ' +
+        "For a different repository, pass its absolute cwd. If the intended project is absent or still rejected, report the unresolved mapping and continue without EE recall. Continue using repository evidence; local artifacts remain available. Do not disable strict_project or select an unrelated project to obtain hits. The server responded; this is not a no-response outage."
+      : `[ee_request_rejected] EE returned HTTP ${status} for recall. The server responded; this is not a no-response timeout. Check request/auth/rate/scope using the HTTP status and file diagnostics. Continue using repository evidence.`;
+    return { text, entries: [], count: 0, query };
+  }
+  if (result && opts.strictProject && !hasVerifiedRecallScope(result, { project: opts.project, cwd, repository })) {
+    logger.file("warn", "ee", "Scoped recall omitted: server returned no matching strict project proof", {
+      scopePresent: Boolean(result.scope),
+      strict: result.scope?.strict === true,
+      explicitProjectRequested: Boolean(opts.project),
+    });
+    return {
+      text: "[ee_scope_unverified] The recall endpoint responded, but its response did not prove the requested strict project scope. Health 200 proves reachability only. The EE server must enforce strict_project and return matching scope proof; this is not an approval-mode or FLOW block. Continue using repository evidence; do not inject unverified cross-project lessons.",
+      entries: [],
+      count: 0,
+      query,
+    };
+  }
   // Mirror the recall locally so the session-end runbook-candidate nudge sees
   // MCP/builtin recalls too (parity with the exp-recall.js CLI path). Only on a
   // non-null result (a transport failure already returned null to the caller).
   if (result) {
-    await mirrorRecallLocally(query, { sourceSession, project: opts.project, entries: result.entries });
+    await mirrorRecallLocally(query, {
+      sourceSession,
+      project: result.scope?.project ?? opts.project,
+      entries: result.entries,
+    });
   }
   return result;
 }
 
+export function hasVerifiedRecallScope(
+  result: import("./types.js").EERecallResponse,
+  expected: { project?: string; cwd: string; repository?: { root: string; project: string } },
+): boolean {
+  if (result.scope?.strict !== true || !isConcreteEEProject(result.scope.project)) return false;
+  if (expected.project) return result.scope.project === expected.project;
+  const normalize = (p: string) => {
+    const normalized = p
+      .replace(/^~(?=[/\\]|$)/, os.homedir())
+      .replace(/\\/g, "/")
+      .replace(/\/$/, "");
+    return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+  };
+  if (
+    expected.repository &&
+    (typeof result.scope.repository?.root !== "string" ||
+      normalize(result.scope.repository.root) !== normalize(expected.repository.root) ||
+      result.scope.repository.project !== result.scope.project)
+  )
+    return false;
+  return typeof result.scope.cwd === "string" && normalize(result.scope.cwd) === normalize(expected.cwd);
+}
+
 // ─── Recall feedback (parity with exp-feedback.js → POST /api/feedback) ───────
+/** Native directory discovery uses the same configured URL/auth as recall. */
+export async function listEEProjects(offset = 0): Promise<Record<string, unknown>> {
+  if (!Number.isSafeInteger(offset) || offset < 0)
+    return { error: "invalid_args", message: "offset must be a non-negative integer" };
+  const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
+  const token = await loadEEAuthToken();
+  const baseUrl = (getCachedServerBaseUrl() ?? "http://localhost:8082").replace(/\/+$/, "");
+  try {
+    const response = await fetch(`${baseUrl}/api/projects`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      signal: AbortSignal.timeout(15000),
+    });
+    if (!response.ok) {
+      logger.file("warn", "ee", "Native project directory rejected", { status: response.status });
+      return { error: "ee_request_rejected", status: response.status, projects: [] };
+    }
+    const body = (await response.json()) as {
+      projects?: { slug?: unknown; count?: unknown }[];
+      failed?: unknown;
+      truncated?: unknown;
+      cached?: unknown;
+    };
+    if (!Array.isArray(body.projects)) throw new Error("EE project directory returned no projects array");
+    const projects = body.projects
+      .filter((p) => p && typeof p.slug === "string" && p.slug.length <= 200)
+      .map((p) => ({ slug: p.slug, count: typeof p.count === "number" ? p.count : null }));
+    return {
+      projects: projects.slice(offset, offset + 50),
+      offset,
+      next_offset: offset + 50 < projects.length ? offset + 50 : null,
+      partial: Array.isArray(body.failed) && body.failed.length > 0,
+      truncated: body.truncated === true,
+      cached: body.cached === true,
+      note: "Known stored slugs; listing does not select a project or change scope. Directory can be partial; absence is not proof that a project is invalid.",
+    };
+  } catch (error) {
+    logger.file("warn", "ee", "Native project directory unavailable", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return {
+      error: "ee_unavailable",
+      projects: [],
+      message:
+        "Project directory unavailable; use a known project or repository cwd and continue with source evidence.",
+    };
+  }
+}
+
 export type FeedbackVerdict = "followed" | "ignored" | "noise";
 export type NoiseReason = "wrong_repo" | "wrong_language" | "wrong_task" | "stale_rule";
 
@@ -190,6 +304,7 @@ export async function feedbackEE(
   collection: string,
   verdict: FeedbackVerdict,
   reason?: NoiseReason,
+  scope: { cwd?: string; project?: string } = {},
 ): Promise<FeedbackResult> {
   const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
   const authToken = (await loadEEAuthToken()) ?? undefined;
@@ -205,7 +320,8 @@ export async function feedbackEE(
   // the documented `wrong_repo`/`wrong_language` "entry survives for other contexts"
   // behaviour actually fire: the brain can only narrow scope if the client tells it
   // where the verdict came from, and cwd is the one context every caller has.
-  body.cwd = process.cwd();
+  body.cwd = scope.cwd ?? process.cwd();
+  if (scope.project) body.project_slug = scope.project;
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authToken) headers.Authorization = `Bearer ${authToken}`;
   try {
@@ -213,6 +329,7 @@ export async function feedbackEE(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
     });
     const text = await res.text();
     let json: { error?: string; resolvedId?: string; verdict?: string; reason?: string } | null = null;
@@ -348,6 +465,7 @@ export async function writeExperienceEE(
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15000),
     });
     const respText = await res.text();
     let parsed: {
@@ -376,10 +494,30 @@ export async function writeExperienceEE(
 }
 
 /** Reachability probe for the EE server. */
-export async function healthEE(): Promise<{ ok: boolean; status: number }> {
+export async function healthEE(): Promise<{
+  ok: boolean;
+  status: number;
+  check: "reachability";
+  endpoint: string;
+  recallReady: "not_checked";
+}> {
   const { createEEClient } = await import("./client.js");
   const { loadEEAuthToken, getCachedServerBaseUrl } = await import("./auth.js");
   const authToken = (await loadEEAuthToken()) ?? undefined;
   const baseUrl = getCachedServerBaseUrl() ?? undefined;
-  return createEEClient({ baseUrl, authToken }).health();
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`${(baseUrl ?? "http://localhost:8082").replace(/\/+$/, "")}/health`);
+  } catch (err) {
+    logger.file("warn", "ee", "Invalid EE health endpoint configuration", {
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { ok: false, status: 0, check: "reachability", endpoint: "invalid-config", recallReady: "not_checked" };
+  }
+  const result = await createEEClient({ baseUrl, authToken }).health();
+  endpoint.username = "";
+  endpoint.password = "";
+  endpoint.search = "";
+  endpoint.hash = "";
+  return { ...result, check: "reachability", endpoint: endpoint.href, recallReady: "not_checked" };
 }

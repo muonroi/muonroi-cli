@@ -63,11 +63,12 @@
 
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import type { ModelRateLimits } from "../types/index.js";
 import { withFileLock } from "../utils/file-lock.js";
-import { rateLimitBackoffMs } from "./rate-limit-backoff.js";
+import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
+import { abortableSleep, rateLimitBackoffMs } from "./rate-limit-backoff.js";
 import { RATE_LIMIT_WINDOW_MS } from "./rate-limiter.js";
 
 /** chars/4 under-counts real provider tokens ~2× (see the metered gate notes). */
@@ -129,7 +130,7 @@ export interface LedgerLease {
 export interface LedgerDeps {
   dir: string;
   now: () => number;
-  sleep: (ms: number) => Promise<void>;
+  sleep: (ms: number, signal?: AbortSignal) => Promise<void>;
   isAlive: (pid: number) => boolean;
   pid: number;
 }
@@ -150,9 +151,9 @@ export function defaultLedgerDeps(): LedgerDeps {
   return {
     // Resolved lazily and through MUONROI_CLI_HOME, like every other home path,
     // so the test-suite home pin applies.
-    dir: path.join(process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli"), "rate-ledger"),
+    dir: path.join(muonroiHome(), "rate-ledger"),
     now: () => Date.now(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+    sleep: abortableSleep,
     isAlive: defaultIsAlive,
     pid: process.pid,
   };
@@ -284,9 +285,11 @@ async function waitOutCooldown(
   file: string,
   onWait: ((wait: LedgerWait) => void) | undefined,
   deps: LedgerDeps,
+  signal?: AbortSignal,
 ): Promise<void> {
   let announced = false;
   while (true) {
+    signal?.throwIfAborted();
     let raw: string;
     try {
       raw = await fs.readFile(file, "utf8");
@@ -296,6 +299,7 @@ async function waitOutCooldown(
       return;
     }
     let wait: LedgerWait | null;
+    signal?.throwIfAborted();
     try {
       wait = cooldownWait(JSON.parse(raw) as LedgerFile, deps.now());
     } catch {
@@ -307,7 +311,7 @@ async function waitOutCooldown(
       announced = true;
       onWait?.(wait);
     }
-    await deps.sleep(Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, wait.waitMs)));
+    await deps.sleep(Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, wait.waitMs)), signal);
   }
 }
 
@@ -377,11 +381,14 @@ export async function acquireLedgerSlot(
   estTokens: number,
   onWait?: (wait: LedgerWait) => void,
   deps: LedgerDeps = defaultLedgerDeps(),
+  signal?: AbortSignal,
 ): Promise<LedgerLease> {
+  signal?.throwIfAborted();
   if (ledgerDisabled()) return NOOP_LEASE;
   const file = ledgerPath(deps.dir, provider);
   if (!limits || (!limits.concurrency && !limits.requestsPerMinute && !limits.tokensPerMinute)) {
-    await waitOutCooldown(file, onWait, deps);
+    await waitOutCooldown(file, onWait, deps, signal);
+    signal?.throwIfAborted();
     return NOOP_LEASE;
   }
 
@@ -392,10 +399,12 @@ export async function acquireLedgerSlot(
   try {
     await fs.mkdir(deps.dir, { recursive: true });
     while (true) {
+      signal?.throwIfAborted();
       const wait = await withFileLock(
         file,
         async () => {
           const ledger = await readLedger(file);
+          signal?.throwIfAborted();
           prune(ledger, deps);
           const blocked =
             cooldownWait(ledger, deps.now()) ?? evaluateBudget(ledger.entries, limits, tokens, deps.now());
@@ -413,9 +422,16 @@ export async function acquireLedgerSlot(
         lastKind = wait.kind;
         onWait?.(wait);
       }
-      await deps.sleep(Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, wait.waitMs)));
+      await deps.sleep(Math.min(MAX_POLL_MS, Math.max(MIN_POLL_MS, wait.waitMs)), signal);
     }
   } catch (err) {
+    if (signal?.aborted) {
+      logger.debug("orchestrator", "Shared provider wait cancelled", {
+        provider,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
     warnFaultOnce(err);
     return NOOP_LEASE;
   }
@@ -436,7 +452,7 @@ export async function acquireLedgerSlot(
     );
   };
   let released = false;
-  return {
+  const lease: LedgerLease = {
     settle: (actual) => {
       if (typeof actual === "number" && Number.isFinite(actual) && actual >= 0) {
         update((e) => {
@@ -452,6 +468,11 @@ export async function acquireLedgerSlot(
       });
     },
   };
+  if (signal?.aborted) {
+    lease.release();
+    signal.throwIfAborted();
+  }
+  return lease;
 }
 
 /**

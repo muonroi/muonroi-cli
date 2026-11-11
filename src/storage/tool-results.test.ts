@@ -1,7 +1,16 @@
 import { describe, expect, it } from "vitest";
+import { toToolResult } from "../orchestrator/tool-utils.js";
 import { extractToolResultFromOutput, isOutputSuccess } from "./tool-results";
 
 describe("extractToolResultFromOutput", () => {
+  it("retains preview provenance through stream normalization and saved JSON envelopes", () => {
+    const raw = { success: true, preview: true, output: "Preview only" };
+    const normalized = toToolResult(raw);
+    expect(normalized.preview).toBe(true);
+    expect(extractToolResultFromOutput({ type: "json", value: JSON.parse(JSON.stringify(normalized)) })?.preview).toBe(
+      true,
+    );
+  });
   it("passes through a native ToolResult shape", () => {
     const r = extractToolResultFromOutput({ success: true, output: "hi" });
     expect(r).toMatchObject({ success: true, output: "hi" });

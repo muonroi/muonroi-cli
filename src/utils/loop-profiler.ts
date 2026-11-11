@@ -23,9 +23,9 @@
  */
 
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { logger } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 
 /** Minimal shape of the V8 CPU profile we consume (`Profiler.stop` result). */
 interface CpuProfileNode {
@@ -151,7 +151,7 @@ export interface LoopProfilerOpts {
  */
 export async function createLoopProfiler(opts: LoopProfilerOpts = {}): Promise<LoopProfiler | null> {
   const samplingIntervalUs = opts.samplingIntervalUs ?? 10_000;
-  const dir = opts.dir ?? path.join(os.homedir(), ".muonroi-cli", "profiles");
+  const dir = opts.dir ?? path.join(muonroiHome(), "profiles");
 
   let session: import("node:inspector").Session;
   try {

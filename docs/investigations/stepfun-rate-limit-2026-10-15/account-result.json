@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-15T01:31:28.546Z",
+  "url": "https://api.stepfun.ai/v1/accounts",
+  "status": 200,
+  "durationMs": 978,
+  "headers": {
+    "x-trace-id": "b00c5253223cd80585174bb0f90fb760"
+  },
+  "fields": ["object", "type", "balance", "total_cash_balance", "total_voucher_balance"],
+  "accountType": "prepaid",
+  "balance": 18.77,
+  "hasPlanQuotaFields": false
+}

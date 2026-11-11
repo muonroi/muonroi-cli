@@ -46,7 +46,6 @@ import {
   writeSprintVerify,
   writeSprintVerifyFix,
 } from "../flow/run-artifacts.js";
-import { isContextRailEnabled } from "../gsd/flags.js";
 import { isInteractivePaused } from "../orchestrator/interactive-pause.js";
 import { beginUnattendedTurn } from "../orchestrator/unattended-turn.js";
 import { SPRINT_EXECUTION_MARKER } from "../pil/layer6-output.js";
@@ -59,6 +58,7 @@ import { getIsolatedTaskDeadlineMs, withDeadlineRace } from "../utils/llm-deadli
 import { logger } from "../utils/logger.js";
 import type { SandboxSettings } from "../utils/settings.js";
 import { runVerifyOrchestration, type VerifyAgentLike } from "../verify/orchestrator.js";
+import { isContextRailEnabled } from "../workflow/flags.js";
 import { appendIteration, readCriteria } from "./artifact-io.js";
 import { formatUnverifiedForSprintContext, readLedger } from "./assumption-ledger.js";
 import { readBacklog } from "./backlog-store.js";
@@ -1053,7 +1053,7 @@ export const IMPL_EXECUTION_DIRECTIVE =
  * Wrap the implementation `processMessageFn` stream with an idle-chunk watchdog.
  *
  * Root cause it addresses (observed live 2026-07-08, /ideal resume of the
- * gsd-core migration): the implementation stage delegates to the host
+ * flow-core migration): the implementation stage delegates to the host
  * orchestrator turn via `ctx.processMessageFn(implPrompt)` and consumes it with
  * `for await (const chunk of implGen)`. The orchestrator turn finished its final
  * LLM response cleanly (finishReason "stop", text-only) but the generator then
@@ -2492,7 +2492,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
   // Criteria"). Passed verbatim as the orchestrator message it reads as
   // something to discuss, so the impl turn narrated the plan back as markdown
   // (finishReason "stop", zero edits) instead of applying it — observed live on
-  // the gsd-core migration. Prepend an explicit execution directive (module-level
+  // the flow-core migration. Prepend an explicit execution directive (module-level
   // IMPL_EXECUTION_DIRECTIVE) so the PIL classifier routes it to the
   // implement/edit path, not the respond path.
   // C2: Pre-impl gate — read decisions.lock.md and prepend to implementation prompt.
@@ -2646,7 +2646,7 @@ export async function* runSprint(args: RunSprintArgs): AsyncGenerator<StreamChun
       console.error(`[sprint-runner] implementation stage failed (sprint ${sprintN}, run ${ctx.runId}): ${implError}`);
     } finally {
       // A3 FIX: phaseDone for implementation MUST always fire, even when
-      // processMessageFn throws mid-stream (e.g. /gsd executor fails after
+      // processMessageFn throws mid-stream (e.g. /flow executor fails after
       // writing some files). Without the finally guard the TUI phase timeline
       // shows "Implementation" stuck in "active" state forever.
       if (implError) {

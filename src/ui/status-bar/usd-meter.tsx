@@ -12,12 +12,17 @@ import * as React from "react";
 export interface UsdMeterProps {
   session_usd: number;
   current_pct: number;
+  label?: string;
 }
 
-export function UsdMeter({ session_usd, current_pct }: UsdMeterProps): React.ReactElement {
+export function UsdMeter({ session_usd, current_pct, label = "session:" }: UsdMeterProps): React.ReactElement {
   const color = current_pct >= 100 ? "red" : current_pct >= 80 ? "yellow" : current_pct >= 50 ? "cyan" : "white";
 
-  const text = `session: $${session_usd.toFixed(2)}`;
+  const text = `${label} $${session_usd.toFixed(2)}`;
 
-  return React.createElement("text", { fg: color, "data-testid": "usd-meter", "data-pct": current_pct }, text);
+  return React.createElement(
+    "text",
+    { fg: color, height: 1, wrapMode: "none", flexShrink: 0, "data-testid": "usd-meter", "data-pct": current_pct },
+    text,
+  );
 }

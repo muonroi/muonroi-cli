@@ -107,6 +107,7 @@ async function bootCapture(permissionMode: PermissionMode) {
   const { Agent } = await importAgentModule();
   const agent = new Agent(undefined, undefined, undefined, undefined, {
     persistSession: false,
+    executionRole: "infrastructure",
     permissionMode,
   });
   for await (const _chunk of agent.runProductLoopV1({

@@ -12,8 +12,8 @@
  * the ACTUAL wire budget planner.ts requests — never on an inferred constant.
  */
 import { beforeAll, describe, expect, it } from "vitest";
-import { VERDICT_OUTPUT_CONTRACT } from "../../gsd/verdict-schema.js";
-import { loadCatalog } from "../../models/registry.js";
+import { getModelInfo, loadCatalog, MODELS } from "../../models/registry.js";
+import { VERDICT_OUTPUT_CONTRACT } from "../../workflow/verdict-schema.js";
 import type { CouncilLLM, DebatePlan } from "../types.js";
 
 interface RecordedCall {
@@ -94,7 +94,7 @@ describe("planner.ts — synthesis retry output budget", () => {
     await loadCatalog();
   });
 
-  it("delivers the GSD verdict contract to the final leader and compact retry after spec transformation", async () => {
+  it("delivers the FLOW verdict contract to the final leader and compact retry after spec transformation", async () => {
     const { calls } = await runPlanningCapturingCalls({
       leaderModelId: "step-3.7-flash",
       replies: ["", '{"type":"decision","summary":"Review requires scope evidence."}'],
@@ -104,7 +104,7 @@ describe("planner.ts — synthesis retry output budget", () => {
     for (const call of calls) expect(call.system).toContain(VERDICT_OUTPUT_CONTRACT);
   });
 
-  it("does not impose GSD verdict format on ordinary council synthesis", async () => {
+  it("does not impose FLOW verdict format on ordinary council synthesis", async () => {
     const { calls } = await runPlanningCapturingCalls({
       leaderModelId: "step-3.7-flash",
       replies: ['{"type":"decision","summary":"Ordinary discussion is complete."}'],
@@ -156,18 +156,23 @@ describe("planner.ts — synthesis retry output budget", () => {
   });
 
   it("is honest when a PUBLISHED ceiling does not allow more room than the first attempt", async () => {
-    // step-3.5-flash: reasoning:true, catalog max_output_tokens: 8192 — a real
-    // published ceiling that happens to equal the first attempt's own budget.
+    // Preserve the finite-ceiling regression independently of retired catalog rows.
     // The retry must not shrink (still 8192) but must also not CLAIM more room
     // than it is actually asking for.
-    const { calls } = await runPlanningCapturingCalls({
-      leaderModelId: "step-3.5-flash",
-      replies: ["", '{"type":"decision","summary":"Answered on retry with the same declared ceiling."}'],
-    });
-    expect(calls).toHaveLength(2);
-    expect(calls[1]?.maxTokens).toBe(8192);
-    expect(calls[1]?.system).not.toContain("LARGER output budget");
-    expect(calls[1]?.system).toContain("SAME output budget");
+    const finite = { ...getModelInfo("step-3.7-flash")!, id: "fixture-finite-reasoning", maxOutputTokens: 8192 };
+    MODELS.push(finite);
+    try {
+      const { calls } = await runPlanningCapturingCalls({
+        leaderModelId: finite.id,
+        replies: ["", '{"type":"decision","summary":"Answered on retry with the same declared ceiling."}'],
+      });
+      expect(calls).toHaveLength(2);
+      expect(calls[1]?.maxTokens).toBe(8192);
+      expect(calls[1]?.system).not.toContain("LARGER output budget");
+      expect(calls[1]?.system).toContain("SAME output budget");
+    } finally {
+      MODELS.splice(MODELS.indexOf(finite), 1);
+    }
   });
 
   it("a truncated first attempt still retries with the SMALLER, ask-for-less budget (guards the other case)", async () => {

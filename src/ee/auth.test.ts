@@ -21,6 +21,7 @@ describe("auth path utilities", () => {
     const testPath = `${home}/some/nested/dir`;
     expect(relativizePath(testPath)).toBe("~/some/nested/dir");
     expect(relativizePath(`${os.homedir()}\\some\\nested\\dir`)).toBe("~/some/nested/dir");
+    expect(relativizePath(`${os.homedir()}-another/some/dir`)).not.toMatch(/^~/);
   });
 
   it("writeExperienceConfig creates directory with 0o700 permissions", async () => {

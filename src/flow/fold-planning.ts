@@ -3,7 +3,7 @@
  * consolidation migration (Sprint-2 Part A, staged per REV-3 Kill B).
  *
  * WHY staged / copy-only:
- *   GSD phases are still CREATED by the external `gsd-tools.cjs` subprocess,
+ *   FLOW phases are still CREATED by the external `flow-tools.cjs` subprocess,
  *   which writes to `.planning/` (hardcoded). Until that writer is removed
  *   (Part B — deferred), `.planning/` must remain the live tree. So this
  *   migration COPIES `.planning/` into the consolidated location and NEVER

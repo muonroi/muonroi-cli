@@ -54,6 +54,9 @@ export const LIFECYCLE_PRESET: ReadonlySet<EventKind> = new Set<EventKind>([
   // preset would leave every driver on the default env back to gating on
   // `idle`, which resolves on an empty pre-mount frame.
   "input-ready",
+  // The host starting/stopping turns on its own. A driver on the default preset
+  // must be able to tell a host-started turn from the model speaking unprompted.
+  "ideal-autopilot",
   "usage",
   // Ephemeral kinds carry a visualText snapshot for wake-at-milestone monitors
   // (event-tee.ts EPHEMERAL_KINDS). The default preset must not drop them, or a

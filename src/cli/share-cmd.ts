@@ -1,11 +1,11 @@
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { publish } from "../chat/broadcast-bus.js";
 import type { ChatChannelMapping, ChatClient } from "../chat/types.js";
 import { STAKEHOLDER_ALLOW } from "../chat/types.js";
 import { productSlug } from "../product-loop/product-identity.js";
 import { addStakeholder, listStakeholders } from "../product-loop/stakeholder-acl.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 export type ShareResult =
   | { kind: "granted"; userId: string; slug: string; channelId: string }
@@ -63,10 +63,6 @@ async function resolveSlug(cwd: string, productArg: string | undefined): Promise
 interface ChannelStore {
   version: number;
   items: Record<string, ChatChannelMapping>;
-}
-
-function muonroiHome(): string {
-  return process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
 }
 
 async function readChannelMapping(slug: string): Promise<ChatChannelMapping | null> {

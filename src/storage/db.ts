@@ -2,6 +2,8 @@ import { createRequire } from "node:module";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { applyMigrations } from "./migrations";
 
 export interface SQLiteStatement {
@@ -26,8 +28,9 @@ let db: SQLiteDatabase | null = null;
 const requireSync = createRequire(import.meta.url);
 
 export function getDatabasePath(): string {
-  const home = process.env.HOME ?? process.env.USERPROFILE ?? os.homedir();
-  const dir = path.join(home, ".muonroi-cli");
+  // MUONROI_CLI_HOME wins (suite pin, relocated installs); otherwise the DB stays
+  // under HOME/USERPROFILE exactly as before.
+  const dir = process.env.MUONROI_CLI_HOME ?? muonroiHome(process.env.HOME ?? process.env.USERPROFILE ?? os.homedir());
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   return path.join(dir, "muonroi.db");
 }
@@ -63,13 +66,55 @@ function loadDriver(filename: string): SQLiteDatabase {
   }
 }
 
+const BUSY_RETRY_ATTEMPTS = 8;
+const BUSY_RETRY_BASE_MS = 50;
+
+function isBusyError(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null;
+  return /SQLITE_BUSY|database is locked/i.test(`${e?.code ?? ""} ${e?.message ?? ""}`);
+}
+
+/**
+ * Runs a PRAGMA, retrying a bounded number of times on SQLITE_BUSY. busy_timeout
+ * alone does not cover the WAL switch: SQLite may return BUSY at once instead of
+ * invoking the busy handler when waiting could deadlock, and a fresh DB opened by
+ * several processes hit exactly that (ci-matrix windows, 2026-11-11, job
+ * 130416565204: migrations-concurrent "database is locked" at the journal_mode
+ * pragma with busy_timeout = 5000 already set). Any other error is thrown at once.
+ */
+export function pragmaRetryingBusy(
+  database: Pick<SQLiteDatabase, "pragma">,
+  query: string,
+  sleep: (ms: number) => void = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+): unknown {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return database.pragma(query);
+    } catch (err) {
+      if (!isBusyError(err) || attempt >= BUSY_RETRY_ATTEMPTS) throw err;
+      const waitMs = BUSY_RETRY_BASE_MS * attempt;
+      logger.warn("storage", "PRAGMA hit SQLITE_BUSY; retrying", {
+        query,
+        attempt,
+        waitMs,
+        error: (err as Error)?.message,
+      });
+      sleep(waitMs);
+    }
+  }
+}
+
 export function getDatabase(): SQLiteDatabase {
   if (db) return db;
 
   const database = loadDriver(getDatabasePath());
-  database.pragma("journal_mode = WAL");
-  database.pragma("foreign_keys = ON");
+  // busy_timeout FIRST: switching a fresh DB to WAL takes an exclusive lock, and
+  // without a timeout a second process opening the same DB at that moment fails
+  // at once with SQLITE_BUSY (migrations-concurrent.test.ts: "database is locked"
+  // from the journal_mode pragma when it ran before busy_timeout).
   database.pragma("busy_timeout = 5000");
+  pragmaRetryingBusy(database, "journal_mode = WAL");
+  database.pragma("foreign_keys = ON");
   database.pragma("synchronous = NORMAL");
   applyMigrations(database);
   db = database;

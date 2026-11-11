@@ -1,0 +1,36 @@
+{
+  "measuredAt": "2026-10-16T07:10:07.055964+00:00",
+  "scope": "diagnostic audit; no production/config/process mutations",
+  "artifacts": [
+    {
+      "path": ".scratch/gsd-ee-block-audit/direct-blocks.json",
+      "sha256": "508d0cfbe5919f8b7da4597efef26384a92e54065a919933e75b089695a60046",
+      "bytes": 12257
+    },
+    {
+      "path": ".scratch/gsd-ee-block-audit/current-policy-replay.json",
+      "sha256": "c10ddb821aa51fcced772df391db38402618c6f10467980f23b3d3583ef06d51",
+      "bytes": 17646
+    },
+    {
+      "path": ".scratch/gsd-ee-block-audit/replay.mjs",
+      "sha256": "c93c8b5046c95d43cc369f7fd3fd8fdb487988635e4a39e73813ac0b754a43d8",
+      "bytes": 1594
+    },
+    {
+      "path": ".scratch/gsd-ee-block-audit/processes.json",
+      "sha256": "2a199bce4cc463a49dc8eae1afeb7b00798b05b0f534107e234c9565e2d17b70",
+      "bytes": 2117
+    },
+    {
+      "path": ".scratch/gsd-ee-block-audit/installations.json",
+      "sha256": "ab0d699b0f3cced31a8bff27674b7595f373d6348bce4725baeee2548ed9dc3d",
+      "bytes": 1256
+    },
+    {
+      "path": "docs/investigations/gsd-ee-block-audit-2026-10-16.md",
+      "sha256": "692c1cd294893c8c79a56fb22773d7ed388eeba4e77883a5f038757992587858",
+      "bytes": 5725
+    }
+  ]
+}

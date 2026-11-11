@@ -56,6 +56,7 @@ import {
 } from "./batch-utils";
 import { relaxCompactionSettings } from "./compaction";
 import { humanizeApiError, isAuthenticationError, isContextLimitError } from "./error-utils";
+import { filterExecutionTools, withOrchestratorContract } from "./orchestration-policy.js";
 import { extractProviderOptionsShape } from "./provider-options-shape.js";
 import { classifyStreamError } from "./retry-classifier.js";
 import { combineAbortSignals, notifyObserver } from "./tool-utils";
@@ -159,7 +160,8 @@ export class BatchTurnRunner {
     signal: AbortSignal;
   }): AsyncGenerator<StreamChunk, void, unknown> {
     const deps = this.deps;
-    const { userModelMessage, observer, provider, subagents, system, runtime, modelInfo, signal } = args;
+    const { userModelMessage, observer, provider, subagents, runtime, modelInfo, signal } = args;
+    const system = withOrchestratorContract(args.system, deps.executionRole);
     let attemptedOverflowRecovery = false;
     let streamRetryCount = 0;
     const MAX_STREAM_RETRIES = 2;
@@ -202,7 +204,11 @@ export class BatchTurnRunner {
           sessionId: deps.getSessionId() ?? undefined,
         });
         let tools: ToolSet = !batchCaps.supportsClientTools(runtime.modelInfo) ? {} : baseTools;
-        if (deps.mode === "agent" && batchCaps.supportsClientTools(runtime.modelInfo)) {
+        if (
+          deps.executionRole !== "orchestrator" &&
+          deps.mode === "agent" &&
+          batchCaps.supportsClientTools(runtime.modelInfo)
+        ) {
           const mcpBundle = await acquireMcpTools(loadMcpServers(), {
             onOAuthRequired: (_serverId, url) => {
               // Server-supplied URL is untrusted — openUrl validates the scheme
@@ -218,6 +224,7 @@ export class BatchTurnRunner {
           }
         }
 
+        tools = filterExecutionTools(tools, baseTools, deps.executionRole ?? "worker");
         const batchTools = !batchCaps.supportsClientTools(runtime.modelInfo) ? [] : await toolSetToBatchTools(tools);
         const batch = await createBatch({
           ...deps.getBatchClientOptions(signal),
@@ -254,7 +261,7 @@ export class BatchTurnRunner {
                     // misses the latter and 400s. See compaction.ts for the session
                     // that proved it.
                     maxOutputTokens: shouldDropParam(runtime, "maxOutputTokens") ? undefined : deps.maxTokens,
-                    reasoningEffort: runtime.providerOptions?.xai.reasoningEffort,
+                    reasoningEffort: runtime.reasoningEffort,
                     tools: batchTools,
                   }),
                 },

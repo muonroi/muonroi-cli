@@ -17,15 +17,17 @@
  */
 
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { redactSecrets } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 
 export type DecisionKind =
+  | "auth-fallback"
   | "auto-council"
   | "post-turn-compact"
   | "router-tier"
   | "permission-override"
+  | "permission-mode"
   | "yolo-override"
   | "scope-gate";
 
@@ -41,8 +43,8 @@ export interface DecisionLogEntry {
   meta?: Record<string, unknown>;
 }
 
-function muonroiHome(homeOverride?: string): string {
-  return homeOverride ?? process.env.MUONROI_CLI_HOME ?? path.join(os.homedir(), ".muonroi-cli");
+function resolveHome(homeOverride?: string): string {
+  return homeOverride ?? muonroiHome();
 }
 
 function todayUtc(): string {
@@ -51,7 +53,7 @@ function todayUtc(): string {
 }
 
 function logPath(homeOverride?: string): string {
-  return path.join(muonroiHome(homeOverride), "usage", `decision-log-${todayUtc()}.jsonl`);
+  return path.join(resolveHome(homeOverride), "usage", `decision-log-${todayUtc()}.jsonl`);
 }
 
 export async function appendDecisionLog(entry: DecisionLogEntry, homeOverride?: string): Promise<void> {
@@ -79,7 +81,7 @@ export async function appendDecisionLog(entry: DecisionLogEntry, homeOverride?: 
 
 export async function readDecisionLog(date?: string, homeOverride?: string): Promise<DecisionLogEntry[]> {
   const day = date ?? todayUtc();
-  const fp = path.join(muonroiHome(homeOverride), "usage", `decision-log-${day}.jsonl`);
+  const fp = path.join(resolveHome(homeOverride), "usage", `decision-log-${day}.jsonl`);
   try {
     const content = await fs.readFile(fp, "utf-8");
     return content
@@ -93,7 +95,7 @@ export async function readDecisionLog(date?: string, homeOverride?: string): Pro
 }
 
 export async function listDecisionLogDates(homeOverride?: string): Promise<string[]> {
-  const dir = path.join(muonroiHome(homeOverride), "usage");
+  const dir = path.join(resolveHome(homeOverride), "usage");
   try {
     const files = await fs.readdir(dir);
     return files

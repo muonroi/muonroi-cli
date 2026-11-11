@@ -84,6 +84,9 @@ export interface OpenTUIHarnessHandle {
  * For backwards-compatibility the return value is also callable as a plain
  * function (invoking it calls `uninstall()`).
  */
+/** How long after a semantic change the visual frame keeps being re-sampled. */
+const VISUAL_SETTLE_MS = 1000;
+
 export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenTUIHarnessHandle & (() => void) {
   const fps = opts.fps ?? 60;
   const intervalMs = Math.max(1, Math.round(1000 / fps));
@@ -99,16 +102,28 @@ export function installOpenTUIHarness(opts: InstallOpenTUIHarnessOptions): OpenT
     getTs: fakeClock ? () => seq * 16 : () => Date.now(),
   });
 
+  // The semantic registry updates in React effects, BEFORE OpenTUI paints the
+  // matching cells, so a visual captured on the semantic change usually shows
+  // the previous paint. Captured only then, the visual stream froze one paint
+  // behind until some later semantic change (measured: `/ideal status` text was
+  // in the semantic tree while render_visual still showed the frame before it,
+  // indefinitely). Keep sampling for a short settle window after each semantic
+  // change; the visual hook's content-hash dedup sends only frames that differ,
+  // and outside the window getSpanLines() still runs only on real UI updates.
+  let visualSettleUntil = 0;
+
   function trySend(): void {
     const frame = hook.capture();
-    if (frame === null) return; // dedup — no change
+    const now = Date.now();
+    if (frame === null && now >= visualSettleUntil) return; // dedup — no change, nothing settling
     try {
-      opts.transport.send(`${JSON.stringify(frame)}\n`);
-      opts.onFrame?.(frame);
-      // Piggyback the visual (rendered cell-grid) frame on semantic changes so
-      // getSpanLines() only runs when the UI actually changed, not every tick.
+      if (frame !== null) {
+        opts.transport.send(`${JSON.stringify(frame)}\n`);
+        opts.onFrame?.(frame);
+        visualSettleUntil = now + VISUAL_SETTLE_MS;
+      }
       if (opts.captureVisual) {
-        const vframe = opts.captureVisual(vseq, fakeClock ? vseq * 16 : Date.now());
+        const vframe = opts.captureVisual(vseq, fakeClock ? vseq * 16 : now);
         if (vframe !== null) {
           vseq++;
           opts.transport.send(`${JSON.stringify(vframe)}\n`);

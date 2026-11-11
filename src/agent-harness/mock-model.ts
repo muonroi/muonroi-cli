@@ -58,7 +58,7 @@ export interface MockModelFixture {
    * calling the model with a distinctive system prompt ("Reply with ONE line of
    * EIGHT lowercase words…") and parses a comma-separated line. The generic
    * fixture stream ("Hello back!" / arbitrary chunks) does not parse → the turn
-   * degrades to intentKind=UNKNOWN, which skips the gsd gate and breaks routing
+   * degrades to intentKind=UNKNOWN, which skips the flow gate and breaks routing
    * in E2E specs. The mock detects that classify call by its system prompt and
    * returns THIS line instead of consuming the turn fixture — so every spec gets
    * a sane classification for free. Override per-fixture when a spec needs a
@@ -90,6 +90,22 @@ export interface MockModelFixture {
    * Setting `classify` implies opting in.
    */
   autoClassify?: boolean;
+  /**
+   * Per-role stream queues, chosen by the call's system prompt. The first route
+   * whose `systemIncludes` substring occurs in the system text serves the call
+   * from ITS OWN cursor (same exhaust-repeats-last rule as `stream`); a call no
+   * route matches falls through to `stream`.
+   *
+   * Why: the TUI's top-level agent is the orchestrator, which has no write/shell
+   * tools and dispatches workers as detached background processes
+   * (src/orchestrator/delegations.ts). Each worker process loads the SAME
+   * `--mock-llm` dir with a fresh cursor, so a single shared `stream` queue
+   * would replay the orchestrator's `task` round to the worker. Routing on the
+   * worker role line ("You are the General sub-agent", src/orchestrator/
+   * prompts.ts) gives each role a deterministic script regardless of which
+   * process serves it.
+   */
+  routes?: ReadonlyArray<{ systemIncludes: string; stream: StreamChunks | StreamChunks[] }>;
 }
 
 /**
@@ -105,7 +121,7 @@ const CLASSIFY_SIGNATURE = "Reply with ONE line of EIGHT lowercase words";
  * These fire on their own schedule and are not what any E2E fixture is scripting,
  * but they are still `doStream` calls — so without an intercept each one EATS a
  * fixture round and the agent receives someone else's chunks. Measured in
- * gsd-hard-gate: the recorded calls were
+ * flow-hard-gate: the recorded calls were
  *   [0] session-naming  [1] classify  [2] compaction-proposer  [3] AGENT
  * so the title call consumed the `write_file` tool-call round and the agent got a
  * text-stop round instead — it never emitted the tool call, so the tool result and
@@ -135,7 +151,7 @@ const ANCILLARY_SIGNATURES: ReadonlyArray<{ label: string; signature: string; re
 
 /**
  * Safe default classification: a non-chitchat coding task of standard depth.
- * `intent=task` keeps the toolset + gsd gate active; `standard` depth avoids
+ * `intent=task` keeps the toolset + flow gate active; `standard` depth avoids
  * forcing heavy-only paths. First word MUST be a valid taskType.
  */
 const DEFAULT_CLASSIFY_LINE = "generate, balanced, task, code, standard, local, english, clear";
@@ -159,6 +175,71 @@ function systemPromptText(options: LanguageModelV3CallOptions): string {
   return parts.join("\n");
 }
 
+/**
+ * Placeholder a scripted tool-call `input` may carry to reuse a value the run
+ * produced at runtime (a background job id, a result digest) that a static
+ * fixture cannot know: `{{prior:<key>}}` resolves to the value of the most
+ * recent `<key>=<value>` or `"<key>": "<value>"` in the conversation the model
+ * is being called with (user, assistant and tool-result text, newest first).
+ */
+const PRIOR_PLACEHOLDER = /\{\{prior:([A-Za-z][\w-]*)\}\}/g;
+
+/** All prompt text, newest message first (tool results stringified). */
+function promptTextsNewestFirst(options: LanguageModelV3CallOptions): string[] {
+  const prompt = (options as { prompt?: unknown }).prompt;
+  if (!Array.isArray(prompt)) return [];
+  const texts: string[] = [];
+  for (const msg of prompt) {
+    const content = (msg as { content?: unknown }).content;
+    if (typeof content === "string") {
+      texts.push(content);
+      continue;
+    }
+    if (!Array.isArray(content)) continue;
+    for (const part of content) {
+      const p = part as { text?: unknown; output?: { value?: unknown }; input?: unknown };
+      if (typeof p.text === "string") texts.push(p.text);
+      else if (p.output !== undefined)
+        texts.push(typeof p.output.value === "string" ? p.output.value : JSON.stringify(p.output.value));
+    }
+  }
+  return texts.reverse();
+}
+
+function lookupPrior(texts: string[], key: string): string | undefined {
+  // `key` is constrained by PRIOR_PLACEHOLDER to [A-Za-z][\w-]*, so it needs no escaping.
+  const patterns = [
+    new RegExp(String.raw`\b${key}=([\w.-]+)`),
+    new RegExp(String.raw`\\?"${key}\\?"\s*:\s*\\?"([\w.-]+)`),
+  ];
+  for (const text of texts) {
+    for (const re of patterns) {
+      const m = re.exec(text);
+      if (m?.[1]) return m[1];
+    }
+  }
+  return undefined;
+}
+
+/** Resolve `{{prior:<key>}}` placeholders in scripted tool-call inputs. */
+export function resolvePriorPlaceholders(chunks: StreamChunks, options: LanguageModelV3CallOptions): StreamChunks {
+  if (!chunks.some((c) => c.type === "tool-call" && typeof c.input === "string" && c.input.includes("{{prior:")))
+    return chunks;
+  const texts = promptTextsNewestFirst(options);
+  return chunks.map((c) => {
+    if (c.type !== "tool-call" || typeof c.input !== "string" || !c.input.includes("{{prior:")) return c;
+    const input = c.input.replace(PRIOR_PLACEHOLDER, (whole, key: string) => {
+      const value = lookupPrior(texts, key);
+      if (value === undefined) {
+        process.stderr.write(`[mock-model] unresolved placeholder ${whole} in tool-call ${c.toolName}\n`);
+        return whole;
+      }
+      return value;
+    });
+    return { ...c, input };
+  });
+}
+
 export interface MockModelHandle {
   /** The mock model instance — assign to `globalThis.__muonroiMockModel`. */
   model: MockLanguageModelV3;
@@ -176,6 +257,96 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
 }
 
 /**
+ * A round containing `{type:"stall", stallMs}` models a provider that accepts
+ * the request and then holds the socket open without sending a byte (session
+ * 7f24048ad75d: `lastPhase:"mainStream.provider"`, 120s of silence, watchdog
+ * kill). The part is consumed here, never forwarded. The silence ends after
+ * `stallMs` or when the request's abort signal fires, whichever is first — a
+ * real fetch rejects on abort, and a stall that ignored the signal would not
+ * be a faithful model of one.
+ */
+function splitStall(chunks: StreamChunks): { chunks: StreamChunks; stallMs: number } {
+  let stallMs = 0;
+  const rest: StreamChunks = [];
+  for (const c of chunks) {
+    if ((c as { type?: string }).type === "stall") {
+      stallMs = Math.max(stallMs, Number((c as { stallMs?: number }).stallMs ?? 0));
+      continue;
+    }
+    rest.push(c);
+  }
+  return { chunks: rest, stallMs };
+}
+
+function stallThenStream(
+  chunks: StreamChunks,
+  stallMs: number,
+  signal: AbortSignal | undefined,
+): ReadableStream<LanguageModelV3StreamPart> {
+  return new ReadableStream<LanguageModelV3StreamPart>({
+    async start(controller) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          if (signal?.aborted) {
+            reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+            return;
+          }
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(signal?.reason ?? new DOMException("aborted", "AbortError"));
+          };
+          const timer = setTimeout(() => {
+            signal?.removeEventListener("abort", onAbort);
+            resolve();
+          }, stallMs);
+          signal?.addEventListener("abort", onAbort, { once: true });
+        });
+        for (const c of chunks) controller.enqueue(c);
+        controller.close();
+      } catch (err) {
+        controller.error(err);
+      }
+    },
+  });
+}
+
+/** The stream for one scripted round: honours a `stall` part, else paced by `chunkDelayMs`. */
+function roundStream(
+  chunks: StreamChunks,
+  options: LanguageModelV3CallOptions,
+  chunkDelayMs: number,
+): ReadableStream<LanguageModelV3StreamPart> {
+  const { chunks: parts, stallMs } = splitStall(chunks);
+  if (stallMs > 0) return stallThenStream(parts, stallMs, options.abortSignal);
+  return simulateReadableStream<LanguageModelV3StreamPart>({
+    chunks: parts,
+    initialDelayInMs: chunkDelayMs || null,
+    chunkDelayInMs: chunkDelayMs || null,
+  });
+}
+
+/**
+ * A round whose chunk is `{type:"error", rejectRequest:true, error}` makes
+ * doStream itself REJECT — the shape of a real provider answering with an HTTP
+ * error status before any chunk (e.g. 503 "engine overloaded"), as opposed to
+ * an in-stream `error` part. Retry layers that wrap the request initiation can
+ * only be exercised this way.
+ */
+function rejectIfRequested(chunks: readonly LanguageModelV3StreamPart[], label: string): void {
+  const rejection = chunks.find(
+    (c) =>
+      (c as { type?: string; rejectRequest?: boolean }).type === "error" &&
+      (c as { rejectRequest?: boolean }).rejectRequest === true,
+  ) as { error?: unknown } | undefined;
+  if (!rejection) return;
+  if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+    process.stderr.write(`[mock-model] doStream ${label} → rejecting request
+`);
+  }
+  throw rejection.error instanceof Error ? rejection.error : new Error(String(rejection.error));
+}
+
+/**
  * Build a MockLanguageModelV3 with sequenced or fixed responses.
  *
  * The mock's `doStream` returns a `simulateReadableStream` that emits the
@@ -186,6 +357,11 @@ function isNestedArray(v: StreamChunks | StreamChunks[]): v is StreamChunks[] {
  */
 export function createMockModel(fx: MockModelFixture): MockModelHandle {
   const streams: StreamChunks[] = isNestedArray(fx.stream) ? fx.stream : [fx.stream];
+  const routes = (fx.routes ?? []).map((route) => ({
+    systemIncludes: route.systemIncludes,
+    streams: isNestedArray(route.stream) ? route.stream : [route.stream],
+    cursor: 0,
+  }));
   const generates: string[] = fx.generate === undefined ? [] : Array.isArray(fx.generate) ? fx.generate : [fx.generate];
   let callIdx = 0;
   let genIdx = 0;
@@ -208,7 +384,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       // line and DO NOT advance the turn-fixture cursor, so the classify call
       // (which fires on every turn) never steals the round chunks meant for the
       // agent's actual reply. Without this the generic fixture text fails
-      // parseResponse → intentKind=UNKNOWN → gsd gate/routing break in E2E.
+      // parseResponse → intentKind=UNKNOWN → flow gate/routing break in E2E.
       if (interceptClassify && systemPromptText(options).includes(CLASSIFY_SIGNATURE)) {
         if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
           process.stderr.write(`[mock-model] doStream classify → "${classifyLine}"\n`);
@@ -240,8 +416,27 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
           };
         }
       }
-      const chunks = streams[Math.min(callIdx, streams.length - 1)]!;
+      if (routes.length > 0) {
+        const sys = systemPromptText(options);
+        const route = routes.find((r) => sys.includes(r.systemIncludes));
+        if (route) {
+          const routed = resolvePriorPlaceholders(
+            route.streams[Math.min(route.cursor, route.streams.length - 1)]!,
+            options,
+          );
+          route.cursor += 1;
+          rejectIfRequested(routed, `route "${route.systemIncludes}" #${route.cursor}`);
+          if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
+            process.stderr.write(
+              `[mock-model] doStream route "${route.systemIncludes}" #${route.cursor} → ${routed.length} parts, types=${routed.map((c) => c.type).join(",")}\n`,
+            );
+          }
+          return { stream: roundStream(routed, options, chunkDelayMs) };
+        }
+      }
+      const chunks = resolvePriorPlaceholders(streams[Math.min(callIdx, streams.length - 1)]!, options);
       callIdx += 1;
+      rejectIfRequested(chunks, `#${callIdx}`);
       if (process.env.MUONROI_DEBUG_MOCK_MODEL === "1") {
         // Useful when diagnosing harness specs that stall before streamText —
         // a missing log line means doStream was never invoked.
@@ -249,16 +444,10 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
           `[mock-model] doStream #${callIdx} → ${chunks.length} parts, types=${chunks.map((c) => c.type).join(",")}\n`,
         );
       }
-      return {
-        stream: simulateReadableStream<LanguageModelV3StreamPart>({
-          chunks,
-          // Only the turn stream honours the delay — the classify intercept above
-          // fires on EVERY turn, so pacing it would tax specs that just want a
-          // slow answer.
-          initialDelayInMs: chunkDelayMs || null,
-          chunkDelayInMs: chunkDelayMs || null,
-        }),
-      };
+      // Only the turn stream honours the delay — the classify intercept above
+      // fires on EVERY turn, so pacing it would tax specs that just want a
+      // slow answer.
+      return { stream: roundStream(chunks, options, chunkDelayMs) };
     },
     // doGenerate backs `generateObject` / non-streaming `generateText`. The AI
     // SDK reads the first text content part as the object JSON (generateObject)
@@ -291,6 +480,7 @@ export function createMockModel(fx: MockModelFixture): MockModelHandle {
       model.doStreamCalls.length = 0;
       callIdx = 0;
       genIdx = 0;
+      for (const route of routes) route.cursor = 0;
     },
   };
 }
@@ -641,6 +831,16 @@ export async function loadMockModelFromDir(dir: string): Promise<LoadedMockModel
       stream: isNestedArray(raw.model.stream)
         ? raw.model.stream.map(normalizeStreamChunks)
         : normalizeStreamChunks(raw.model.stream),
+      ...(raw.model.routes
+        ? {
+            routes: raw.model.routes.map((route) => ({
+              systemIncludes: route.systemIncludes,
+              stream: isNestedArray(route.stream)
+                ? route.stream.map(normalizeStreamChunks)
+                : normalizeStreamChunks(route.stream),
+            })),
+          }
+        : {}),
     };
     const base = createMockModel(normalized);
     log(
@@ -713,6 +913,22 @@ export interface InstalledMockHandle extends MockModelHandle {
  * throws (e.g. circular tool refs). Each fallback entry preserves the fields
  * cost-leak specs actually assert against.
  */
+/** Infix that marks a background-worker dump next to the parent's dump file. */
+export const WORKER_DUMP_INFIX = ".worker-";
+
+/**
+ * Where THIS process dumps its recordings. A background delegation worker
+ * (MUONROI_BACKGROUND_CHILD=1, see src/orchestrator/delegations.ts) inherits the
+ * parent's MUONROI_MOCK_MODEL_DUMP; writing the same file would overwrite the
+ * orchestrator's recording after every worker doStream. Each worker therefore
+ * writes a sibling `<base>.worker-<pid>.json` the spec reads separately.
+ */
+export function resolveMockDumpPath(basePath: string, env: NodeJS.ProcessEnv, pid: number): string {
+  if (env.MUONROI_BACKGROUND_CHILD !== "1") return basePath;
+  const stem = basePath.endsWith(".json") ? basePath.slice(0, -".json".length) : basePath;
+  return `${stem}${WORKER_DUMP_INFIX}${pid}.json`;
+}
+
 export function dumpRecordings(
   path: string,
   model: MockLanguageModelV3 | { doStreamCalls: ReadonlyArray<unknown> },

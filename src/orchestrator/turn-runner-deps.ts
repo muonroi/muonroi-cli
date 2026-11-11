@@ -32,9 +32,14 @@ import type { CompactionSettings } from "./compaction";
  * the concrete deps interfaces.
  */
 export interface TurnRunnerDepsBase {
+  readonly requestHistory?: import("./request-history.js").RequestHistory;
+  readonly planReviewBudget?: import("../workflow/review-budget.js").PlanReviewBudget;
+  readonly executionRole?: import("./orchestration-policy.js").ExecutionRole;
+  readonly reasoningEffort?: import("../types/index").ReasoningEffort;
   // ---- Read-only state references ---------------------------------------
   /** Live messages array (mutated by push). */
   readonly messages: ModelMessage[];
+  getContextProtection?(): Promise<import("./working-context.js").ContextProtection>;
   readonly bash: BashTool;
   readonly mode: AgentMode;
   readonly maxToolRounds: number;
@@ -79,7 +84,21 @@ export interface TurnRunnerDepsBase {
   // ---- Task / delegation tool callbacks ---------------------------------
   runTask(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
   runDelegation(request: TaskRequest, signal?: AbortSignal): Promise<ToolResult>;
-  readDelegation(id: string): Promise<ToolResult>;
+  readDelegation(id: string, artifact?: import("../types/index.js").DelegationArtifactReadInput): Promise<ToolResult>;
+  sendDelegation?(
+    id: string,
+    message: string,
+    replyTo: string | undefined,
+    toolCallId: string,
+    signal?: AbortSignal,
+    writeScope?: string[],
+  ): Promise<ToolResult>;
+  acceptDelegation?(input: import("../types/index.js").DelegationAcceptanceInput): Promise<ToolResult>;
+  startCouncil?(input: { topic: string; reason: string; context: string; outputContract: string }): Promise<ToolResult>;
+  startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
+  readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+  /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
+  verifyWorkerEvidence?: () => Promise<string>;
   listDelegations(): Promise<ToolResult>;
   killDelegation(id: string): Promise<ToolResult>;
 

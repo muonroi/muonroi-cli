@@ -106,10 +106,10 @@
 
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { atomicWriteJSON } from "../storage/atomic-io.js";
 import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import type { TestRunnerFormat } from "./test-failure-parse.js";
 
 /** Bumped whenever the record's meaning changes; an older record is rejected, never guessed at. */
@@ -413,7 +413,7 @@ function isSafeRunId(runId: string): boolean {
  * loudly. Folding the tree into the filename would only make the record harder
  * for a human to find, in exchange for silencing a signal worth hearing.
  */
-export function floorBaselineWitnessPath(runId: string, homeDir: string = os.homedir()): string | null {
+export function floorBaselineWitnessPath(runId: string, homeDir?: string): string | null {
   if (!isSafeRunId(runId)) {
     logger.warn(
       "orchestrator",
@@ -424,7 +424,7 @@ export function floorBaselineWitnessPath(runId: string, homeDir: string = os.hom
   }
   const override = process.env[VERIFY_BASELINE_WITNESS_DIR_ENV];
   const dir =
-    override && override.trim().length > 0 ? override.trim() : path.join(homeDir, ".muonroi-cli", "floor-baselines");
+    override && override.trim().length > 0 ? override.trim() : path.join(muonroiHome(homeDir), "floor-baselines");
   return path.join(dir, `${runId}${path.extname(VERIFY_BASELINE_FILENAME)}`);
 }
 

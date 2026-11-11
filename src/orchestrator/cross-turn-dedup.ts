@@ -62,7 +62,7 @@
 import { createHash } from "node:crypto";
 import type { ToolSet } from "ai";
 import { isGuardRejectableCall } from "../tools/arg-guard.js";
-import { RAW_FOR_DEDUP } from "./sub-agent-cap";
+import { rawForDedup } from "./sub-agent-cap";
 import { anchorIsProvablyGone, type DedupCallContext, readCallContext, toIdSet } from "./tool-result-visibility.js";
 
 export type { DedupCallContext };
@@ -346,7 +346,7 @@ export function isCrossTurnDedupEnabled(): boolean {
  * deduped via the shared CrossTurnDedup instance. The wrap is applied
  * AFTER any other compression (e.g. sub-agent cap): the cap sees the raw
  * output, and the dedup SERVES the already-compressed output but HASHES the
- * raw pre-cap content the cap stashed under RAW_FOR_DEDUP (H5) — so the cap's
+ * raw pre-cap content the cap recorded via rawForDedup (H5) — so the cap's
  * non-deterministic trimming/markers can no longer defeat the hash. On the
  * top-level path (no cap) there is no Symbol and it hashes the served output
  * directly.
@@ -389,10 +389,10 @@ function dedupResult(dedup: CrossTurnDedup, toolName: string, raw: unknown, call
   if (raw && typeof raw === "object") {
     const obj = raw as Record<string, unknown>;
     if (typeof obj.output === "string") {
-      // H5: if a sub-agent cap ran first, it stashed the RAW pre-cap output under
-      // RAW_FOR_DEDUP — hash on that so the cap's non-deterministic trimming can't
-      // defeat the match. The Symbol never serializes to the model wire.
-      const hashSource = (obj as Record<string | symbol, unknown>)[RAW_FOR_DEDUP];
+      // H5: if a sub-agent cap ran first, it recorded the RAW pre-cap output in
+      // its side table — hash on that so the cap's non-deterministic trimming
+      // can't defeat the match.
+      const hashSource = rawForDedup(obj);
       const stub = dedup.maybeDedup(
         toolName,
         obj.output,

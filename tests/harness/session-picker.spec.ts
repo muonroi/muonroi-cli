@@ -15,6 +15,10 @@ describe("resume picker collapses conversation trees", () => {
     // Use the same storage layer the app uses so the schema/migrations match.
     process.env.HOME = home;
     process.env.USERPROFILE = home;
+    // The suite pins MUONROI_CLI_HOME (vitest-setup.ts) and the DB follows it, so
+    // HOME alone would seed the pinned shared DB while the spawned TUI (helpers.ts:
+    // MUONROI_CLI_HOME = <cwd>/.muonroi-cli) reads its own — an empty picker.
+    process.env.MUONROI_CLI_HOME = path.join(home, ".muonroi-cli");
     const { SessionStore } = await import("../../src/storage/sessions.js");
     const { getDatabase, closeDatabase } = await import("../../src/storage/db.js");
     const store = new SessionStore(home);

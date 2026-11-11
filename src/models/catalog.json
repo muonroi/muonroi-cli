@@ -1,7 +1,7 @@
 {
-  "version": "2.20",
-  "updated_at": "2026-10-08",
-  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts and pricing verified against platform.stepfun.ai documentation on 2026-08-18; StepFun rate_limits (concurrency 5 / 100 RPM / 500k TPM) updated 2026-10-14 from the account's StepFun limits page (limits are per account tier — override per account with settings.rateLimitOverrides), plus step-5-preview added and re-verified against platform.stepfun.ai documentation on 2026-09-23. Other pricing APPROXIMATE. Current OpenAI GPT6/6.1 and Claude Fable5.1/Opus5.5/Sonnet5.5/Haiku5.5 contracts and pricing verified against official model pages on2026-10-08; long_context_pricing scales the whole request above the input threshold.",
+  "version": "2.21",
+  "updated_at": "2026-11-05",
+  "description": "Local fallback catalog: anthropic + deepseek + zai + opencode-go + xai + stepfun. routing.council multi-provider debate; routing.vision_proxy Z.ai/xai backend for text-only models (deepseek etc.). provider_policies.peak_hour from vendor docs. Anthropic rows verified against platform.claude.com/docs/en/about-claude/pricing and /models/overview on 2026-07-29. StepFun model contracts and pricing verified against platform.stepfun.ai documentation on 2026-08-18; StepFun rate_limits (concurrency 5 / 100 RPM / 500k TPM) updated 2026-10-14 from the account's StepFun limits page (limits are per account tier — override per account with settings.rateLimitOverrides), plus step-5-preview added and re-verified against platform.stepfun.ai documentation on 2026-09-23. Other pricing APPROXIMATE. Current OpenAI GPT6/6.1 and Claude Fable5.1/Opus5.5/Sonnet5.5/Haiku5.5 contracts and pricing verified against official model pages on2026-10-08; long_context_pricing scales the whole request above the input threshold. StepFun text support policy updated 2026-10-15 following owner/moderator guidance: Step 3.5 rows retired; Step 3.7 Flash handles fast/balanced routing and Step 5 Preview handles premium routing.",
   "models": [
     {
       "id": "deepseek-v4-flash",
@@ -54,62 +54,11 @@
       "web_research_kind": null
     },
     {
-      "id": "step-3.5-flash",
-      "name": "Step 3.5 Flash (StepFun)",
-      "provider": "stepfun",
-      "tier": "balanced",
-      "routing_tiers": ["fast"],
-      "context_window": 256000,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.1,
-      "output_price_per_million": 0.3,
-      "cached_input_price_per_million": 0.02,
-      "rate_limits": { "concurrency": 5, "requests_per_minute": 100, "tokens_per_minute": 500000 },
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
-      "supports_vision": false,
-      "roles": ["leader", "implement", "verify", "research"],
-      "modalities": {
-        "input": ["text"],
-        "output": ["text"]
-      },
-      "native_web_research": false,
-      "web_research_kind": null
-    },
-    {
-      "id": "step-3.5-flash-2603",
-      "name": "Step 3.5 Flash 2603 (StepFun)",
-      "provider": "stepfun",
-      "tier": "balanced",
-      "routing_tiers": ["fast"],
-      "context_window": 256000,
-      "max_output_tokens": 8192,
-      "input_price_per_million": 0.1,
-      "output_price_per_million": 0.3,
-      "cached_input_price_per_million": 0.02,
-      "rate_limits": { "concurrency": 5, "requests_per_minute": 100, "tokens_per_minute": 500000 },
-      "reasoning": true,
-      "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "Versioned StepFun reasoning model with documented tool calling and 256K context. Uses the OpenAI-compatible chat-completions API.",
-      "supports_vision": false,
-      "roles": ["leader", "implement", "verify", "research"],
-      "modalities": {
-        "input": ["text"],
-        "output": ["text"]
-      },
-      "native_web_research": false,
-      "web_research_kind": null
-    },
-    {
       "id": "step-3.7-flash",
       "name": "Step 3.7 Flash (StepFun)",
       "provider": "stepfun",
-      "tier": "premium",
+      "tier": "balanced",
+      "routing_tiers": ["fast"],
       "context_window": 256000,
       "max_output_tokens": 0,
       "input_price_per_million": 0.2,
@@ -118,9 +67,9 @@
       "rate_limits": { "concurrency": 5, "requests_per_minute": 100, "tokens_per_minute": 500000 },
       "reasoning": true,
       "thinking_type": "enabled",
-      "supports_effort": false,
-      "default_reasoning_effort": null,
-      "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published.",
+      "supports_effort": true,
+      "default_reasoning_effort": "medium",
+      "description": "StepFun's multimodal reasoning model with documented tool calling, 256K context, and image/video understanding. The documented maximum output-token limit is not published. Reasoning effort low/medium/high via Chat Completions reasoning_effort, default medium (platform.stepfun.ai docs, verified 2026-11-05); thinking cannot be disabled - reasoning_effort none, thinking.type disabled and enable_thinking false were probed live on /step_plan/v1 and are accepted but ignored.",
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
       "modalities": {
@@ -145,7 +94,7 @@
       "thinking_type": "enabled",
       "supports_effort": true,
       "default_reasoning_effort": "medium",
-      "description": "StepFun's flagship agentic model, released 2026-09-20 (600B-total/27B-active sparse MoE; weights due 2026-10-15). 1M-token context, documented tool calling, JSON Schema output, prompt caching, text/image/video input (video not representable in this catalog's modality enum). Configurable reasoning effort low/medium/high; no documented default, so 'medium' is used conservatively. Catalog default premium route for stepfun stays step-3.7-flash (unchanged) — this entry is addressable by id but not auto-selected. Verified against platform.stepfun.ai documentation on 2026-09-23.",
+      "description": "StepFun's flagship agentic model, released 2026-09-20 (600B-total/27B-active sparse MoE; weights due 2026-10-15). 1M-token context, documented tool calling, JSON Schema output, prompt caching, text/image/video input (video not representable in this catalog's modality enum). Configurable reasoning effort low/medium/high; no documented default, so 'medium' is used conservatively. Default premium route for StepFun; Step 3.7 Flash serves fast/balanced requests. Verified against platform.stepfun.ai documentation on 2026-09-23.",
       "supports_vision": true,
       "roles": ["leader", "implement", "verify", "research"],
       "modalities": {

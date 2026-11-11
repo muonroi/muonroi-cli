@@ -131,22 +131,22 @@ describe("preStreamPhase — a stubbed phase that never settles: the last breadc
     // real hang: the promise never settles, so nothing after `fn()` starts
     // ever runs, including the `.end` breadcrumb in `preStreamPhase`'s
     // `.then()`.
-    void preStreamPhase("gsdGate", "sess-hang", () => new Promise<void>(() => {}));
+    void preStreamPhase("flowGate", "sess-hang", () => new Promise<void>(() => {}));
 
     // Let the microtask queue drain so the synchronous `.start` breadcrumb
     // (written before `fn()` is even awaited) has landed.
     await new Promise((r) => setTimeout(r, 10));
 
     const lines = readLines();
-    expect(lines.map((l) => l.marker)).toEqual(["pre-stream.gsdGate.start"]);
+    expect(lines.map((l) => l.marker)).toEqual(["pre-stream.flowGate.start"]);
 
     const last = getLastBreadcrumb();
-    expect(last?.marker).toBe("pre-stream.gsdGate.start");
+    expect(last?.marker).toBe("pre-stream.flowGate.start");
     // The flat derivation and the real tracker agree on this (flat) case —
-    // `gsdGate` is what lands in the `error` interaction_log row's
+    // `flowGate` is what lands in the `error` interaction_log row's
     // `data.lastPhase` field.
-    expect(lastOpenPhaseFrom(last)).toBe("gsdGate");
-    expect(getLastOpenPhase("sess-hang")).toBe("gsdGate");
+    expect(lastOpenPhaseFrom(last)).toBe("flowGate");
+    expect(getLastOpenPhase("sess-hang")).toBe("flowGate");
   });
 
   it("a later phase's breadcrumb does not retroactively close an earlier hung phase", async () => {
@@ -231,7 +231,7 @@ describe("per-session attribution — a nested run cannot shadow the run that hu
   });
 
   it("an unknown session attributes to null rather than borrowing another run's phase", async () => {
-    void preStreamPhase("gsdGate", "someone-else", () => new Promise<void>(() => {}));
+    void preStreamPhase("flowGate", "someone-else", () => new Promise<void>(() => {}));
     await new Promise((r) => setTimeout(r, 5));
 
     expect(getLastOpenPhase("not-a-session-in-this-process")).toBeNull();

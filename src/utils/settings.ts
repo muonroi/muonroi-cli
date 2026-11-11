@@ -1,5 +1,4 @@
 import * as fs from "fs";
-import * as os from "os";
 import * as path from "path";
 import type { HooksConfig } from "../hooks/types";
 import type {
@@ -26,9 +25,11 @@ import { ALL_PROVIDER_IDS } from "../providers/types.js";
 import type { AgentMode, ReasoningEffort } from "../types/index";
 import { isIdealRunUnlimited } from "./ideal-run-scope.js";
 import { logger } from "./logger.js";
+import { muonroiHome } from "./muonroi-home.js";
 import { normalizeShellSettings, type ShellSettings } from "./shell";
 
 export type ModelRole = "leader" | "implement" | "verify" | "research";
+export type RoutingMode = "fixed" | "auto" | "suggest";
 
 export type PeakHourMode = "downgrade" | "switch";
 
@@ -44,14 +45,18 @@ export interface PeakHourPolicy {
 }
 
 export function getCatalogDefaultModel(): string {
+  // Every step skips models the user disabled (model-level or whole provider):
+  // a default that lands on a disabled provider makes selectOrchestratorModel
+  // throw at Agent construction.
+  const enabled = (m: { id: string }): boolean => !isModelDisabled(m.id);
   const provider = getDefaultProvider();
-  if (provider) {
-    const m = getModelByTier("fast", provider);
+  if (provider && !isProviderDisabled(provider)) {
+    const m = getModelByTier("fast", provider, enabled);
     if (m) return m.id;
   }
-  const m = getModelByTier("fast");
+  const m = getModelByTier("fast", undefined, enabled);
   if (m) return m.id;
-  return getFirstCatalogModel().id;
+  return getFirstCatalogModel(enabled).id;
 }
 
 export type TelegramStreamingMode = "off" | "partial";
@@ -179,6 +184,8 @@ export interface RateLimitOverride {
 }
 
 export interface UserSettings {
+  /** Explicit user-selected default; absent means safe. CLI --permission overrides it. */
+  permissionMode?: import("./permission-mode.js").PermissionMode;
   apiKey?: string;
   /**
    * One-time guard: true once legacy keychain/settings API keys have been
@@ -198,6 +205,12 @@ export interface UserSettings {
   agentFirst?: boolean;
   /** Custom soft limit on the number of tool execution steps before pausing. */
   maxToolRounds?: number;
+  /**
+   * Host autopilot of an orchestrator-role `/ideal` run (orchestrator/ideal-autopilot.ts):
+   * after a turn ends with the root goal still open, the host starts the next
+   * turn itself. Env `MUONROI_IDEAL_AUTOPILOT*` overrides each field.
+   */
+  idealAutopilot?: import("../orchestrator/ideal-autopilot.js").IdealAutopilotSettings;
   /** Custom hard limit on the number of tool execution steps per turn. */
   hardMaxToolRounds?: number;
   /** Custom limit on the number of LLM call round-trips allowed in a single turn. */
@@ -366,6 +379,23 @@ export interface UserSettings {
    */
   subAgentBudgetChars?: number;
   /**
+   * Opt-in extra instruction filenames, Codex `project_doc_fallback_filenames`
+   * parity. Default empty: only `AGENTS.override.md` / `AGENTS.md` are read
+   * (owner decision — one file, like Codex). Each project directory from the
+   * git root down to cwd contributes at most ONE file: the first that exists of
+   * `AGENTS.override.md`, `AGENTS.md`, then these names in order. Example:
+   * `["CLAUDE.md"]` makes a directory with no AGENTS.md fall back to its
+   * CLAUDE.md. Entries that are not a bare filename are ignored.
+   */
+  projectDocFallbackFilenames?: string[];
+  /**
+   * Total byte budget for PROJECT instruction files (git root → cwd), Codex
+   * `project_doc_max_bytes` parity. Default 32768. The file that crosses the
+   * budget is truncated and later files are dropped; `0` disables project
+   * instructions entirely. The global `~/.muonroi-cli/AGENTS.md` is not counted.
+   */
+  projectDocMaxBytes?: number;
+  /**
    * Cumulative tool-output budget for the TOP-LEVEL orchestrator tool loop
    * (the agentic streamText loop in runTurn, separate from sub-agents).
    * Same tiered compression as the sub-agent cap, but with a larger
@@ -403,18 +433,22 @@ export interface UserSettings {
    * Default "fast".
    */
   routingDemoteMin?: "off" | "fast" | "balanced";
+  /** Main-turn routing policy; project pins retain precedence over user defaults. */
+  routingMode?: RoutingMode;
 }
 
 export interface ProjectSettings {
   model?: string;
+  /** Explicit opt-in: auto/suggest treat model as a baseline instead of a pin. */
+  routingMode?: RoutingMode;
   shell?: ShellSettings;
   lsp?: LspSettings;
   /**
-   * Relocate GSD planning state (`STATE.md`, `config.json`, `phases/`, …) out
+   * Relocate FLOW planning state (`STATE.md`, `config.json`, `phases/`, …) out
    * of `.planning/` at the repo root. Some repos already use `.planning/` for
    * their own unrelated plan folders (e.g. a Shipd/Olympus challenge repo),
-   * so every session writing GSD state there litters the working tree.
-   * Absolute, or relative to the repo root. See `gsd/paths.ts` `planningRoot`.
+   * so every session writing FLOW state there litters the working tree.
+   * Absolute, or relative to the repo root. See `workflow/paths.ts` `planningRoot`.
    * Env override: `MUONROI_STATE_DIR` (wins over this setting).
    */
   stateDir?: string;
@@ -431,13 +465,13 @@ export interface ProjectSettings {
    * Opt-in: give the FIRST turn of a session the full tool set even when
    * PIL classifies it as chitchat/direct-answer (which would otherwise give
    * it zero, or read-only-only, tools). For a project whose own
-   * AGENTS.md/CLAUDE.md requires a tool call unconditionally at session
+   * AGENTS.md requires a tool call unconditionally at session
    * start (e.g. a framework's "run this briefing script first"), a
    * tool-less first turn leaves the model unable to follow that instruction
    * — see `orchestrator/tool-engine.ts`'s `selectRawToolSet`.
    *
    * Explicit opt-in, not automatic on "this project has an instructions
-   * file": giving every project with an AGENTS.md/CLAUDE.md the full tool
+   * file": giving every project with an AGENTS.md the full tool
    * set on turn 1 is a real cost/latency change (more tool schemas in the
    * first prompt) for every user of this CLI, most of whom have no
    * session-start-script requirement at all. Default `false` — unset means
@@ -490,7 +524,7 @@ export interface ProjectSettings {
 }
 
 function getUserSettingsPath(): string {
-  return path.join(os.homedir(), ".muonroi-cli", "user-settings.json");
+  return path.join(muonroiHome(), "user-settings.json");
 }
 
 function ensureDir(dir: string): void {
@@ -667,17 +701,17 @@ export function saveUserSettings(partial: Partial<UserSettings>): void {
   writeJson(getUserSettingsPath(), next);
 }
 
-export function loadProjectSettings(): ProjectSettings {
-  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
+export function loadProjectSettings(cwd = process.cwd()): ProjectSettings {
+  const projectPath = path.join(cwd, ".muonroi-cli", "settings.json");
   return readJson<ProjectSettings>(projectPath) || {};
 }
 
-export function saveProjectSettings(partial: Partial<ProjectSettings>): void {
-  const projectPath = path.join(process.cwd(), ".muonroi-cli", "settings.json");
+export function saveProjectSettings(partial: Partial<ProjectSettings>, cwd = process.cwd()): void {
+  const projectPath = path.join(cwd, ".muonroi-cli", "settings.json");
   // Protect the footprint BEFORE the first write so the secrets-bearing file is
   // gitignored from the moment it exists.
-  ensureFootprintGitignored(process.cwd());
-  const current = loadProjectSettings();
+  ensureFootprintGitignored(cwd);
+  const current = loadProjectSettings(cwd);
   writeJson(projectPath, {
     ...current,
     ...partial,
@@ -790,6 +824,8 @@ export function getProviderConfigs(
   return configs;
 }
 
+const warnedDisabledConfiguredModels = new Set<string>();
+
 export function getCurrentModel(mode?: AgentMode): string {
   // Only honor a configured model if it resolves to a known catalog entry.
   // Stale configs (e.g. retired ids like "deepseek-chat") otherwise break boot.
@@ -799,7 +835,18 @@ export function getCurrentModel(mode?: AgentMode): string {
     if (!id) return undefined;
     const normalized = normalizeModelId(id);
     if (!catalogReady) return normalized;
-    return getModelInfo(normalized) ? normalized : undefined;
+    if (!getModelInfo(normalized)) return undefined;
+    // A configured model whose provider/model the user disabled is stale
+    // config, not an instruction: honouring it crashes boot in
+    // selectOrchestratorModel. Fall through to the next source instead.
+    if (isModelDisabled(normalized)) {
+      if (!warnedDisabledConfiguredModels.has(normalized)) {
+        warnedDisabledConfiguredModels.add(normalized);
+        logger.warn("cli", "Ignoring configured model: it or its provider is disabled", { model: normalized });
+      }
+      return undefined;
+    }
+    return normalized;
   };
 
   const envModel = pickValid(process.env.MUONROI_MODEL);
@@ -1166,6 +1213,23 @@ export function getAutoCompactAbsoluteFloorTokens(): number {
  * sub-agent. See orchestrator/sub-agent-cap.ts for the tiered compression
  * schedule. Env override: MUONROI_SUB_AGENT_BUDGET_CHARS.
  */
+/** Codex `project_doc_max_bytes` default (32 KiB). */
+export const DEFAULT_PROJECT_DOC_MAX_BYTES = 32 * 1024;
+
+/** See `UserSettings.projectDocMaxBytes`. Invalid values fall back to the default. */
+export function getProjectDocMaxBytes(): number {
+  const val = loadUserSettings().projectDocMaxBytes;
+  if (typeof val === "number" && Number.isFinite(val) && val >= 0) return Math.floor(val);
+  return DEFAULT_PROJECT_DOC_MAX_BYTES;
+}
+
+/** See `UserSettings.projectDocFallbackFilenames`. Raw list; the loader validates each entry. */
+export function getProjectDocFallbackFilenames(): string[] {
+  const val = loadUserSettings().projectDocFallbackFilenames;
+  if (!Array.isArray(val)) return [];
+  return val.filter((v): v is string => typeof v === "string");
+}
+
 export function getSubAgentBudgetChars(): number {
   // No budget inside an `/ideal` run (user decision: no limits). `Infinity` makes
   // `wrapToolSetWithCap` pass every result through untouched (its tiers compare

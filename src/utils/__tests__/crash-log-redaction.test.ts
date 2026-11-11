@@ -21,6 +21,9 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { appendCrashLog } from "../crash-log.js";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 function fakeProviderKey(): string {
   return ["sk", "proj"].join("-") + "-" + "cr4shl0g" + "Z".repeat(26);
 }
@@ -36,6 +39,7 @@ describe("appendCrashLog — crash.log never persists a credential verbatim", ()
     originalUserProfile = process.env.USERPROFILE;
     process.env.HOME = tmpDir;
     process.env.USERPROFILE = tmpDir;
+    process.env.MUONROI_CLI_HOME = path.join(tmpDir, ".muonroi-cli");
   });
 
   afterEach(() => {
@@ -43,6 +47,8 @@ describe("appendCrashLog — crash.log never persists a credential verbatim", ()
     else process.env.HOME = originalHome;
     if (originalUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = originalUserProfile;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
     try {
       fs.rmSync(tmpDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
     } catch (err) {
@@ -51,8 +57,8 @@ describe("appendCrashLog — crash.log never persists a credential verbatim", ()
   });
 
   function readCrashLog(): string {
-    const p = path.join(os.homedir(), ".muonroi-cli", "crash.log");
-    // Guard the redirect itself: if homedir() did not follow the env override we
+    const p = path.join(process.env.MUONROI_CLI_HOME as string, "crash.log");
+    // Guard the redirect itself: if the muonroi home did not follow the env override we
     // would be asserting against the USER's real crash.log.
     expect(p.startsWith(tmpDir)).toBe(true);
     return fs.readFileSync(p, "utf8");

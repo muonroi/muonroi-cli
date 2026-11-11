@@ -411,7 +411,7 @@ export const PRE_PHASE0_BASELINE: Record<
     score: 1,
     unit: "unallowlisted skip/todo sites",
     meetsTarget: false,
-    source: "§1.1 — 1 unallowlisted (tests/harness/gsd-pil-gate.spec.ts:389); lint:harness-skips:strict exited 1",
+    source: "§1.1 — 1 unallowlisted (tests/harness/flow-pil-gate.spec.ts:389); lint:harness-skips:strict exited 1",
   },
   A6: {
     score: 14 / 21,
@@ -1324,7 +1324,7 @@ export function scoreA6(inputs: ScoreInputs): AxisResult {
 // Internal sub-calls fail routinely INSIDE successful runs. Measured on this
 // matrix's own R2 row (an `answered` run that exits 0 with "PONG" on stdout),
 // verbatim from its stderr:
-//     [gsd] complexity assessor call failed, keeping priorDepth: …
+//     [flow] complexity assessor call failed, keeping priorDepth: …
 //     [WARN] [ORCHESTRATOR] Failed to extract JSON from proposer output …
 // and R5 is the same shape ON STDOUT: an answer AND a `type:"error"` record,
 // with the error record emitted LAST. So the naive rules "an error chunk was
@@ -3349,7 +3349,7 @@ export const NEGATIVE_CONTROLS: NegativeControl[] = [
       "the gaming path a cheap model reaches for first, and the one that must SCORE LOWER rather than higher. It " +
       "gets R3/R4 right for the wrong reason and breaks R5, the row where the user DID get an answer and an error " +
       "was also reported. Measured justification: R2 — an answered run — carries two benign internal failures on " +
-      "its own stderr ('[gsd] complexity assessor call failed…', 'Failed to extract JSON from proposer output'), " +
+      "its own stderr ('[flow] complexity assessor call failed…', 'Failed to extract JSON from proposer output'), " +
       "and R5's `type:\"error\"` record is the LAST line of its stdout, so both 'any error' and 'last record was an " +
       "error' flip a correct run red.\n\n" +
       "Note WHY this control needed a scoring change and not just a fixture: on a plain fraction it scores 6/7 = " +

@@ -1,0 +1,39 @@
+{
+  "___note": "Dedicated fixture for tests/harness/mcp-oauth.spec.ts. Round 0: main calls worker_capabilities, whose execute runs acquireMcpTools WITHOUT onOAuthRequired — the exact connect path that sent no Authorization header before the fix (user debug.log: 401 'No authorization provided' for a signed-in server). Round 1: plain reply.",
+  "model": {
+    "provider": "mock",
+    "modelId": "mock-mcp-oauth",
+    "stream": [
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "tool-input-start", "id": "cap-1", "toolName": "worker_capabilities" },
+        { "type": "tool-input-delta", "id": "cap-1", "delta": "{}" },
+        { "type": "tool-input-end", "id": "cap-1" },
+        { "type": "tool-call", "toolCallId": "cap-1", "toolName": "worker_capabilities", "input": "{}" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "tool-calls", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 10, "noCache": 10, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 10, "text": 10, "reasoning": null }
+          }
+        }
+      ],
+      [
+        { "type": "stream-start", "warnings": [] },
+        { "type": "text-start", "id": "turn" },
+        { "type": "text-delta", "id": "turn", "delta": "Capabilities listed." },
+        { "type": "text-end", "id": "turn" },
+        {
+          "type": "finish",
+          "finishReason": { "unified": "stop", "raw": null },
+          "usage": {
+            "inputTokens": { "total": 10, "noCache": 10, "cacheRead": null, "cacheWrite": null },
+            "outputTokens": { "total": 10, "text": 10, "reasoning": null }
+          }
+        }
+      ]
+    ]
+  },
+  "responses": [{ "match": "*", "text": "ok" }]
+}

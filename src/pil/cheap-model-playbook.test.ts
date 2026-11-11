@@ -80,19 +80,26 @@ describe("injectCheapModelPlaybook", () => {
     expect(twice).toBe(once);
   });
 
-  it("playbook content mentions the four key tool steering rules", () => {
+  it("keeps the front-loaded bash-cache rule (session 622fdeb8f658)", () => {
     expect(CHEAP_MODEL_PLAYBOOK).toContain("bash_output_get");
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/task\(agent="explore"\)/);
-    expect(CHEAP_MODEL_PLAYBOOK).toContain("grep");
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/ERROR/);
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("read_file");
   });
 
-  it("rule 1 wording now applies to every bash call (not just retries)", () => {
-    // Live forensics showed cheap models rationalized that the first call
-    // isn't a re-run, so the "NEVER re-run" wording let them skip the rule.
-    // The new wording explicitly says EVERY bash call.
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/EVERY bash call/i);
-    expect(CHEAP_MODEL_PLAYBOOK).toMatch(/do NOT pipe.*tail/i);
+  it("drops rules now owned by the host or by another prompt surface", () => {
+    // task(explore): workers never hold `task` (WORKER_FORBIDDEN); identical
+    // failing retries: refused by repeat-failure-refusal.ts; compaction vetoes:
+    // carried by the pre-compaction warning; grep/LSP routing: the
+    // native-capabilities block.
+    expect(CHEAP_MODEL_PLAYBOOK).not.toMatch(/task\(agent="explore"\)/);
+    expect(CHEAP_MODEL_PLAYBOOK).not.toMatch(/do NOT retry the identical call/i);
+    expect(CHEAP_MODEL_PLAYBOOK).not.toMatch(/PRESERVE_FULL_CONTEXT|KEEP_TOOL_IDS/);
+    expect(CHEAP_MODEL_PLAYBOOK).not.toMatch(/Prefer the `grep` tool/);
+  });
+
+  it("keeps complete failure evidence without requiring cache reads for sufficient output", () => {
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Use returned output directly when sufficient");
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Keep full build/test/failure output");
+    expect(CHEAP_MODEL_PLAYBOOK).toContain("Focused read-only pipes are allowed");
   });
 
   it("steers fix QUALITY: root-cause over masking (rule 5) and read real failure logs (rule 6)", () => {

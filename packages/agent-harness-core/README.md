@@ -120,7 +120,7 @@ in the ring buffer.
 
 - [PROTOCOL.md](../../docs/agent-harness/PROTOCOL.md) — wire-level types
 - [TRANSPORTS.md](../../docs/agent-harness/TRANSPORTS.md) — fd/pipe/WebSocket envelope spec
-- [Multi-framework layout](../../CLAUDE.md) — how adapters plug in
+- [Multi-framework layout](../../docs/agent-harness/HARNESS-GUIDE.md#multi-framework-package-layout) — how adapters plug in
 
 ## Migration
 

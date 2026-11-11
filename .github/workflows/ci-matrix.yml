@@ -51,6 +51,8 @@ jobs:
         run: bun --filter @muonroi/agent-harness-core build
       - name: Typecheck
         run: bunx tsc --noEmit
+      - name: Zero Hardcode Rule (model/provider ID literals)
+        run: bun scripts/check-hardcoded-ids.ts --strict
       - name: Test
         run: bunx vitest run
       - name: Boot smoke (headless)

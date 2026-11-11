@@ -55,6 +55,16 @@ Router-driven `classifySubSessionAction` → `SPAWN_SUB_SESSION` is the *origina
 trigger for the reactive-sub-session layer; reactive escalation and the rotation
 size-gate are the two additional triggers that feed the same fork+absorb path.
 
+**Role gate (since b014c9b9).** All three triggers (router classify, reactive
+escalation, rotation size-gate) are skipped when the Agent runs with
+`executionRole: "orchestrator"` — the default, and the role of every TUI and
+headless main session. Main delegates explicitly through its worker tools
+instead; the fork/absorb/rotate path is reachable only from a non-orchestrator
+role with a persisted session (unit-covered with `executionRole:
+"infrastructure"` in `src/orchestrator/__tests__/sub-session-*.test.ts`). The
+TUI-level contract that main never router-forks or rotates is pinned by
+`tests/harness/session-rotation-delegation.spec.ts`.
+
 ## Known gap (not a layer — a hole)
 
 **Cold first heavy turn.** Reactive escalation (Axis 3) needs a *prior* turn's

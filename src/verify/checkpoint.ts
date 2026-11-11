@@ -7,6 +7,7 @@ import type { SandboxSettings } from "../utils/settings";
 import type { VerifyProjectProfile } from "./recipes";
 
 const DEFAULT_VERIFY_GUEST_WORKDIR = "/muonroi/verify/worktree";
+export type VerifyBootstrapApproval = (operation: { command: string; args: string[]; cwd: string }) => Promise<void>;
 
 function execFileAsync(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -214,20 +215,29 @@ export async function ensureVerifyCheckpoint(
   profile: VerifyProjectProfile,
   settings: SandboxSettings,
   onProgress?: (detail: string) => void,
+  approve?: VerifyBootstrapApproval,
 ): Promise<PreparedVerifyCheckpoint> {
   if (profile.recipe.installCommands.length === 0) {
     return { created: false };
   }
 
   const checkpointName = getVerifyCheckpointName(cwd, profile.recipe);
-  const checkpoints: string[] = await listCheckpoints(cwd).catch((): string[] => []);
+  await approve?.({ command: "shuru", args: ["checkpoint", "list"], cwd });
+  const checkpoints: string[] = await listCheckpoints(cwd).catch((err): string[] => {
+    console.error("[verify] checkpoint list failed:", err instanceof Error ? err.message : String(err));
+    return [];
+  });
   if (!checkpoints.includes(checkpointName)) {
     const args = buildCheckpointCreateArgs(cwd, checkpointName, DEFAULT_VERIFY_GUEST_WORKDIR, profile.recipe, settings);
+    await approve?.({ command: "shuru", args, cwd });
     onProgress?.(`Creating checkpoint: ${checkpointName}`);
     try {
       await spawnWithProgress("shuru", args, cwd, onProgress);
     } catch (error) {
-      await deleteCheckpoint(cwd, checkpointName).catch(() => {});
+      await approve?.({ command: "shuru", args: ["checkpoint", "delete", checkpointName], cwd });
+      await deleteCheckpoint(cwd, checkpointName).catch((err) => {
+        console.error("[verify] checkpoint cleanup failed:", err instanceof Error ? err.message : String(err));
+      });
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(`Verify checkpoint bootstrap failed for "${checkpointName}": ${message}`);
     }

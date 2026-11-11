@@ -1,0 +1,116 @@
+{
+  "capturedAt": "2026-10-17T07:47:23.044753+00:00",
+  "incidentSession": "804115f7251f",
+  "red": {
+    "newTestsFailed": 5
+  },
+  "regressions": {
+    "files": 9,
+    "testsPassed": 111,
+    "exit": 0
+  },
+  "buildExit": 0,
+  "compiledGuidance": {
+    "startedAt": "2026-10-17T07:46:40.970Z",
+    "boundary": "Fresh compiled native tools, Agent owner methods and isolated SQLite/files; deterministic HTTP fixtures, no live EE/provider calls",
+    "checks": {
+      "homeIsIsolated": true,
+      "scopeRefusalExplainsAttempt": true,
+      "scopeRefusalOffersNativeDiscovery": true,
+      "scopeRefusalDoesNotRetryOrBind": true,
+      "discoveryDoesNotSelectProject": true,
+      "verifiedExplicitTargetIsRemembered": true,
+      "allRecallRequestsRemainStrict": true,
+      "listLabelsExecutionAndDelivery": true,
+      "readProvidesExactAckAction": true,
+      "readDeliversWithoutAutoAck": true,
+      "staleAckIsRejected": true,
+      "explicitAckPersistsAndStopsRepeatHint": true,
+      "listKeepsAckSeparateFromDelivery": true
+    },
+    "requests": [
+      {
+        "endpoint": "/"
+      },
+      {
+        "endpoint": "/api/recall",
+        "cwd": "~/workspace",
+        "strict": true
+      },
+      {
+        "endpoint": "/api/projects"
+      },
+      {
+        "endpoint": "/api/recall",
+        "cwd": "~/workspace",
+        "project": "fixture-target",
+        "strict": true
+      },
+      {
+        "endpoint": "/api/recall",
+        "cwd": "~/workspace",
+        "project": "fixture-target",
+        "strict": true
+      }
+    ],
+    "finishedAt": "2026-10-17T07:46:42.080Z"
+  },
+  "compiledControls": {
+    "startedAt": "2026-10-17T07:46:19.323Z",
+    "finishedAt": "2026-10-17T07:46:26.720Z",
+    "checks": {
+      "settingsHomeIsIsolated": true,
+      "nativeFtsPreflight": true,
+      "completeProposalEnvelope": true,
+      "truncatedProposalRejected": true,
+      "ambiguousProposalRejected": true,
+      "lspStubHasRealPreviewGuidance": true,
+      "healthDoesNotClaimRecallReadiness": true,
+      "defaultProjectPinPreserved": true,
+      "routeStatusShowsPin": true,
+      "routeStatusDoesNotWrite": true,
+      "explicitSuggestKeepsBaselineSetting": true,
+      "autoUsesSameProviderCheaperTier": true,
+      "suggestKeepsBaselineAndReportsCandidate": true,
+      "cachedSuggestRechecksCap": true,
+      "liveTuiModeCommandAndStatus": true,
+      "nativeSelfverifyRebuiltMcpBootAndStatus": true
+    },
+    "runId": "5cdbce02-0ea5-4a03-89e7-29ef033e9cd5"
+  },
+  "nativeSelfverify": {
+    "total": 2,
+    "passed": 2,
+    "failed": 0,
+    "inconclusive": 0,
+    "passRate": 1
+  },
+  "limits": [
+    "Deterministic EE HTTP fixtures and mock provider, not a paid or live EE trial",
+    "No full suite or push",
+    "No user session acknowledgement, settings or server mapping changed"
+  ],
+  "sha256": {
+    "src/ee/search.ts": "ed49df4803a81cf86617c736ec4ecc8bf070d812cf2790796b53a0bebf5a9c47",
+    "src/orchestrator/delegations.ts": "59e1d4184ea1c081a05d3e4d07a94560551b1f16fb568841c69ba1b5fac3018f",
+    "src/orchestrator/orchestrator.ts": "471070a7bf49b48cb3963044847082216869a4b3a68013cf5b6a7f53a32a431c",
+    "src/tools/registry.ts": "c5c398904d162991ba25dc789d921d957683c517d650756cfa7f1992f231cd01",
+    "src/tools/native-ee-context.test.ts": "e93c3db5164a45807aa1c4adfd811107eef7314c73002acc1c513b5e39add031",
+    "src/orchestrator/__tests__/delegation-delivery.test.ts": "d307f179df1194c69f6793a6f89bc13ef6a4cce0a8056a739ecf26980ef8fa62",
+    "src/orchestrator/__tests__/delegation-compaction.test.ts": "f78b218b8a5a0eeb9d4481961c08911334ca28296fd1a43c8c1b997ea3623ab3",
+    "src/orchestrator/__tests__/sub-session-realdb.test.ts": "1f3e1f37fae04689f1307b61f266b1ae5310920477cf89d0e46255589d02c394",
+    "dist/src/ee/search.js": "87a8a68d768236906deaa67663a90a1b4af2754a3ccc9e2836fe0d91f9798c5e",
+    "dist/src/orchestrator/delegations.js": "d30ef49b86a984acc75abc9daf93f0d6fcd7d3b04ed1775608a763cffdabb8ff",
+    "dist/src/orchestrator/orchestrator.js": "9ab1ea954af4968cb1465104b8edacf27af2d1219d2bf95bf72230ae5aeb3d1d",
+    "dist/src/tools/registry.js": "8684e29e34f1012ae0f2127327a0584eaa7c0adbe53f3eb3953beef121e4ca6b",
+    "docs/investigations/session-804-scope-ack-guidance-2026-10-17.md": "75cc7588c40279d67e9be32c68eb9a63acbefa9a96cfd019646973440914ec7a",
+    ".scratch/session-804-scope-ack/red.log": "3113348f9335de69cbf2f41b050ef19b47a408ac72e6991a544c35895ed24849",
+    ".scratch/session-804-scope-ack/accepted-tests.log": "939fedd23b6d12538d42ea1766cad3132c4332bcf94b16a11540ddb52bec9c02",
+    ".scratch/session-804-scope-ack/build.log": "acb169082bf68d7331441eacda597f55d29bb54b6bec4d5a42cce2f70590a3d2",
+    ".scratch/session-804-scope-ack/compiled-guidance.mjs": "e1467f82babb4d6810ccb48e42a13736f172733fde560c9fd5b039cf6bc7de1b",
+    ".scratch/session-804-scope-ack/compiled-guidance.json": "10ed09ef60c5e79ab45c94c5f7b7ddc252dc571233b36248f2437b913e6de78b",
+    ".scratch/session-804-scope-ack/compiled-controls.mjs": "cafe5a312955c161d92b7087cdeb959cb01d00d13e1b776598a6e369d554dcd0",
+    ".scratch/session-804-scope-ack/compiled-controls.json": "06d2e4259a4c69cfa42c18e08ab1842538635d54e058334f504a17a46a6792b2",
+    ".scratch/session-804-feedback/trace.json": "a97192771827c57b380d4eaacf292ac6ebb88576b514caadda8a3d6423e59015"
+  }
+}

@@ -1,0 +1,76 @@
+﻿{
+  "capturedAt": "2026-10-18T14:54:40.9765151Z",
+  "sessionId": "985b3540cc14",
+  "reported": {
+    "estimatedInputTokens": 112413,
+    "reservedOutputTokens": 16000,
+    "contextWindowTokens": 128000,
+    "excessTokens": 413,
+    "source": "User supplied error; exact blocked preflight not present in persisted prepared telemetry"
+  },
+  "persistedLastPreparedRecord": 63036,
+  "incidentInspection": {
+    "mode": "SQLite read-only",
+    "artifact": ".scratch/context-overflow-985b/incident.json",
+    "incidentSessionMutated": false
+  },
+  "reproducer": {
+    "test": "honors forced overflow recovery when an active working set archives nothing",
+    "before": "FAIL: summary0 expected1",
+    "after": "PASS"
+  },
+  "verification": {
+    "focusedTests": 8,
+    "focusedFiles": 2,
+    "regressionTests": 233,
+    "regressionFiles": 27,
+    "regressionExitCode": 0,
+    "regressionLog": ".scratch/context-overflow-985b/regression.log",
+    "actualSDKCases": [
+      "One forced recovery, configured output unchanged, current task/blocker retained, canonical history preserved",
+      "Pinned history remains too large, exactly one forced recovery, two local refusals, zero main provider calls"
+    ],
+    "buildExitCode": 0,
+    "typecheckExitCode": 0,
+    "nativeBoot": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "nativeArtifact": ".scratch/context-overflow-985b/native-selfverify.json"
+  },
+  "sourceAndBuildHashes": [
+    {
+      "path": "src/orchestrator/orchestrator.ts",
+      "sha256": "7ac5f6b571b30985e9d3dc3f284d519ce697b8a03ea47e102665d70a8f5ace7b"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "sha256": "b24e26fb0a1d4228f18550da980dae1f3f6a0a93efdd479b21fc035a4ff0d70e"
+    },
+    {
+      "path": "src/orchestrator/prompt-breakdown.ts",
+      "sha256": "33ccb70010cbc2c0b9b160bffdce8558f0ee314f6d63536fb23c8bf4d8a78791"
+    },
+    {
+      "path": "src/orchestrator/__tests__/working-context-compaction.test.ts",
+      "sha256": "a16c6a58051b96627c8cef485123c895ad5cd456b9d0f5d912f3f588e4ddabf1"
+    },
+    {
+      "path": "src/orchestrator/__tests__/prepared-request-telemetry.test.ts",
+      "sha256": "b92deb327613526d3ab9eb32c2050098f7fa25945d6b1e879abc96df1401f35f"
+    },
+    {
+      "path": "dist/src/index.js",
+      "sha256": "9bb3c08f7d825ab0a53f94c05bde7c2d70041347579a49817c09f9fc8284cf06"
+    }
+  ],
+  "limits": [
+    "Local scripted provider; no live provider replay or billing measurement",
+    "Exact failed request breakdown and running process build not established from historical telemetry",
+    "Boot check proves boot only",
+    "No full test suite, push or deployment"
+  ]
+}

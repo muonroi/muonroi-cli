@@ -2,6 +2,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { logger } from "../../utils/logger.js";
 import { loadEnvFileIntoProcess } from "../env-store.js";
 
 /**
@@ -30,12 +31,14 @@ describe("loadEnvFileIntoProcess — secret precedence", () => {
     delete process.env.DEEPSEEK_API_KEY;
     delete process.env.SOME_PLAIN_VAR;
     errors = [];
-    vi.spyOn(console, "error").mockImplementation((m: unknown) => {
-      errors.push(String(m));
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+    vi.spyOn(logger, "file").mockImplementation((_level, _ns, message) => {
+      errors.push(message);
     });
   });
 
   afterEach(() => {
+    expect(console.error).not.toHaveBeenCalled();
     vi.restoreAllMocks();
     delete process.env.MUONROI_ENV_FILE;
     delete process.env.MUONROI_ENV_PRECEDENCE;

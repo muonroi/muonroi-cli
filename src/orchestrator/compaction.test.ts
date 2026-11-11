@@ -6,6 +6,7 @@ import {
   COMPACTION_META_MAX_OUTPUT_TOKENS,
   COMPACTION_SUMMARY_HEADER,
   createCompactionSummaryMessage,
+  estimateMessageTokens,
   findCutPoint,
   isCompactionThrash,
   metaCompactionMaxTokens,
@@ -47,6 +48,25 @@ function toolResult(toolCallId: string, toolName: string, output: unknown): Mode
 }
 
 describe("compaction helpers", () => {
+  it("counts the full tool result for context pressure instead of its 8000-character summary", () => {
+    const value = "large tool output ".repeat(15000);
+    const message = toolResult("overflow", "search_session_history", { type: "text", value });
+    expect(estimateMessageTokens(message)).toBeGreaterThanOrEqual(value.length / 4);
+  });
+
+  it("counts tool arguments and reasoning in the context estimate", () => {
+    const input = "argument ".repeat(4000);
+    const thought = "reasoning ".repeat(5000);
+    const message = {
+      role: "assistant",
+      content: [
+        { type: "reasoning", text: thought },
+        { type: "tool-call", toolCallId: "test", toolName: "grep", input: { query: input } },
+      ],
+    } as ModelMessage;
+    expect(estimateMessageTokens(message)).toBeGreaterThanOrEqual((input.length + thought.length) / 4);
+  });
+
   it("triggers when context exceeds reserved headroom", () => {
     const settings = { reserveTokens: 100, keepRecentTokens: 40 };
 
@@ -202,6 +222,17 @@ describe("compaction helpers", () => {
     expect(r).toContain("PRESERVE");
     expect(r).toContain("KEEP_TOOL_IDS");
     expect(r).toContain("tool-artifact");
+  });
+
+  it("buildCheckpointReminder teaches the EXACT literals context-preservation.ts parses (M14)", () => {
+    // The veto syntax is taught only here (pre-compaction warning / compaction
+    // note), so it must be the literal the parser accepts: the old "Emit
+    // PRESERVE" never matched /^\s*PRESERVE_FULL_CONTEXT\s*$/m.
+    const r = buildCheckpointReminder(123, true);
+    expect(r).toContain("PRESERVE_FULL_CONTEXT");
+    expect(r).toContain("KEEP_TOOL_IDS: id1,id2");
+    expect(r.length).toBeLessThanOrEqual(220);
+    expect(r.endsWith('"tool-artifact id=XXX".')).toBe(true);
   });
 });
 

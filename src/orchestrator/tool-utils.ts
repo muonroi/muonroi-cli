@@ -18,6 +18,7 @@ export function toToolResult(output: unknown): ToolResult {
   if (output && typeof output === "object" && "success" in output) {
     const r = output as {
       success: boolean;
+      preview?: boolean;
       output?: string;
       error?: string;
       diff?: ToolResult["diff"];
@@ -31,6 +32,7 @@ export function toToolResult(output: unknown): ToolResult {
     };
     return {
       success: r.success,
+      ...(r.preview === true ? { preview: true } : {}),
       output: r.output,
       error: r.error ?? (r.success ? undefined : r.output),
       diff: r.diff,

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useLiveState } from "../live-state.js";
 import type { ResumeEntry } from "../../types/index.js";
 
 /**
@@ -8,13 +9,16 @@ import type { ResumeEntry } from "../../types/index.js";
  */
 export function useSessionPicker() {
   const [showSessionPicker, setShowSessionPicker] = useState(false);
-  const [sessionPickerIndex, setSessionPickerIndex] = useState(0);
+  // Live: Enter resumes the row the cursor is on even when ↑/↓ and Enter share
+  // one stdin chunk (handleKey reads sessionPickerIndexRef, see live-state.ts).
+  const [sessionPickerIndex, setSessionPickerIndex, sessionPickerIndexRef] = useLiveState(0);
   const [sessions, setSessions] = useState<ResumeEntry[]>([]);
   return {
     showSessionPicker,
     setShowSessionPicker,
     sessionPickerIndex,
     setSessionPickerIndex,
+    sessionPickerIndexRef,
     sessions,
     setSessions,
   };

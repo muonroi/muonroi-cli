@@ -81,7 +81,7 @@ if (warnings.length === 0) {
     console.warn(
       `    → Wrap the outermost JSX with a primitive (<Dialog>/<TextBox>/<ListItem>/…) or <Semantic id role> so the agent harness can observe it.`,
     );
-    console.warn(`      See CLAUDE.md → "Adding a new TUI component".`);
+    console.warn(`      See AGENTS.md → "Adding a new TUI component".`);
     console.warn();
   }
   console.warn(`  To suppress a file, add its path (relative to repo root) to scripts/.semantic-wrap-allow.txt.\n`);

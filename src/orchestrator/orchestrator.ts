@@ -3,6 +3,7 @@
 import { randomUUID } from "node:crypto";
 import type { ModelMessage, ToolSet } from "ai";
 import { breadcrumb, getLastOpenPhase } from "../council/crash-breadcrumb.js";
+import { recordArtifact } from "../ee/artifact-cache.js";
 import { extractSession } from "../ee/extract-session.js";
 import {
   bootstrapEEClient,
@@ -15,12 +16,6 @@ import { emitTranscriptToDisk } from "../ee/transcript-emit.js";
 import { createRun, getActiveRunId, setActiveRunId } from "../flow/run-manager.js";
 import { runAnchoredStateRoot } from "../flow/run-root.js";
 import { ensureFlowDir } from "../flow/scaffold.js";
-import {
-  isContextRailEnabled,
-  isIdealConversationHandoffEnabled,
-  isIdealNlEntryEnabled,
-  isIdealToolEntryEnabled,
-} from "../gsd/flags.js";
 import { executeEventHooks } from "../hooks/index";
 import type {
   NotificationHookInput,
@@ -40,10 +35,12 @@ import { getProviderCapabilities, minimalReasoningProviderOptions } from "../pro
 import { apiBaseFor, isProviderDefaultApiBase } from "../providers/endpoints.js";
 import { loadKeyForProvider } from "../providers/keychain.js";
 import {
+  authModeForModel,
   createProviderFactory,
   createProviderFactoryAsync,
   detectProviderForModel,
   effectiveRateLimits,
+  hasProviderFactory,
   requireRuntimeProvider,
   resolveModelRuntime,
   resolveTemperatureParam,
@@ -56,18 +53,22 @@ import {
   appendMessages,
   appendSystemMessage,
   buildChatEntries,
+  getLastIdealRun,
   getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionChainInfos,
   getSessionTotalTokens,
+  loadRawTranscript,
   loadSessionChainTranscriptState,
   logInteraction,
   markLatestPendingMessageErrored,
   markMessageCompleted,
   persistApprovedPlan,
+  persistIdealRun,
   recordUsageEvent,
   SessionStore,
-  sessionUsedGsdWorkflow,
+  sessionUsedFlowWorkflow,
+  setLatestCompactionShrink,
 } from "../storage/index.js";
 import { BashTool } from "../tools/bash";
 import { createBuiltinTools } from "../tools/registry.js";
@@ -93,12 +94,13 @@ import { appendDecisionLog } from "../usage/decision-log.js";
 import { projectCostUSD, sanitizeInputTokens } from "../usage/estimator.js";
 import {
   type BackgroundJobSnapshot,
+  isBackgroundAutoWakeEnabled,
   maxParallelBackgroundAgents,
   parallelLimitRefusal,
   providerCapacityNote,
 } from "../utils/background-jobs.js";
 import { scopeGeneratorToIdealRun } from "../utils/ideal-run-scope.js";
-import { logger } from "../utils/logger.js";
+import { isTuiActive, logger } from "../utils/logger.js";
 import type { PermissionMode } from "../utils/permission-mode.js";
 import {
   type CustomSubagentConfig,
@@ -132,6 +134,13 @@ import {
   shouldTrustDeterministicRecipe,
 } from "../verify/entrypoint";
 import { runVerifyOrchestration } from "../verify/orchestrator";
+import {
+  isContextRailEnabled,
+  isIdealConversationHandoffEnabled,
+  isIdealNlEntryEnabled,
+  isIdealToolEntryEnabled,
+} from "../workflow/flags.js";
+import { createPlanReviewBudget, type PlanReviewBudget } from "../workflow/review-budget.js";
 import {
   type AgentOptions,
   type BatchChatCompletionResponse,
@@ -168,6 +177,7 @@ import {
   parseToolArgumentsOrRaw,
   toLocalToolCall,
 } from "./batch-utils";
+import { runCleanupSteps } from "./cleanup-steps.js";
 import { getCompactionFocus } from "./compact-request.js";
 import {
   buildMechanicalCompactionStub,
@@ -178,6 +188,7 @@ import {
   estimateConversationTokens,
   extractUserContent,
   generateCompactionSummary,
+  getBilledCompactionUsage,
   isCompactionSummaryMessage,
   isCompactionThrash,
   POST_TURN_MIN_TOKENS,
@@ -185,15 +196,36 @@ import {
   proposeCompaction,
   shouldCompactContext,
 } from "./compaction";
+import { enforceCompactionBudget, type PersistedShrinkSpec, toSeqRanges } from "./compaction-budget.js";
 import { buildCompactionCustomInstructions } from "./compaction-consult.js";
-import { isCompactionModelCoolingDown, markCompactionModelCooldown } from "./compaction-model-cooldown.js";
+import {
+  clearCompactionModelCooldown,
+  isCompactionModelCoolingDown,
+  markCompactionModelCooldown,
+} from "./compaction-model-cooldown.js";
 import { markProposerStalled } from "./compaction-stall-notice.js";
 import { getCouncilContinuationWatchdogMs } from "./council-continuation-budget.js";
 import { CouncilManager } from "./council-manager.js";
 import { CrossTurnDedup, isCrossTurnDedupEnabled } from "./cross-turn-dedup.js";
-import { DelegationManager } from "./delegations";
+import {
+  createDelegationLedgerMessage,
+  formatDelegationLedger,
+  isDelegationLedgerMessage,
+} from "./delegation-ledger.js";
+import { DelegationManager, withoutInlineResults } from "./delegations";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
+import { type AutopilotDecision, resolveAutopilotConfig } from "./ideal-autopilot.js";
+import { IdealAutopilotHost, type TurnEnd } from "./ideal-autopilot-host.js";
+import { collectSignals, spentSince } from "./ideal-autopilot-signals.js";
+import {
+  formatIdealAbort,
+  formatIdealStatus,
+  type IdealCoordinationRun,
+  type IdealJob,
+  type IdealKillOutcome,
+  jobsOfIdealRun,
+} from "./ideal-coordination.js";
 import { beginInteractivePause, endInteractivePause, isInteractivePaused } from "./interactive-pause.js";
 import {
   MessageProcessor,
@@ -202,10 +234,18 @@ import {
 } from "./message-processor.js";
 import { lastPersistedSeq } from "./message-seq.js";
 import { createNoProgressGuard } from "./no-progress-guard.js";
+import {
+  type ExecutionRole,
+  filterExecutionTools,
+  orchestrationEffort,
+  selectOrchestratorModel,
+  validateWorkerSelection,
+} from "./orchestration-policy.js";
 import { estimateProjectSizeAt, type ProjectSize } from "./project-size.js";
 import { buildSystemPrompt, HARD_MAX_TOOL_ROUNDS, MAX_TOOL_ROUNDS } from "./prompts";
 import { getReactiveDelegationThresholdChars, shouldReactivelyEscalate } from "./reactive-delegation.js";
 import { getReadPathBudgetCap, ReadPathBudget } from "./read-path-budget.js";
+import { RequestHistory } from "./request-history.js";
 import { withStreamRetry } from "./retry-stream.js";
 import type { SafetyOverrideAskInfo, SafetyOverrideVerdict } from "./safety-askcard.js";
 import { salvageSubSessionOutput } from "./salvage-sub-session-output.js";
@@ -213,13 +253,21 @@ import { StreamRunner, type StreamRunnerDeps } from "./stream-runner.js";
 import { noteElidedForCap, type SubAgentCapState } from "./sub-agent-cap.js";
 import { type ModelTaskKind, resolveModelForTask } from "./sub-agent-model-tier.js";
 import { shouldResumeSubSession } from "./sub-session-resume.js";
+import {
+  refreshSubSessionToolContract,
+  SUB_SESSION_COMPLETION_RULE,
+  SUB_SESSION_TOOL_BOUNDARY,
+} from "./sub-session-tool-contract.js";
 import { compactSubAgentMessages } from "./subagent-compactor.js";
 import { setProviderHint } from "./token-counter.js";
 import { isToolActivityLive } from "./tool-activity.js";
+import type { ToolApprovalAskInfo } from "./tool-approval.js";
 import { getToolLimitAutoRecoverCap } from "./tool-limit-auto-recover.js";
 import type { ToolLoopCapAsk } from "./tool-loop-cap.js";
 import { combineAbortSignals, firstLine, formatSubagentActivity, toToolResult } from "./tool-utils";
 import { hasTurnProgressSince } from "./turn-progress.js";
+import { authFanoutRefusal } from "./worker-failure-recovery.js";
+import { surfaceWorkerGrounding } from "./worker-grounding.js";
 
 // ---------------------------------------------------------------------------
 // Provider implementations
@@ -228,8 +276,13 @@ import { hasTurnProgressSince } from "./turn-progress.js";
 /**
  * Create a provider factory for the given provider ID using the shared runtime module.
  */
-function createProvider(providerId: ProviderId, apiKey: string, baseURL?: string): LegacyProvider {
-  return createProviderFactory(providerId, { apiKey, baseURL }).factory;
+function createProvider(
+  providerId: ProviderId,
+  apiKey: string,
+  baseURL?: string,
+  authMode?: AgentOptions["authMode"],
+): LegacyProvider {
+  return createProviderFactory(providerId, { apiKey, baseURL, authMode }).factory;
 }
 
 /**
@@ -285,7 +338,7 @@ async function genTitle(
 ): Promise<{ title: string; modelId: string; usage?: { totalTokens?: number } }> {
   try {
     const { generateTextStreamed } = await import("../providers/streamed-generate.js");
-    const runtime = resolveModelRuntime(modelId);
+    const runtime = resolveModelRuntime(modelId, { stage: "title" });
     const snippet = userMessage.length > 1500 ? `${userMessage.slice(0, 1500)}…` : userMessage;
 
     // A title is a ≤60-char fixed shape — reasoning on it is pure waste. On
@@ -352,9 +405,34 @@ function createTools(
   _provider: LegacyProvider,
   _mode: unknown,
   _opts?: {
+    executionRole?: ExecutionRole;
+    credentialedProvider?: ProviderId;
     runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
     runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
-    readDelegation?: (id: string) => Promise<ToolResult>;
+    readDelegation?: (
+      id: string,
+      artifact?: import("../types/index.js").DelegationArtifactReadInput,
+    ) => Promise<ToolResult>;
+    sendDelegation?: (
+      id: string,
+      message: string,
+      replyTo: string | undefined,
+      toolCallId: string,
+      signal?: AbortSignal,
+      writeScope?: string[],
+    ) => Promise<ToolResult>;
+    acceptDelegation?: (input: import("../types/index.js").DelegationAcceptanceInput) => Promise<ToolResult>;
+    startCouncil?: (input: {
+      topic: string;
+      reason: string;
+      context: string;
+      outputContract: string;
+    }) => Promise<ToolResult>;
+    startPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["startPlanReview"];
+    readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
+    /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
+    verifyWorkerEvidence?: () => Promise<string>;
+    planReviewBudget?: PlanReviewBudget;
     listDelegations?: () => Promise<ToolResult>;
     killDelegation?: (id: string) => Promise<ToolResult>;
     scheduleManager?: unknown;
@@ -365,9 +443,18 @@ function createTools(
   },
 ): ToolSet {
   return createBuiltinTools(_bash as BashTool, (_mode ?? "agent") as AgentMode, {
+    executionRole: _opts?.executionRole,
+    credentialedProvider: _opts?.credentialedProvider,
     runTask: _opts?.runTask,
     runDelegation: _opts?.runDelegation,
     readDelegation: _opts?.readDelegation,
+    sendDelegation: _opts?.sendDelegation,
+    acceptDelegation: _opts?.acceptDelegation,
+    startCouncil: _opts?.startCouncil,
+    startPlanReview: _opts?.startPlanReview,
+    readPlanReview: _opts?.readPlanReview,
+    verifyWorkerEvidence: _opts?.verifyWorkerEvidence,
+    planReviewBudget: _opts?.planReviewBudget,
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
     modelId: _opts?.modelId,
@@ -393,6 +480,21 @@ export class Agent {
   private bash: BashTool;
   private delegations: DelegationManager;
   private _helperParentSessionId: string | null = null;
+  private _planReviewAllowance?: { owner: string | undefined; cwd: string; budget: PlanReviewBudget };
+
+  private requestPlanReviewBudget(): PlanReviewBudget | undefined {
+    if (this.executionRole !== "orchestrator") return undefined;
+    const owner = this.session?.id,
+      cwd = this.bash.getCwd();
+    if (
+      !this._planReviewAllowance ||
+      this._planReviewAllowance.owner !== owner ||
+      this._planReviewAllowance.cwd !== cwd
+    ) {
+      this._planReviewAllowance = { owner, cwd, budget: createPlanReviewBudget() };
+    }
+    return this._planReviewAllowance.budget;
+  }
   private _helperParentCwd: string | null = null;
   private schedules: ScheduleManager;
   private sessionStore: SessionStore | null = null;
@@ -403,12 +505,23 @@ export class Agent {
   private abortController: AbortController | null = null;
   /** UI-registered live-queue steer drain; see Agent.setSteerDrain. */
   private steerDrain: (() => { text: string }[]) | null = null;
+  /** UI-registered hand-back for steers a killed request never answered; see Agent.setSteerRestore. */
+  private steerRestore: ((texts: string[]) => void) | null = null;
+  /**
+   * Steers drained into the request that is currently in flight (the latest
+   * prepareStep's drain only: a later prepareStep proves the earlier request
+   * completed). If the turn watchdog kills that request they were never
+   * answered and are handed back instead of silently dropped.
+   */
+  private _steersInFlight: string[] = [];
   private maxToolRounds: number;
   private hardMaxToolRounds: number;
   /** Original hard ceiling at construction — bounds auto-compaction extension. */
   private _initialHardMaxToolRounds = 0;
   private mode: AgentMode = "agent";
   private modelId: string;
+  private readonly executionRole: ExecutionRole;
+  private readonly requestedReasoningEffort?: import("../types/index.js").ReasoningEffort;
   private maxTokens: number;
   private planContext: string | null = null;
   private subagentStatusListeners = new Set<(status: SubagentStatus | null) => void>();
@@ -440,6 +553,16 @@ export class Agent {
    * dispatches runProductLoopV1, streaming its chunks and clearing the flag.
    */
   private _pendingEnterIdeal: { idea: string } | null = null;
+  /**
+   * The `/ideal start` this orchestrator is coordinating, ONLY for an agent with
+   * no session store (`persistSession: false`). With a session the run record
+   * lives in the session's saved history (`persistIdealRun`), so it survives a
+   * restart/resume and cannot leak into another session — see `readIdealRun`.
+   */
+  private unsavedIdealRun: IdealCoordinationRun | null = null;
+  /** Workers stopped by /ideal abort: their cancellation notice is recorded, never a wake. */
+  private readonly abortedIdealJobIds = new Set<string>();
+  private _idealAutopilot: IdealAutopilotHost | null = null;
   /** External abort context from src/index.ts SIGINT handler (TUI-04). */
   private externalAbortContext: import("./abort.js").AbortContext | null = null;
   /** Pending calls log for Pitfall 9 staged-write tracking. */
@@ -463,6 +586,23 @@ export class Agent {
    */
   get effectivePermissionMode(): PermissionMode {
     return this.permissionMode;
+  }
+  /** Host UI/CLI only; no native/model tool exposes permission elevation. */
+  async setPermissionModeFromUser(mode: PermissionMode): Promise<number> {
+    if (!["safe", "auto-edit", "yolo"].includes(mode)) throw new Error("Invalid user permission mode.");
+    const previous = this.permissionMode;
+    this.permissionMode = mode;
+    this.permissionElevationRestoreTo = null;
+    const workersUpdated = await this.delegations.setPermissionMode(mode);
+    await appendDecisionLog({
+      ts: Date.now(),
+      sessionId: this.session?.id,
+      kind: "permission-mode",
+      taken: true,
+      reason: "Explicit user permission selection",
+      meta: { previous, mode, workersUpdated },
+    });
+    return workersUpdated;
   }
   /**
    * Number of autonomous-execution elevation scopes currently open. See
@@ -553,10 +693,18 @@ export class Agent {
   }
   /** Flow run init promise — awaited before first message turn. */
   private _flowReady: Promise<void> | null = null;
+  /**
+   * History was just reloaded from storage, where the host-carried delegation
+   * ledger never lives (seq=null, not persisted), so main must regenerate it
+   * from the registry before its next model call. See
+   * `restoreDelegationLedgerIfPending`.
+   */
+  private _delegationLedgerRestorePending = false;
   /** Active .muonroi-flow/ run ID for this session. */
   private _activeRunId: string | null = null;
   /** Resume digest loaded from active flow run state.md. */
   private _resumeDigest: string | null = null;
+  private readonly _requestHistory = new RequestHistory();
   /**
    * Phase 12.1-02: All council state (synthesis/continuation flags, resolver
    * + buffer maps, stats) lives inside CouncilManager. Agent holds one ref.
@@ -566,6 +714,7 @@ export class Agent {
   private _compactedThisTurn = false;
   /** Guard: OAuth provider init runs at most once per Agent instance. */
   private _oauthInitDone = false;
+  private authMode?: import("../providers/subscription-fallback.js").ProviderAuthMode;
   /** P0 native observation: warning IDs surfaced earlier in this session — sent as intent_context.priorWarningIdsInSession. */
   private _priorWarningIdsInSession = new Set<string>();
   /** EE session guidance: structured warnings accumulated across turns — injected into model context at turn start. Keyed by principle_uuid to deduplicate. */
@@ -621,17 +770,21 @@ export class Agent {
     maxToolRounds?: number,
     options: AgentOptions = {},
   ) {
+    this.authMode = options.authMode;
     this.baseURL = baseURL || null;
     this.bash = new BashTool(process.cwd(), {
+      workerScope: options.executionRole === "worker",
       sandboxMode: options.sandboxMode ?? "off",
       sandboxSettings: options.sandboxSettings,
       shellSettings: options.shellSettings ?? getCurrentShellSettings(),
     });
     const transientOwnerId = randomUUID();
+    const delegationCwdAtStart = this.bash.getCwd();
     this.delegations = new DelegationManager(
       () => this.bash.getCwd(),
       () => this._helperParentSessionId ?? this.session?.id ?? transientOwnerId,
-      () => this._helperParentCwd ?? this.bash.getCwd(),
+      // Registry scope belongs to the owner, not its mutable tool cwd.
+      () => this._helperParentCwd ?? this.session?.cwdAtStart ?? delegationCwdAtStart,
     );
     // The bash sleep-poll guard must see delegations too, not just shells.
     this.bash.setBackgroundJobProbe(async () =>
@@ -650,7 +803,18 @@ export class Agent {
     });
 
     const initialMode: AgentMode = "agent";
-    this.modelId = normalizeModelId(model || getCurrentModel(initialMode));
+    this.executionRole = options.executionRole ?? "orchestrator";
+    this.requestedReasoningEffort = options.reasoningEffort;
+    const requestedModel = normalizeModelId(model || getCurrentModel(initialMode));
+    if (this.executionRole === "orchestrator" && !getModelInfo(requestedModel)) {
+      throw new Error(
+        `Unknown orchestrator model "${requestedModel}". Select a catalog model/provider; no implicit model substitution is allowed.`,
+      );
+    }
+    this.modelId =
+      this.executionRole === "orchestrator"
+        ? selectOrchestratorModel(detectProviderForModel(requestedModel)).id
+        : requestedModel;
     this.providerId = detectProviderForModel(this.modelId);
     setProviderHint(this.providerId);
     if (apiKey) {
@@ -705,6 +869,9 @@ export class Agent {
       const transcript = loadSessionChainTranscriptState(this.session.id);
       this.messages = transcript.messages;
       this.messageSeqs = transcript.seqs;
+      // --session / session-picker relaunch: background workers outlive this
+      // process (durable job records), but the ledger did not survive it.
+      this._delegationLedgerRestorePending = options.session !== undefined;
       this.sessionStore.setModel(this.session.id, this.modelId);
 
       // Flow run setup — fire-and-forget, awaited before first message turn.
@@ -744,6 +911,17 @@ export class Agent {
     return this.modelId;
   }
 
+  getExecutionRole(): ExecutionRole {
+    return this.executionRole;
+  }
+
+  getReasoningEffort(): import("../types/index.js").ReasoningEffort | undefined {
+    return (
+      this.requestedReasoningEffort ??
+      (this.executionRole === "orchestrator" ? orchestrationEffort(this.modelId) : undefined)
+    );
+  }
+
   /**
    * Register (or clear with null) the UI callback that drains messages typed
    * while a turn is streaming, for mid-turn steering injection. Called from the
@@ -751,6 +929,36 @@ export class Agent {
    */
   setSteerDrain(fn: (() => { text: string }[]) | null): void {
     this.steerDrain = fn;
+  }
+
+  /**
+   * Register (or clear with null) the UI callback that takes back messages that
+   * were drained into a request the turn watchdog then killed, so the user's
+   * words are re-queued as a normal follow-up rather than lost.
+   */
+  setSteerRestore(fn: ((texts: string[]) => void) | null): void {
+    this.steerRestore = fn;
+  }
+
+  /**
+   * Drop an abort controller that is already aborted and has no live turn
+   * behind it. A user-initiated turn calls this before starting: when the
+   * previous turn was killed while its provider call ignored the abort, that
+   * turn's own `finally` never ran, the aborted controller stayed on the agent,
+   * and every later `processMessage` threw at `routingController.signal
+   * .throwIfAborted()` before logging anything (session 7f24048ad75d: 21 typed
+   * messages, zero turns). Only the host's top-level entry may call this: it
+   * runs after the UI's own in-flight guard, so no owner is mid-run.
+   */
+  releaseStaleAbort(): boolean {
+    const stale = this.abortController;
+    if (!stale?.signal.aborted) return false;
+    logger.warn("orchestrator", "Released an aborted turn controller left behind by a killed turn", {
+      sessionId: this.session?.id,
+      reason: String(stale.signal.reason ?? "unknown").slice(0, 200),
+    });
+    this.abortController = null;
+    return true;
   }
 
   getActiveRunId(): string | null {
@@ -773,7 +981,16 @@ export class Agent {
    * writes mode+model together.
    */
   private _applyModelId(model: string): void {
-    this.modelId = normalizeModelId(model);
+    const requestedModel = normalizeModelId(model);
+    if (this.executionRole === "orchestrator" && !getModelInfo(requestedModel)) {
+      throw new Error(
+        `Unknown orchestrator model "${requestedModel}". Select a catalog model/provider; no implicit model substitution is allowed.`,
+      );
+    }
+    this.modelId =
+      this.executionRole === "orchestrator"
+        ? selectOrchestratorModel(detectProviderForModel(requestedModel)).id
+        : requestedModel;
     const newProviderId = detectProviderForModel(this.modelId);
     if (newProviderId !== this.providerId) {
       this.providerId = newProviderId;
@@ -807,6 +1024,7 @@ export class Agent {
       this.apiKey = null;
       this.provider = null;
       this._oauthInitDone = false;
+      this.authMode = undefined;
     }
   }
 
@@ -844,7 +1062,7 @@ export class Agent {
     if (mode !== this.mode) {
       this.mode = mode;
       const modeModel = getModeSpecificModel(mode);
-      if (modeModel) {
+      if (modeModel && this.executionRole !== "orchestrator") {
         // Via _applyModelId, NOT a bare `this.modelId = ...`: a mode-specific
         // model can belong to a different provider than the session's, and
         // assigning the id alone would leave provider/baseURL/apiKey pointing at
@@ -881,6 +1099,11 @@ export class Agent {
     return !!this.apiKey;
   }
 
+  async refreshAuthentication(): Promise<void> {
+    this._oauthInitDone = false;
+    await this._initOAuthProvider();
+  }
+
   setApiKey(apiKey: string, baseURL?: string): void {
     this.apiKey = apiKey;
     // Drop baseURL when it points at a DIFFERENT provider's default apiBase
@@ -891,13 +1114,15 @@ export class Agent {
     const stale = isAnyProviderApiBase(baseURL) && baseURL !== apiBaseFor(this.providerId);
     const effectiveBaseURL = stale ? undefined : baseURL;
     this.baseURL = stale ? null : baseURL || null;
-    this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL);
+    this.provider = createProvider(this.providerId, apiKey, effectiveBaseURL, this.authMode);
   }
 
   setProviderAndKey(providerId: ProviderId, apiKey: string, baseURL?: string): void {
+    if (this.executionRole === "orchestrator") this._applyModelId(selectOrchestratorModel(providerId).id);
     this.providerId = providerId;
     setProviderHint(this.providerId);
     this.setApiKey(apiKey, baseURL);
+    if (this.sessionStore && this.session) this.sessionStore.setModel(this.session.id, this.modelId);
   }
 
   getProviderId(): ProviderId {
@@ -965,6 +1190,8 @@ export class Agent {
       undefined,
       this.bash.getSandboxSettings(),
       this.providerId,
+      undefined,
+      { permissionMode: this.permissionMode, executionRole: this.executionRole },
     );
     const usedTokens = Math.min(contextWindow, estimateConversationTokens(system, this.messages, inFlightText));
     const remainingTokens = Math.max(0, contextWindow - usedTokens);
@@ -1025,6 +1252,8 @@ export class Agent {
   }
 
   abort(): void {
+    // Esc / Ctrl+C are the only callers: the user interrupted, so the /ideal autopilot yields.
+    this.yieldIdealAutopilot("user_interrupt");
     this.abortController?.abort();
     this.emitSubagentStatus(null);
   }
@@ -1034,18 +1263,23 @@ export class Agent {
     // racing the async HTTP extract. Survives X-close + EE-offline.
     try {
       emitTranscriptToDisk(this.messages, this.getSessionId(), "cli-exit", this.bash.getCwd());
-    } catch {
-      /* fail-open */
+    } catch (err) {
+      // fail-open: the HTTP extract below still runs.
+      logger.warn("orchestrator", `cleanup: transcript sidecar write failed: ${(err as Error)?.message}`);
     }
-    await Promise.allSettled([
-      this.bash.cleanup(),
-      shutdownWorkspaceLspManager(this.bash.getCwd()),
-      extractSession(this.messages, this.bash.getCwd(), "cli-exit", this.getSessionId()),
+    // Each step is bounded and logged by name (cleanup-steps.ts): /exit awaits
+    // this before process.exit, so one never-settling step would otherwise
+    // keep the CLI alive with nothing in the log.
+    const cwd = this.bash.getCwd();
+    await runCleanupSteps([
+      ["bash", () => this.bash.cleanup()],
+      ["lsp", () => shutdownWorkspaceLspManager(cwd)],
+      ["ee-extract", () => extractSession(this.messages, cwd, "cli-exit", this.getSessionId())],
       // Tear down pooled MCP clients (client-pool.ts). They persist across turns
       // by design (no per-turn cold-spawn), so the only real teardown is here at
       // session end. Stdio children would die with the process anyway, but close
       // them gracefully on a clean exit.
-      import("../mcp/client-pool.js").then((m) => m.closeAllMcpClients()),
+      ["mcp", () => import("../mcp/client-pool.js").then((m) => m.closeAllMcpClients())],
     ]);
   }
 
@@ -1099,19 +1333,21 @@ export class Agent {
     this._askUserHandler = fn;
   }
 
-  respondToToolApproval(approvalId: string, approved: boolean): void {
-    const toolApprovalResponse: ModelMessage = {
-      role: "tool",
-      content: [
-        {
-          type: "tool-approval-response" as const,
-          approvalId,
-          approved,
-        },
-      ],
-    };
-    this.messages.push(toolApprovalResponse);
-    this.messageSeqs.push(null);
+  // Tool-approval handler — set by the UI. Invoked from INSIDE a must-confirm
+  // tool's execute (safe mode: main's read_file/grep) and resolves "allow" or
+  // "deny"; the turn waits and then continues with the real tool-result or a
+  // denial result. Unset (headless) → "no-approver". The signal aborts when the
+  // turn does, so the UI can withdraw a card nobody is waiting on any more. See
+  // tool-approval.ts for why this replaced the SDK needsApproval + "[Payment
+  // approved]" resume.
+  private _toolApprovalHandler:
+    | ((info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<"allow" | "deny">)
+    | null = null;
+
+  setToolApprovalHandler(
+    fn: ((info: ToolApprovalAskInfo, signal?: AbortSignal) => Promise<"allow" | "deny">) | null,
+  ): void {
+    this._toolApprovalHandler = fn;
   }
 
   async clearHistory(): Promise<void> {
@@ -1291,21 +1527,21 @@ export class Agent {
   getLastTodoSnapshot(): TaskListSnapshot | null {
     if (!this.session) return null;
 
-    // The GSD checklist is parsed out of `.planning/PLAN.md` — a file owned by
+    // The FLOW checklist is parsed out of `.planning/PLAN.md` — a file owned by
     // the CWD, not by this conversation. Restoring it unconditionally pinned a
     // stale plan onto any resumed session opened in a repo that had ever run
-    // GSD, including chats that never wrote a single todo. Only this session's
-    // own GSD tool calls make that plan its checklist.
+    // FLOW, including chats that never wrote a single todo. Only this session's
+    // own FLOW tool calls make that plan its checklist.
     try {
-      if (sessionUsedGsdWorkflow(this.session.id)) {
-        const { getTaskListSnapshotFromGsd } = require("../gsd/phase-sync.js");
-        const gsdSnap = getTaskListSnapshotFromGsd(this.bash?.getCwd() ?? process.cwd());
-        if (gsdSnap) return gsdSnap;
+      if (sessionUsedFlowWorkflow(this.session.id)) {
+        const { getTaskListSnapshotFromFlow } = require("../workflow/phase-sync.js");
+        const flowSnap = getTaskListSnapshotFromFlow(this.bash?.getCwd() ?? process.cwd());
+        if (flowSnap) return flowSnap;
       }
     } catch (err) {
       // Fail-open to the legacy todo_write args below — but say why, otherwise
       // a missing checklist looks like "the todos were lost".
-      logger.error("orchestrator", "GSD task-list restore failed; falling back to todo_write", {
+      logger.error("orchestrator", "FLOW task-list restore failed; falling back to todo_write", {
         sessionId: this.session.id,
         message: (err as Error)?.message,
       });
@@ -1447,10 +1683,21 @@ export class Agent {
       cache_creation_tokens: (prev.cache_creation_tokens ?? 0) + cacheCreate,
       session_usd: prev.session_usd + turnCostMicros / 1_000_000,
       provider: this.providerId,
-      model,
+      // Auxiliary usage is billed to its actual model, but does not replace
+      // the owning orchestrator shown in the TUI.
+      model: this.executionRole === "orchestrator" ? this.modelId : model,
       ctx_tokens: totalInput,
       ctx_pct: ctxPct,
     });
+
+    // Compaction owns its cost-log row: compactForContext appends exactly one
+    // per billed summary call (callsite orchestrator.compaction, or
+    // orchestrator.compaction.rejected for a rejected-but-billed summary) with
+    // the summarizing model's own provider, iteration and duration. Writing a
+    // second row here double-counted every compaction in `usage report --by
+    // callsite` (186 rows for 93 compactions, 2026-11-02..04) and stamped it
+    // with the session's provider rather than the summarizer's.
+    if (source === "compaction") return;
 
     // Append to cost-log JSONL so `usage report --by callsite` can surface
     // where orchestrator/task/title traffic is actually spending.
@@ -1485,17 +1732,44 @@ export class Agent {
     // The manager's owner remains main while this Agent temporarily executes
     // a child. Leave notifications unclaimed until main's context is restored.
     if (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId) return [];
+    // Runs on every pre-stream turn and idle TUI tick, in main context only —
+    // and before notices are appended, so both reflect the same registry read.
+    await this.restoreDelegationLedgerIfPending();
     try {
-      const delegationNotices = await this.delegations.consumeNotifications();
-      const processNotices = (await this.bash.consumeExitNotifications()).map((message) => ({ message }));
-      const notifications = [...delegationNotices, ...processNotices];
-      for (const notification of notifications) {
-        this.messages.push({ role: "system", content: notification.message });
+      const persistNotification = (notification: { message: string; messageId?: string }) => {
+        if (notification.messageId && !this.session)
+          throw new Error("Worker message delivery requires a durable owner transcript; message remains pending.");
+        const matches = (m: { role: string; content: unknown }) =>
+          m.role === "system" &&
+          typeof m.content === "string" &&
+          (notification.messageId
+            ? m.content.includes(`[worker-message:${notification.messageId}]`)
+            : m.content === notification.message);
+        const alreadyInContext = this.messages.some(matches);
         let seq: number | null = null;
         if (this.session) {
-          seq = appendSystemMessage(this.session.id, notification.message);
+          // The process can stop after SQLite commits but before the job claim
+          // commits. Reuse that durable message on retry instead of duplicating it.
+          const persisted = loadRawTranscript(this.session.id).some(matches);
+          if (!persisted) seq = appendSystemMessage(this.session.id, notification.message);
         }
-        this.messageSeqs.push(seq);
+        if (!alreadyInContext) {
+          this.messages.push({ role: "system", content: notification.message });
+          this.messageSeqs.push(seq);
+        }
+      };
+      const delegationNotices = await this.delegations.consumeNotifications(persistNotification);
+      const { getSelfVerifyJobManager } = await import("../mcp/self-verify-runner.js");
+      const processNotices = [
+        ...(await this.bash.consumeExitNotifications()),
+        ...getSelfVerifyJobManager().consumeCompletionNotices(),
+      ].map((message) => ({ message }));
+      const notifications = [...delegationNotices, ...processNotices];
+      for (const notification of notifications) {
+        if (!("id" in notification)) persistNotification(notification);
+        // A worker result the host flagged (unsupported test/build claim, ungrounded
+        // count / file:line) is shown to the user, not only to the orchestrator.
+        surfaceWorkerGrounding(notification.message);
 
         const notifInput: NotificationHookInput = {
           hook_event_name: "Notification",
@@ -1507,7 +1781,20 @@ export class Agent {
           logger.warn("orchestrator", "Background notification hook failed", { error: String(err) });
         });
       }
-      return notifications.map((notification) => notification.message);
+      // Callers (the TUI wake prompt) repeat these strings; the full notice,
+      // including any inline result, is already in the transcript above.
+      // A worker the user stopped with /ideal abort is in the transcript too (the
+      // model learns it was cancelled) but must not WAKE the model: the wake
+      // prompt says "continue the task that was waiting on it", i.e. resume the
+      // run the user just aborted. Measured: without this, /ideal abort was
+      // followed by a 3-call wake turn (tests/harness/ideal-local-subcommands.spec.ts).
+      const surfaced = notifications.filter((notification) => {
+        const id = "id" in notification && typeof notification.id === "string" ? notification.id : null;
+        if (id === null || !this.abortedIdealJobIds.has(id)) return true;
+        this.abortedIdealJobIds.delete(id);
+        return false;
+      });
+      return surfaced.map((notification) => withoutInlineResults(notification.message));
     } catch (err) {
       logger.error("orchestrator", "Background notification delivery failed", {
         sessionId: this.session?.id,
@@ -1536,9 +1823,214 @@ export class Agent {
     }
     return {
       delegations,
+      workerApprovals: await this.delegations.pollApprovals(),
       processes: this.bash.getBackgroundProcessStates(),
       processesSince: this.bash.createdAt,
     };
+  }
+
+  /** Host UI lifecycle and decisions; never registered as model-callable tools. */
+  setWorkerApprovalController(active: boolean): void {
+    this.delegations.setApprovalController(active);
+  }
+  respondToWorkerApproval(
+    request: import("./worker-approval.js").WorkerApprovalView,
+    approved: boolean,
+  ): Promise<void> {
+    return this.delegations.decideApproval(request, approved);
+  }
+
+  /**
+   * The session's open `/ideal` run. Read from saved history on every call, not
+   * cached: the record then follows the session across restart/resume, and a
+   * `/new` session in the same process starts with none. Throws when the
+   * session store cannot be read.
+   */
+  private readIdealRun(): IdealCoordinationRun | null {
+    return this.session ? getLastIdealRun(this.session.id) : this.unsavedIdealRun;
+  }
+
+  /** Record (or, with null, close) the run. Returns false when it could not be saved. */
+  private writeIdealRun(run: IdealCoordinationRun | null): boolean {
+    if (!this.session) {
+      this.unsavedIdealRun = run;
+      return true;
+    }
+    return persistIdealRun(this.session.id, run);
+  }
+
+  /** Delegations of `run`, oldest first. */
+  private async idealRunJobs(run: IdealCoordinationRun): Promise<IdealJob[]> {
+    try {
+      return jobsOfIdealRun(run, await this.delegations.ledgerSnapshot());
+    } catch (err) {
+      logger.warn("orchestrator", "/ideal: delegation ledger unreadable", { error: String(err) });
+      throw err;
+    }
+  }
+
+  /**
+   * Host autopilot of the open `/ideal` run: after a turn ends with the root goal
+   * still open, the UI asks `idealAutopilotAfterTurn` what to do and starts the
+   * next turn itself (ideal-autopilot.ts has the stop conditions).
+   */
+  private get idealAutopilot(): IdealAutopilotHost {
+    this._idealAutopilot ??= new IdealAutopilotHost({
+      cwd: () => this.bash.getCwd(),
+      sessionId: () => this.session?.id,
+      readRun: () => this.readIdealRun(),
+      writeRun: (run) => this.writeIdealRun(run),
+      jobs: (run) => this.idealRunJobs(run),
+      rootCompletion: () => this.idealRootCompletion(),
+      collectSignals,
+      spentSince,
+      config: () => resolveAutopilotConfig(process.env, loadUserSettings().idealAutopilot),
+      autoWake: () => isBackgroundAutoWakeEnabled(),
+      emit: (event) => {
+        try {
+          (
+            globalThis as Record<string, unknown> as { __muonroiAgentRuntime?: { emitEvent: (e: unknown) => void } }
+          ).__muonroiAgentRuntime?.emitEvent(event);
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal autopilot: LiveEvent emit failed", {
+            kind: String(event.kind),
+            error: String(err),
+          });
+        }
+      },
+      now: () => new Date(),
+      log: {
+        info: (msg, ctx) => logger.info("orchestrator", msg, ctx),
+        warn: (msg, ctx) => logger.warn("orchestrator", msg, ctx),
+        error: (msg, ctx) => logger.error("orchestrator", msg, ctx),
+      },
+    });
+    return this._idealAutopilot;
+  }
+
+  /**
+   * Whether the pinned root goal is complete: `root_status=complete` on the
+   * working ledger and, when this session owns a native FLOW plan, a recorded
+   * `flow_verify` pass — the same two facts the ledger's own completion gate
+   * required when the claim was accepted (working-context.ts).
+   */
+  private async idealRootCompletion(): Promise<{ complete: boolean; verification: string | null; openItems: number }> {
+    const sessionId = this.session?.id;
+    if (!sessionId) return { complete: false, verification: null, openItems: 0 };
+    const [{ WorkingContext }, { ownedCompletionScope }] = await Promise.all([
+      import("./working-context.js"),
+      import("./completion-scope.js"),
+    ]);
+    const cwd = this.bash.getCwd();
+    const ledger = new WorkingContext(sessionId, cwd, this.messages).snapshot();
+    const facts = ownedCompletionScope(cwd, sessionId, "orchestrator", false);
+    const verification = facts?.implementationVerification ?? null;
+    const rootClosed = ledger.root_goal.trim() !== "" && ledger.root_status === "complete";
+    return {
+      complete: rootClosed && (verification === null || verification === "recorded_pass"),
+      verification,
+      openItems: ledger.root_status === "open" ? ledger.open_items.filter((i) => i.trim()).length : 0,
+    };
+  }
+
+  /**
+   * A turn of the run ended. Returns what the host does next (`continue` carries
+   * the prompt and transcript label for the next turn). `none` for any session
+   * without an armed autopilot, so the UI can call this after every turn.
+   */
+  async idealAutopilotAfterTurn(turn: TurnEnd): Promise<AutopilotDecision> {
+    if (this.executionRole !== "orchestrator") return { action: "none" };
+    return this.idealAutopilot.afterTurn(turn);
+  }
+
+  /** True while the host would start another `/ideal` turn by itself. */
+  isIdealAutopilotRunning(): boolean {
+    return this.executionRole === "orchestrator" && this.idealAutopilot.isRunning();
+  }
+
+  /** The user acted (Esc, a typed message): the autopilot yields. No-op when none is running. */
+  yieldIdealAutopilot(reason: "user_message" | "user_interrupt"): void {
+    if (this.executionRole === "orchestrator") this.idealAutopilot.yieldTo(reason);
+  }
+
+  /** `/ideal status` for the orchestrator role: host state only, no model call. */
+  async renderIdealCoordinationStatus(): Promise<string> {
+    const { readState } = await import("../workflow/workflow-engine.js");
+    const cwd = this.bash.getCwd();
+    let flow = { phase: null as string | null, depth: null as string | null, planVerified: false, exists: false };
+    try {
+      const state = readState(cwd);
+      flow = { phase: state.phase, depth: state.depth, planVerified: state.planVerified, exists: state.raw !== "" };
+    } catch (err) {
+      logger.warn("orchestrator", "/ideal status: FLOW state unreadable", { cwd, error: String(err) });
+    }
+    let run: IdealCoordinationRun | null;
+    try {
+      run = this.readIdealRun();
+    } catch (err) {
+      return `/ideal status: cannot read the run record: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
+    let jobs: IdealJob[] = [];
+    if (run) {
+      try {
+        jobs = await this.idealRunJobs(run);
+      } catch (err) {
+        return `/ideal status: cannot read the worker ledger: ${err instanceof Error ? err.message : String(err)}\n`;
+      }
+    }
+    const now = new Date();
+    return formatIdealStatus({
+      run,
+      jobs,
+      flow,
+      now,
+      autopilotLine: run ? this.idealAutopilot.statusLine(run, now) : null,
+    });
+  }
+
+  /**
+   * `/ideal abort` for the orchestrator role: kill every still-running worker
+   * the run launched (the same kill path as the /jobs view) and close the run,
+   * so a later status no longer reports it. No model call.
+   */
+  async abortIdealCoordination(): Promise<string> {
+    let run: IdealCoordinationRun | null;
+    try {
+      run = this.readIdealRun();
+    } catch (err) {
+      return `/ideal abort: cannot read the run record, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
+    if (!run) return formatIdealAbort({ run: null, outcomes: [], finished: 0 });
+    // First, so no continuation can start while the workers are being stopped.
+    this.idealAutopilot.yieldTo("user_abort");
+    let jobs: IdealJob[];
+    try {
+      jobs = await this.idealRunJobs(run);
+    } catch (err) {
+      return `/ideal abort: cannot read the worker ledger, nothing was stopped: ${err instanceof Error ? err.message : String(err)}\n`;
+    }
+    const running = jobs.filter((job) => job.status === "running");
+    const outcomes: IdealKillOutcome[] = [];
+    for (const job of running) {
+      // Registered BEFORE the kill: a notification poll already in flight can
+      // claim the cancellation the moment the record is written.
+      this.abortedIdealJobIds.add(job.id);
+      const result = await this.killDelegation(job.id);
+      if (!result.success) {
+        this.abortedIdealJobIds.delete(job.id);
+        logger.warn("orchestrator", "/ideal abort: worker did not stop", { id: job.id, output: result.output });
+      }
+      outcomes.push({ id: job.id, success: result.success, output: result.output ?? result.error ?? "" });
+    }
+    const closed = this.writeIdealRun(null);
+    logger.info("orchestrator", "/ideal abort: run closed", {
+      goal: run.goal,
+      closed,
+      stopped: outcomes.filter((o) => o.success).length,
+      failed: outcomes.filter((o) => !o.success).length,
+    });
+    const text = formatIdealAbort({ run, outcomes, finished: jobs.length - running.length });
+    return closed ? text : `${text}Warning: the run record could not be closed; /ideal status may still list it.\n`;
   }
 
   /** Stop a background job from the /jobs view: a delegation id or a shell process id. */
@@ -1649,8 +2141,17 @@ export class Agent {
     const batchTools = !childCaps.supportsClientTools(childRuntime.modelInfo)
       ? []
       : await toolSetToBatchTools(childTools);
+    const workerProvider = requireRuntimeProvider(childRuntime);
+    const workerClientOptions =
+      workerProvider === this.providerId
+        ? this.getBatchClientOptions(signal)
+        : {
+            apiKey: await loadKeyForProvider(workerProvider),
+            baseURL: loadUserSettings().providers?.[workerProvider]?.baseURL ?? apiBaseFor(workerProvider),
+            signal,
+          };
     const batch = await createBatch({
-      ...this.getBatchClientOptions(signal),
+      ...workerClientOptions,
       name: buildBatchName(`task-${request.agent}`, request.description),
     });
 
@@ -1694,7 +2195,7 @@ export class Agent {
               },
             });
       await addBatchRequests({
-        ...this.getBatchClientOptions(signal),
+        ...workerClientOptions,
         batchId: batch.batch_id,
         batchRequests: [
           {
@@ -1711,7 +2212,7 @@ export class Agent {
                 maxOutputTokens: shouldDropParam(childRuntime, "maxOutputTokens")
                   ? undefined
                   : Math.min(this.maxTokens, 8_192),
-                reasoningEffort: childRuntime.providerOptions?.xai.reasoningEffort,
+                reasoningEffort: childRuntime.reasoningEffort,
                 tools: batchTools,
               }),
             },
@@ -1720,7 +2221,7 @@ export class Agent {
       });
 
       const result = await pollBatchRequestResult({
-        ...this.getBatchClientOptions(signal),
+        ...workerClientOptions,
         batchId: batch.batch_id,
         batchRequestId,
       });
@@ -1842,10 +2343,24 @@ export class Agent {
   ): Promise<ToolResult> {
     // Background jobs enter here without processMessage's auth initialization.
     await this._initOAuthProvider();
+    if (request.modelId && !(globalThis as Record<string, unknown>).__muonroiMockModel) {
+      const workerProvider = detectProviderForModel(request.modelId);
+      if (!hasProviderFactory(workerProvider)) {
+        const key = await loadKeyForProvider(workerProvider).catch((err) => {
+          logger.file("warn", "orchestrator", "Worker provider API key unavailable; checking OAuth", {
+            provider: workerProvider,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return undefined;
+        });
+        await createProviderFactoryAsync(workerProvider, key ? { apiKey: key } : {});
+      }
+    }
     const provider = this.requireProvider();
     const deps: StreamRunnerDeps = {
       resolveModelForTask: (task) => this._resolveModelForTask(task),
       getModelId: () => this.modelId,
+      getPermissionMode: () => this.permissionElevationRestoreTo ?? this.permissionMode,
       getProviderId: () => this.providerId,
       getBash: () => this.bash,
       getMaxToolRounds: () => this.maxToolRounds,
@@ -1868,6 +2383,24 @@ export class Agent {
   }
 
   private async runTask(request: TaskRequest, abortSignal?: AbortSignal): Promise<ToolResult> {
+    if (this.mode !== "agent" && request.agent !== "explore")
+      return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
+    if (this.executionRole === "orchestrator") {
+      try {
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.file("warn", "orchestrator", "Worker dispatch refused", { error: message });
+        return { success: false, output: message };
+      }
+      const authRefusal = await this.workerAuthFanoutRefusal(request.modelId);
+      if (authRefusal) return { success: false, output: authRefusal };
+    }
+    if (this.executionRole === "orchestrator" || request.background || request.reviewOf) {
+      const started = await this.runDelegation(request, abortSignal, true);
+      if (!started.success || request.background === true || !started.delegation) return started;
+      return this.waitForDelegation(started.delegation.id, abortSignal);
+    }
     const startInput: SubagentStartHookInput = {
       hook_event_name: "SubagentStart",
       agent_type: request.agent,
@@ -1944,7 +2477,22 @@ export class Agent {
     return result;
   }
 
-  private async runDelegation(request: TaskRequest, abortSignal?: AbortSignal): Promise<ToolResult> {
+  private async runDelegation(
+    request: TaskRequest,
+    abortSignal?: AbortSignal,
+    nativeTask = false,
+  ): Promise<ToolResult> {
+    if (this.mode !== "agent" && request.agent !== "explore")
+      return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
+    if (this.executionRole === "orchestrator") {
+      try {
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        logger.file("warn", "orchestrator", "Background dispatch refused", { error: message });
+        return { success: false, output: message };
+      }
+    }
     const taskCreatedInput: TaskCreatedHookInput = {
       hook_event_name: "TaskCreated",
       agent_type: request.agent,
@@ -1966,13 +2514,23 @@ export class Agent {
       const refusal = await this.parallelDelegationRefusal();
       if (refusal) return { success: false, output: refusal };
 
-      result = await this.delegations.start(request, {
+      const start = nativeTask
+        ? this.delegations.startTask.bind(this.delegations)
+        : this.delegations.start.bind(this.delegations);
+      result = await start(request, {
         model: this.modelId,
         sandboxMode: this.bash.getSandboxMode(),
         sandboxSettings: this.bash.getSandboxSettings(),
         maxToolRounds: request.maxToolRounds ?? this.maxToolRounds,
         maxTokens: this.maxTokens,
         batchApi: this.batchApi,
+        permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+        workerProviderId: request.modelId ? getModelInfo(request.modelId)?.provider : undefined,
+        workerAuthMode: request.modelId ? authModeForModel(request.modelId) : undefined,
+        workerApiKey:
+          request.modelId && getModelInfo(request.modelId)?.provider === this.providerId && this.apiKey !== "oauth"
+            ? (this.apiKey ?? undefined)
+            : undefined,
       });
       if (result.success) {
         const note = await this.delegationCapacityNote();
@@ -1987,6 +2545,8 @@ export class Agent {
       };
     }
 
+    // A native worker receipt acknowledges launch; completion belongs to the child.
+    if (nativeTask) return result;
     const taskCompletedInput: TaskCompletedHookInput = {
       hook_event_name: "TaskCompleted",
       agent_type: request.agent,
@@ -1998,6 +2558,26 @@ export class Agent {
     await this.fireHook(taskCompletedInput, abortSignal).catch(() => {});
 
     return result;
+  }
+
+  /**
+   * Refusal when a worker on this provider already failed authentication in this
+   * session (typed `auth-failure` observation on its job record). Fail-open on an
+   * unreadable delegation registry: the dispatch itself then reports any 401.
+   */
+  private async workerAuthFanoutRefusal(modelId: string | undefined): Promise<string | null> {
+    if (!modelId) return null;
+    const provider = getModelInfo(modelId)?.provider;
+    if (!provider) return null;
+    try {
+      const refusal = authFanoutRefusal(await this.delegations.list(), provider);
+      if (refusal)
+        logger.file("warn", "orchestrator", "Worker dispatch refused after provider auth failure", { provider });
+      return refusal;
+    } catch (err) {
+      logger.warn("orchestrator", "worker auth fan-out check skipped", { error: String(err) });
+      return null;
+    }
   }
 
   /** Refusal text when starting one more background agent would exceed the parallel limit. */
@@ -2031,19 +2611,187 @@ export class Agent {
     }
   }
 
-  private async readDelegation(id: string): Promise<ToolResult> {
+  private async readDelegation(
+    id: string,
+    artifact?: import("../types/index.js").DelegationArtifactReadInput,
+  ): Promise<ToolResult> {
     try {
-      return {
-        success: true,
-        output: await this.delegations.read(id),
-      };
+      if (artifact?.toolCallId)
+        return this.delegations.readToolArtifact(
+          id,
+          artifact.toolCallId,
+          artifact.resultVersion,
+          artifact.offset,
+          artifact.maxChars,
+        );
+      const read = await this.delegations.readResult(
+        id,
+        !this._helperParentSessionId || this.session?.id === this._helperParentSessionId,
+        artifact && (artifact.offset !== undefined || artifact.maxChars !== undefined)
+          ? { offset: artifact.offset, maxChars: artifact.maxChars }
+          : undefined,
+      );
+      surfaceWorkerGrounding(read.output, id);
+      return read;
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : String(err);
+      logger.warn("orchestrator", "Failed to read delegation result", { id, error: msg });
       return {
         success: false,
         output: `Failed to read delegation: ${msg}`,
       };
     }
+  }
+
+  private async waitForDelegation(id: string, signal?: AbortSignal): Promise<ToolResult> {
+    const result = await this.delegations.waitResult(id, signal);
+    if (result.success && result.output?.includes("status=running")) await this.consumeBackgroundNotifications();
+    surfaceWorkerGrounding(result.output, id);
+    return result;
+  }
+
+  private async sendDelegation(
+    id: string,
+    message: string,
+    replyTo: string | undefined,
+    toolCallId: string,
+    signal?: AbortSignal,
+    writeScope?: string[],
+  ): Promise<ToolResult> {
+    if (
+      this.executionRole !== "orchestrator" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    )
+      return { success: false, output: "Only the owning main may send worker instructions/replies." };
+    const sent = await this.delegations.sendMessage(
+      id,
+      message,
+      replyTo,
+      toolCallId,
+      ...(writeScope !== undefined ? [writeScope] : []),
+    );
+    if (!sent.success || !replyTo?.trim() || isTuiActive()) return sent;
+    const next = await this.waitForDelegation(id, signal);
+    return { ...next, output: `${sent.output}\n\n${next.output}` };
+  }
+
+  /** Delivery watermark at the start of the current model turn (see consumeNotificationsForTurn). */
+  private _turnVisibleDeliverySeq = 0;
+  /** Wall clock taken right after the turn's pre-stream consume; deliveries at or before it were in the prompt. */
+  private _turnDeliveryCutoff: string | undefined;
+
+  /**
+   * Pre-stream notification consume for a model turn. Every notice appended
+   * here is in this turn's starting prompt, so it is "read" once the turn
+   * completes. Mid-turn consumes (waitForDelegation) do not move the watermark:
+   * the running stream never sees deps.messages (tool-engine onStepFinish note).
+   */
+  private async consumeNotificationsForTurn(): Promise<string[]> {
+    const notices = await this.consumeBackgroundNotifications();
+    this._turnVisibleDeliverySeq = this.delegations.currentDeliverySeq();
+    this._turnDeliveryCutoff = new Date().toISOString();
+    return notices;
+  }
+
+  /**
+   * Host ACK of results a completed model turn processed (replaces the
+   * model-called delegation_ack): full inline notices from this turn's prompt,
+   * and full delegation_read results followed by a later assistant step.
+   */
+  private acknowledgeProcessedResults(newMessages: readonly ModelMessage[]): void {
+    if (
+      this.executionRole !== "orchestrator" ||
+      process.env.MUONROI_BACKGROUND_CHILD === "1" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    )
+      return;
+    const lastAssistant = newMessages.map((m) => m.role).lastIndexOf("assistant");
+    const readTexts: string[] = [];
+    newMessages.slice(0, Math.max(0, lastAssistant)).forEach((message) => {
+      if (message.role !== "tool" || !Array.isArray(message.content)) return;
+      for (const part of message.content) {
+        if (part.type !== "tool-result" || part.toolName !== "delegation_read") continue;
+        const output = part.output as { type?: string; value?: unknown } | undefined;
+        readTexts.push(typeof output?.value === "string" ? output.value : JSON.stringify(output?.value ?? ""));
+      }
+    });
+    void this.delegations
+      .acknowledgeProcessed(this._turnVisibleDeliverySeq, readTexts, this._turnDeliveryCutoff)
+      .then((acked) => {
+        if (acked.length) logger.file("info", "orchestrator", "Host-acknowledged processed results", { acked });
+      })
+      .catch((err) => {
+        logger.warn("orchestrator", "Host acknowledgement of processed results failed", { error: String(err) });
+      });
+  }
+
+  private async acceptDelegation(input: import("../types/index.js").DelegationAcceptanceInput): Promise<ToolResult> {
+    if (
+      this.executionRole !== "orchestrator" ||
+      (this._helperParentSessionId && this.session?.id !== this._helperParentSessionId)
+    )
+      return { success: false, output: "Only the owning main may accept implementation evidence." };
+    return this.delegations.accept(input);
+  }
+
+  async startCouncil(input: {
+    topic: string;
+    reason: string;
+    context: string;
+    outputContract: string;
+  }): Promise<ToolResult> {
+    if (this.executionRole !== "orchestrator")
+      return { success: false, output: "Only main may convene a background council." };
+    const refusal = await this.parallelDelegationRefusal();
+    if (refusal) return { success: false, output: refusal };
+    return this.delegations.startCouncil(input, {
+      model: this.modelId,
+      sandboxMode: this.bash.getSandboxMode(),
+      sandboxSettings: this.bash.getSandboxSettings(),
+      maxToolRounds: this.maxToolRounds,
+      maxTokens: this.maxTokens,
+      permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+      workerAuthMode: authModeForModel(this.modelId),
+      workerProviderId: this.providerId,
+      workerApiKey: this.apiKey !== "oauth" ? (this.apiKey ?? undefined) : undefined,
+    });
+  }
+
+  getCouncilSynthesis(): string | null {
+    return this.councilManager.lastSynthesis;
+  }
+
+  async startPlanReview(
+    input: import("../workflow/async-plan-review.js").PlanReviewDispatch,
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    signal?.throwIfAborted();
+    if (this.executionRole !== "orchestrator")
+      return { success: false, output: "Only main may dispatch a native background plan review." };
+    const refusal = await this.parallelDelegationRefusal();
+    if (refusal) return { success: false, output: refusal };
+    return this.delegations.startPlanReview(
+      input,
+      {
+        model: this.modelId,
+        sandboxMode: this.bash.getSandboxMode(),
+        sandboxSettings: this.bash.getSandboxSettings(),
+        maxToolRounds: this.maxToolRounds,
+        maxTokens: this.maxTokens,
+        permissionMode: this.permissionElevationRestoreTo ?? this.permissionMode,
+        workerAuthMode: authModeForModel(this.modelId),
+        workerProviderId: this.providerId,
+        workerApiKey: this.apiKey !== "oauth" ? (this.apiKey ?? undefined) : undefined,
+      },
+      signal,
+    );
+  }
+
+  async readPlanReview(
+    input: import("../workflow/async-plan-review.js").PlanReviewRead,
+  ): Promise<import("../workflow/async-plan-review.js").CompletedPlanReview> {
+    if (this.executionRole !== "orchestrator") throw new Error("Only main may complete a native plan review.");
+    return this.delegations.readPlanReview(input);
   }
 
   private async listDelegations(): Promise<ToolResult> {
@@ -2058,7 +2806,14 @@ export class Agent {
 
       const lines = delegations.map((delegation) => {
         const title = delegation.description || delegation.id;
-        return `- \`${delegation.id}\` [${delegation.status}] ${title}\n  ${delegation.summary}`;
+        const delivery =
+          delegation.deliveryStatus === "acknowledged" ? "delivered" : (delegation.deliveryStatus ?? "pending");
+        const acknowledgement = !delegation.resultVersion
+          ? "not_ready"
+          : delegation.deliveryStatus === "acknowledged"
+            ? "acknowledged"
+            : "pending";
+        return `- \`${delegation.id}\` [execution=${delegation.status}] [delivery=${delivery}] [ack=${acknowledgement}] ${title}\n  ${delegation.summary}${delegation.writeScope !== undefined ? `\n  writeScopeVersion=${delegation.writeScopeVersion} writeScope=${JSON.stringify(delegation.writeScope)}` : ""}${delegation.resultVersion ? `\n  resultVersion=${delegation.resultVersion}` : ""}`;
       });
 
       return {
@@ -2165,6 +2920,81 @@ export class Agent {
     });
   }
 
+  private async getContextProtection(): Promise<import("./working-context.js").ContextProtection> {
+    const { WORKING_CONTEXT_TAG } = await import("./working-context.js");
+    const jobs = await this.delegations.list();
+    return {
+      pinned: this.messages.filter(
+        (m, i) =>
+          (this.messageSeqs[i] !== null && this._pinnedSeqs.has(this.messageSeqs[i]!)) ||
+          (m.role === "system" &&
+            !isCompactionSummaryMessage(m) &&
+            !(typeof m.content === "string" && m.content.startsWith(`${WORKING_CONTEXT_TAG}\n`))),
+      ),
+      pendingJobIds: jobs
+        .filter((j) => j.status === "running" || !j.resultVersion || j.deliveryStatus !== "acknowledged")
+        .map((j) => j.id),
+    };
+  }
+
+  /**
+   * The live delegation ledger to carry across a compaction, or null when this
+   * is not a main session, nothing is live, or the registry cannot be read.
+   * Never throws: a ledger fault must not block the compaction it follows.
+   */
+  private async buildDelegationLedgerMessage(): Promise<ModelMessage | null> {
+    if (this.executionRole !== "orchestrator" || process.env.MUONROI_BACKGROUND_CHILD === "1") return null;
+    try {
+      const text = formatDelegationLedger(await this.delegations.ledgerSnapshot());
+      return text ? createDelegationLedgerMessage(text) : null;
+    } catch (err) {
+      logger.warn("orchestrator", "[compaction] delegation ledger snapshot failed; compacting without it", {
+        sessionId: this.session?.id,
+        error: err instanceof Error ? err.message : String(err),
+        stack: err instanceof Error ? err.stack?.split("\n").slice(0, 3) : undefined,
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Manual `/compact` replaces history with `[summary]` outside
+   * `compactForContext`; this re-attaches the host ledger to that result.
+   * Drops any stale ledger and inserts the fresh one right after a leading
+   * compaction summary.
+   */
+  async carryDelegationLedgerAfterCompaction(): Promise<void> {
+    const ledger = await this.buildDelegationLedgerMessage();
+    const keep = this.messages.map((m) => !isDelegationLedgerMessage(m));
+    const messages = this.messages.filter((_, i) => keep[i]);
+    const seqs = this.messageSeqs.filter((_, i) => keep[i]);
+    if (ledger) {
+      const at = isCompactionSummaryMessage(messages[0]) ? 1 : 0;
+      messages.splice(at, 0, ledger);
+      seqs.splice(at, 0, null);
+    }
+    this.messages = messages;
+    this.messageSeqs = seqs;
+  }
+
+  /**
+   * Re-attach a FRESH ledger after main's history was reloaded from storage
+   * (`--session` resume / picker relaunch, or the parent reload after a helper
+   * sub-session). The 0ce416b0 ledger is message-region only and never
+   * persisted, so without this a resumed orchestrator saw no live workers until
+   * its next compaction — the exact blind spot that caused the duplicate
+   * dispatch in session 4edc02516a92. Same placement and stale-replacement as
+   * the compaction carry; regenerated from the registry, never a stored copy.
+   * One-shot: the flag is cleared before the await so a concurrent idle-tick
+   * and turn start cannot both insert (and the carry is idempotent anyway).
+   */
+  private async restoreDelegationLedgerIfPending(): Promise<void> {
+    if (!this._delegationLedgerRestorePending) return;
+    this._delegationLedgerRestorePending = false;
+    if (this.executionRole !== "orchestrator" || process.env.MUONROI_BACKGROUND_CHILD === "1") return;
+    await this.carryDelegationLedgerAfterCompaction();
+  }
+
   private async compactForContext(
     provider: LegacyProvider,
     system: string,
@@ -2175,10 +3005,42 @@ export class Agent {
   ): Promise<boolean> {
     if (!this.session) return false;
 
+    const { WorkingContext, WORKING_CONTEXT_TAG, retainWorkingContext } = await import("./working-context.js");
+    const isWorkingContextReceiptMessage = (m: ModelMessage): boolean =>
+      m.role === "system" && typeof m.content === "string" && m.content.startsWith(`${WORKING_CONTEXT_TAG}\n`);
+    const working = new WorkingContext(this.session.id, this.bash.getCwd(), this.messages);
+    try {
+      working.setProtection(await this.getContextProtection());
+    } catch (err) {
+      logger.file("warn", "orchestrator", "Compaction pruning protections unavailable", { error: String(err) });
+      working.setProtection({ unavailable: true });
+    }
+    const pruningEnabled = process.env.MUONROI_PROGRESSIVE_CONTEXT !== "0" && working.active();
+    const projectedHistory = pruningEnabled ? working.project(this.messages) : this.messages;
+    const workingReceipt = pruningEnabled
+      ? retainWorkingContext(this.messages, this.session.id, this.bash.getCwd())
+      : null;
+    const sourceMessages = workingReceipt ? [workingReceipt, ...projectedHistory] : projectedHistory;
+    // A final prepared request also includes tool schemas and output reserve.
+    // Its explicit overflow retry must not be vetoed by this history-only check.
+    if (
+      pruningEnabled &&
+      !force &&
+      !shouldCompactContext(estimateConversationTokens(system, sourceMessages), contextWindow, settings)
+    ) {
+      const measurements = working.measurements();
+      if (measurements.contextPrunedChars > 0)
+        logInteraction(this.session.id, "compaction", {
+          eventSubtype: "context_pruning",
+          data: { ...measurements, mode: "working-set", canonicalHistoryUnchanged: true, summaryCalls: 0 },
+        });
+      return measurements.contextPrunedChars > 0;
+    }
+
     // Phase 1: ask the compaction proposer model whether to compact and what to keep/drop.
     // Only compact if the model says yes. On error/skip, fall back to heuristic.
     const compactModelId = this._resolveCompactModel();
-    const proposal = await proposeCompaction(compactModelId, this.messages, signal);
+    const proposal = await proposeCompaction(compactModelId, sourceMessages, signal);
 
     if (proposal !== null) {
       // Model decided — compact only if model says shouldCompact
@@ -2194,8 +3056,41 @@ export class Agent {
       }
     }
 
-    const preparation = prepareCompaction(this.messages, system, settings);
-    if (!preparation) return false;
+    const preparation = prepareCompaction(sourceMessages, system, settings);
+    if (!preparation) {
+      logger.file("info", "orchestrator", "[compaction] nothing older than the kept tail to summarize", {
+        // Key names avoid "token": the file logger redacts any key matching it.
+        messages: sourceMessages.length,
+        historyEst: estimateConversationTokens("", sourceMessages),
+        keepRecentEst: settings.keepRecentTokens,
+        force,
+      });
+      return false;
+    }
+    // The contiguous suffix the cut point chose — anything kept beyond it is
+    // kept only by a protection, and is what enforceCompactionBudget shrinks first.
+    const verbatimTail = new Set<ModelMessage>(preparation.keptMessages);
+    if (pruningEnabled) {
+      const protectedEvidence = working.retainedMessages(sourceMessages);
+      const kept = new Set([...preparation.keptMessages, ...protectedEvidence]);
+      preparation.messagesToSummarize = preparation.messagesToSummarize.filter((m) => !protectedEvidence.has(m));
+      preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !protectedEvidence.has(m));
+      preparation.keptMessages = sourceMessages.filter((m) => kept.has(m));
+    }
+    // A ledger from an earlier compaction is a stale registry snapshot: never
+    // feed it to the summarizer (it would launder old job state into the new
+    // summary) and never keep it — a fresh one is re-emitted below.
+    preparation.messagesToSummarize = preparation.messagesToSummarize.filter((m) => !isDelegationLedgerMessage(m));
+    preparation.turnPrefixMessages = preparation.turnPrefixMessages.filter((m) => !isDelegationLedgerMessage(m));
+    preparation.keptMessages = preparation.keptMessages.filter((m) => !isDelegationLedgerMessage(m));
+    // Same for working-set receipts: only the newest (`workingReceipt`, re-inserted
+    // below) is authoritative. Session c2fda568be6b carried 41 stale receipts
+    // (117,528 tokens) because each compaction added one and none was dropped.
+    if (workingReceipt) {
+      preparation.keptMessages = preparation.keptMessages.filter(
+        (m) => m === workingReceipt || !isWorkingContextReceiptMessage(m),
+      );
+    }
 
     const trigger = force ? "manual" : "auto";
 
@@ -2225,7 +3120,7 @@ export class Agent {
     };
     await this.fireHook(preCompactInput, signal).catch(() => {});
 
-    const keptSeqs = this.messageSeqs.slice(preparation.firstKeptIndex);
+    const keptSeqs = preparation.keptMessages.map((m) => this.messageSeqs[this.messages.indexOf(m)] ?? null);
     const firstKeptSeq = keptSeqs.find((seq): seq is number => seq !== null) ?? getNextMessageSequence(this.session.id);
     const compactStartedAt = Date.now();
     const isSubSession = await (async () => {
@@ -2295,6 +3190,7 @@ export class Agent {
     let summary: string;
     let compactUsage: { promptTokens: number; completionTokens: number };
     let summaryModelId = compactModelId;
+    let usedMechanicalSummary = false;
     const sessionIdForCooldown = this.session.id;
 
     const tryGenerateSummary = async (modelId: string) => {
@@ -2302,9 +3198,43 @@ export class Agent {
         throw new Error(`compaction model ${modelId} is cooling down after a recent failure this session`);
       }
       try {
-        return await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+        const result = await generateCompactionSummary(modelId, preparation, customInstructions, signal);
+        // A success resets the backoff: the next failure starts at the base cooldown again.
+        clearCompactionModelCooldown(sessionIdForCooldown, modelId);
+        return result;
       } catch (err) {
         markCompactionModelCooldown(sessionIdForCooldown, modelId);
+        // A summary REJECTED as empty/truncated was still billed (session
+        // 4edc02516a92: 15 empty summaries, each at its output cap). Attribute
+        // that waste to the model that spent it under the same `compaction`
+        // source, so usage_events shows it instead of hiding it behind the
+        // fallback that eventually succeeded. Provider throws carry zero.
+        const billed = getBilledCompactionUsage(err);
+        if (billed.promptTokens > 0 || billed.completionTokens > 0) {
+          this.recordUsage(
+            { inputTokens: billed.promptTokens, outputTokens: billed.completionTokens },
+            "compaction",
+            modelId,
+          );
+          const failedProvider = detectProviderForModel(modelId);
+          appendCostLog({
+            ts: compactStartedAt,
+            provider: failedProvider,
+            model: modelId,
+            estimatedUsd: projectCostUSD(failedProvider, modelId, billed.promptTokens, billed.completionTokens),
+            callsite: "orchestrator.compaction.rejected",
+            phase: "compaction",
+            iteration: this._compactionStats.count + 1,
+            actualInputTokens: billed.promptTokens,
+            actualOutputTokens: billed.completionTokens,
+            durationMs: Date.now() - compactStartedAt,
+          }).catch((logErr: unknown) => {
+            logger.warn("orchestrator", "[compactForContext] cost-log append for rejected summary failed", {
+              modelId,
+              error: (logErr as Error)?.message,
+            });
+          });
+        }
         throw err;
       }
     };
@@ -2334,6 +3264,7 @@ export class Agent {
           logSummaryFailure("main model fallback", secondErr);
           summary = buildMechanicalCompactionStub(preparation);
           compactUsage = { promptTokens: 0, completionTokens: 0 };
+          usedMechanicalSummary = true;
           markProposerStalled(
             `Compaction summarizers failed (${compactModelId} and ${this.modelId}) — used a mechanical fallback (no LLM). Context still shrank.`,
           );
@@ -2341,6 +3272,7 @@ export class Agent {
       } else {
         summary = buildMechanicalCompactionStub(preparation);
         compactUsage = { promptTokens: 0, completionTokens: 0 };
+        usedMechanicalSummary = true;
         markProposerStalled(
           `Compaction summarizer (${compactModelId}) failed — used a mechanical fallback (no LLM). Context still shrank.`,
         );
@@ -2379,9 +3311,27 @@ export class Agent {
       actualInputTokens: compactUsage.promptTokens,
       actualOutputTokens: compactUsage.completionTokens,
       durationMs: Date.now() - compactStartedAt,
-    }).catch(() => undefined);
+    }).catch((logErr: unknown) => {
+      logger.warn("orchestrator", "[compactForContext] cost-log append for compaction failed", {
+        modelId: summaryModelId,
+        error: (logErr as Error)?.message,
+      });
+    });
 
-    appendCompaction(this.session.id, firstKeptSeq, summary, preparation.tokensBefore);
+    // Highest seq the live view knew about; rows appended later (the working
+    // receipt below, the next turns) are outside the persisted shrink spec.
+    const throughSeq = getNextMessageSequence(this.session.id) - 1;
+    const seqsBeforeCompaction = this.messageSeqs.filter((seq): seq is number => seq !== null);
+    const tailSeqs = [...verbatimTail]
+      .map((m) => this.messageSeqs[this.messages.indexOf(m)] ?? null)
+      .filter((seq): seq is number => seq !== null);
+    appendCompaction(
+      this.session.id,
+      firstKeptSeq,
+      summary,
+      preparation.tokensBefore,
+      workingReceipt && typeof workingReceipt.content === "string" ? workingReceipt.content : undefined,
+    );
 
     // Re-inject pinned user messages that were about to be summarized away.
     // Pinned seqs that are still inside keptMessages don't need re-injection.
@@ -2427,13 +3377,96 @@ export class Agent {
       preparation.keptMessages,
     );
 
+    // Host-carried live delegation state (session 4edc02516a92, compaction
+    // id=343): placed right after the summary, independent of what the
+    // summarizer chose to keep. See delegation-ledger.ts.
+    const delegationLedger = await this.buildDelegationLedgerMessage();
+
     this.messages = [
       createCompactionSummaryMessage(summary),
+      ...(delegationLedger ? [delegationLedger] : []),
+      ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [workingReceipt] : []),
       ...(taggedSessionStartReinjection ? [taggedSessionStartReinjection] : []),
       ...pinnedReinjections,
       ...preparation.keptMessages,
     ];
-    this.messageSeqs = [null, ...(taggedSessionStartReinjection ? [null] : []), ...pinnedReinjectionSeqs, ...keptSeqs];
+    this.messageSeqs = [
+      null,
+      ...(delegationLedger ? [null] : []),
+      ...(workingReceipt && !preparation.keptMessages.includes(workingReceipt) ? [null] : []),
+      ...(taggedSessionStartReinjection ? [null] : []),
+      ...pinnedReinjectionSeqs,
+      ...keptSeqs,
+    ];
+
+    // Size guarantee, independent of whether a summarizer worked: protections
+    // choose which turns stay, never that their bulk stays (compaction-budget.ts
+    // has the session c2fda568be6b evidence: 41 compactions, nearly all saved 0).
+    const headCount = this.messages.length - preparation.keptMessages.length;
+    const windowRoom = contextWindow - settings.reserveTokens;
+    const tailBudget = settings.keepRecentTokens * 3;
+    const pinnedKept = new Set<ModelMessage>(
+      this.messages.filter((_, i) => {
+        const seq = this.messageSeqs[i];
+        return seq !== null && seq !== undefined && this._pinnedSeqs.has(seq);
+      }),
+    );
+    const budget = enforceCompactionBudget(this.messages, {
+      systemPrompt: system,
+      softBudgetTokens: windowRoom > 0 ? Math.min(Math.floor(windowRoom * 0.5), tailBudget) : tailBudget,
+      hardBudgetTokens: windowRoom > 0 ? Math.floor(windowRoom * 0.8) : 0,
+      headCount,
+      tail: verbatimTail,
+      neverDrop: pinnedKept,
+      persistArtifact: (toolCallId, toolName, fullContent) => recordArtifact(toolCallId, toolName, fullContent),
+    });
+    if (budget.level > 0) {
+      const seqsBefore = this.messageSeqs;
+      this.messages = budget.messages;
+      this.messageSeqs = budget.sourceIndices.map((i) => seqsBefore[i] ?? null);
+      logger.file("info", "orchestrator", "[compaction] host budget pass shrank retained history", {
+        level: budget.level,
+        tokensBefore: budget.tokensBefore,
+        tokensAfter: budget.tokensAfter,
+        stubbedToolResults: budget.stubbedToolResults,
+        strippedReasoningParts: budget.strippedReasoningParts,
+        truncatedTexts: budget.truncatedTexts,
+        droppedMessages: budget.droppedMessages,
+      });
+    }
+
+    // Make the retained set durable. appendCompaction persisted only
+    // first_kept_seq, so a reload brought back every row from there on
+    // (c2fda568be6b: first_kept_seq stuck at 23, history re-inflated to 988k
+    // tokens). The spec records which rows this view no longer holds and which
+    // level of shrink applied; the canonical message rows stay untouched.
+    try {
+      const retainedSeqs = new Set(this.messageSeqs.filter((seq): seq is number => seq !== null));
+      const droppedSeqs = seqsBeforeCompaction.filter(
+        (seq) => seq >= firstKeptSeq && !retainedSeqs.has(seq) && !this._pinnedSeqs.has(seq),
+      );
+      if (budget.level > 0 || droppedSeqs.length > 0) {
+        const currentTurnIndex = this.messages.map((m) => m.role).lastIndexOf("user");
+        const currentTurnSeqs = this.messageSeqs
+          .slice(Math.max(0, currentTurnIndex))
+          .filter((seq): seq is number => seq !== null);
+        const spec: PersistedShrinkSpec = {
+          v: 1,
+          throughSeq,
+          level: budget.level,
+          tailFromSeq: tailSeqs.length ? Math.min(...tailSeqs) : null,
+          currentTurnFromSeq: currentTurnSeqs.length ? Math.min(...currentTurnSeqs) : throughSeq + 1,
+          droppedRanges: toSeqRanges(droppedSeqs),
+        };
+        setLatestCompactionShrink(this.session.id, spec);
+      }
+    } catch (err) {
+      // The live view is already bounded; only the reload loses the shrink.
+      logger.warn("orchestrator", "[compaction] persisting the retained-set spec failed; reload will re-inflate", {
+        sessionId: this.session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
 
     // EE anti-mù (Phase 1 of docs/ee-anti-mu-compaction-plan.md): immediately extract the fresh structured checkpoint summary
     // so pilContext / layer3 search / ee.query can recall exact prior ✔ DONE items + progress for the rest of this long session
@@ -2500,6 +3533,12 @@ export class Agent {
             saved,
             pct,
             isLongSession,
+            summaryModel: usedMechanicalSummary ? null : summaryModelId,
+            budgetLevel: budget.level,
+            budgetStubbedToolResults: budget.stubbedToolResults,
+            budgetStrippedReasoning: budget.strippedReasoningParts,
+            budgetTruncatedTexts: budget.truncatedTexts,
+            budgetDroppedMessages: budget.droppedMessages,
           },
         });
       }
@@ -2603,6 +3642,7 @@ export class Agent {
     topic: string,
     options?: {
       skipClarification?: boolean;
+      infrastructure?: boolean;
       observer?: ProcessMessageObserver;
       userModelMessage?: ModelMessage;
       /**
@@ -2621,6 +3661,8 @@ export class Agent {
        * behind it) actually runs (C2, 2026-08-06).
        */
       suppressPostDebate?: boolean;
+      /** Detached advice jobs return synthesis to main and never start a follow-up work turn. */
+      returnOnly?: boolean;
       /**
        * Gate A — caller-threaded out-of-repo ("external") scope, forwarded into
        * runCouncil's `RunCouncilOptions.externalTopic`. Set by the auto-council
@@ -2633,16 +3675,35 @@ export class Agent {
       skipPil?: boolean;
       /** Caller-owned final output format, independent of spec inference. */
       synthesisOutputContract?: string;
+      /** Host collector for actually completed council tool calls. */
+      onCouncilToolResult?: import("../council/types.js").CouncilToolEvidenceSink;
+      onCouncilRecord?: import("../council/index.js").RunCouncilOptions["onCouncilRecord"];
       /** Cancellation of the SDK tool that owns a nested council. */
       abortSignal?: AbortSignal;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    if (this.executionRole === "orchestrator" && !options?.infrastructure) {
+      const receipt = await this.startCouncil({
+        topic,
+        reason: "User requested council",
+        context: "",
+        outputContract:
+          options?.synthesisOutputContract ??
+          "Return advice, unresolved questions, evidence and limitations. Do not implement or accept work.",
+      });
+      yield {
+        type: receipt.success ? "content" : "error",
+        content: receipt.output ?? receipt.error ?? "Council launch failed.",
+      };
+      yield { type: "done", content: "" };
+      return;
+    }
     const { runCouncil, buildNeutralPostCouncilContinuation, extractReadableSynthesis } = await import(
       "../council/index.js"
     );
     const { createCouncilLLM } = await import("../council/llm.js");
     const councilStats = { calls: 0, startMs: Date.now(), phases: [] as Array<{ name: string; durationMs: number }> };
-    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats);
+    const llm = createCouncilLLM(this.bash, this.mode, this.session?.id, councilStats, options?.onCouncilToolResult);
 
     const processMessageFn = (message: string) => this.processMessage(message, options?.observer);
 
@@ -2725,6 +3786,7 @@ export class Agent {
           externalTopic: options?.externalTopic,
           skipPil: options?.skipPil,
           synthesisOutputContract: options?.synthesisOutputContract,
+          onCouncilRecord: options?.onCouncilRecord,
           // When the Context Rail is active it carries leader/panel/cost as
           // ambient sidebar rows, so suppress the duplicate inline summary.
           suppressInlineMeta: isContextRailEnabled(),
@@ -2822,7 +3884,7 @@ export class Agent {
       // action means: nothing more to start here.
       const councilResolvedNext = chosenAction !== undefined;
       const continuationPrompt =
-        ownsController && synthesis && !councilResolvedNext
+        ownsController && synthesis && !councilResolvedNext && !options?.returnOnly
           ? buildNeutralPostCouncilContinuation(synthesis) || null
           : null;
       // REMOVED 2026-08-06 (C1/C2): the `chosenAction === "implement"` branch
@@ -2866,7 +3928,7 @@ export class Agent {
               // isToolActivityLive (an in-flight bash/task call) and
               // hasProgressSince (a provider request issued inside the
               // window that just elapsed). A council continuation re-enters
-              // preStreamPhase (e.g. "gsdGate"), whose leader-tier assessor
+              // preStreamPhase (e.g. "flowGate"), whose leader-tier assessor
               // pings hasTurnProgressSince for its whole lifetime — without
               // this wiring that ping was invisible here and a healthy,
               // still-working continuation could be killed at idleMs even
@@ -2933,6 +3995,92 @@ export class Agent {
       userModelMessage?: ModelMessage;
     },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    if (this.executionRole === "orchestrator") {
+      // status/abort read or stop state the host already holds — answered here,
+      // never forwarded to the model (see ideal-coordination.ts).
+      if (payload.subcommand === "status") {
+        yield { type: "content", content: await this.renderIdealCoordinationStatus() };
+        yield { type: "done" };
+        return;
+      }
+      if (payload.subcommand === "abort") {
+        yield { type: "content", content: await this.abortIdealCoordination() };
+        yield { type: "done" };
+        return;
+      }
+      const goal = payload.idea?.trim();
+      if (payload.subcommand === "start") {
+        // Arming persists the record (with the autopilot state) in one write.
+        const run = await this.idealAutopilot.arm({
+          goal: goal || "(the current conversation's goal)",
+          startedAt: new Date().toISOString(),
+        });
+        let saved = true;
+        try {
+          saved = this.readIdealRun()?.startedAt === run.startedAt;
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal: run record unreadable after saving", { error: String(err) });
+          saved = false;
+        }
+        if (!saved) {
+          yield {
+            type: "content",
+            content:
+              "Warning: the /ideal run record could not be saved; /ideal status and /ideal abort will not find this run after a restart.\n",
+          };
+        }
+      } else if (payload.subcommand === "resume") {
+        // The user re-authorises the run: a fresh budget window, the turn count carries on.
+        let open: IdealCoordinationRun | null = null;
+        try {
+          open = this.readIdealRun();
+        } catch (err) {
+          logger.warn("orchestrator", "/ideal resume: run record unreadable; autopilot not re-armed", {
+            error: String(err),
+          });
+        }
+        if (open) await this.idealAutopilot.arm(open, open.autopilot);
+      }
+      let councilReceipt = "";
+      if (payload.flags.forceCouncil) {
+        const receipt = await this.startCouncil({
+          topic: goal || `/ideal ${payload.subcommand}${payload.runId ? ` ${payload.runId}` : ""}`,
+          reason: "User explicitly requested --force-council",
+          context: JSON.stringify({ subcommand: payload.subcommand, runId: payload.runId, flags: payload.flags }),
+          outputContract:
+            "Return council advice with evidence, unresolved questions and limitations. Do not implement or accept work.",
+        });
+        councilReceipt = `\nCouncil launch receipt (consume its durable result; do not poll):\n${receipt.output ?? receipt.error ?? "Council launch failed."}\n`;
+        yield {
+          type: receipt.success ? "content" : "error",
+          content: receipt.output ?? receipt.error ?? "Council launch failed.",
+        };
+      }
+      // The host runs the loop (ideal-autopilot.ts): it starts the next turn while
+      // the root goal is open, so this prompt states the task and the fact that the
+      // host continues — it does not ask the model to keep going.
+      let autopilotNote = "";
+      try {
+        if (this.readIdealRun()?.autopilot?.status === "running")
+          autopilotNote =
+            "\nHost autopilot is on: while the root goal is open the host starts your next turn itself; it stops when root_status=complete is accepted (needs a recorded flow_verify pass), at a budget limit, or when you ask the user.";
+      } catch (err) {
+        logger.warn("orchestrator", "/ideal: run record unreadable for the autopilot note", { error: String(err) });
+      }
+      yield* this.processMessage(
+        `Coordinate the user's /ideal ${payload.subcommand} request using planning tools and explicit bounded workers, followed by independent review.\n` +
+          `Request: ${JSON.stringify({ subcommand: payload.subcommand, runId: payload.runId, flags: payload.flags })}\n` +
+          (goal
+            ? `User goal (preserve its language and scope):\n${goal}`
+            : "Use the current conversation's goal; ask the user only if it is missing.") +
+          autopilotNote +
+          councilReceipt,
+        options?.observer,
+        undefined,
+        { idealAutopilotOwner: true },
+      );
+      return;
+    }
     const { runProductLoop } = await import("../product-loop/index.js");
     const { createCouncilLLM } = await import("../council/llm.js");
     const { withCouncilSignal } = await import("../council/index.js");
@@ -3705,6 +4853,15 @@ export class Agent {
   private _buildBatchTurnRunnerDeps(): BatchTurnRunnerDeps {
     const self = this;
     return {
+      get executionRole() {
+        return self.executionRole;
+      },
+      get planReviewBudget() {
+        return self.requestPlanReviewBudget();
+      },
+      get reasoningEffort() {
+        return self.getReasoningEffort();
+      },
       get messages() {
         return self.messages;
       },
@@ -3738,21 +4895,42 @@ export class Agent {
         self._lastProviderOptionsShape = shape;
       },
       getCompactionStats: () => self.getCompactionStats(),
+      getContextProtection: () => self.getContextProtection(),
       getBatchClientOptions: (signal) => self.getBatchClientOptions(signal),
       getCompactionSettings: (cw) => self.getCompactionSettings(cw),
       compactForContext: (provider, system, cw, signal, settings, overflow) =>
         self.compactForContext(provider, system, cw, signal, settings, overflow),
       extendHardCeilingForAutoCompaction: () => self.extendHardCeilingForAutoCompaction(),
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
-      createTools: (bash, provider, mode, opts) => createTools(bash, provider, mode, opts),
+      createTools: (bash, provider, mode, opts) => {
+        const native = createTools(bash, provider, mode, {
+          ...opts,
+          executionRole: self.executionRole,
+          credentialedProvider: self.providerId,
+          planReviewBudget: self.requestPlanReviewBudget(),
+          startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+          readPlanReview: (input) => self.readPlanReview(input),
+          verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
+        });
+        return filterExecutionTools(native, native, self.executionRole);
+      },
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),
-      readDelegation: (id) => self.readDelegation(id),
+      readDelegation: (id, artifact) => self.readDelegation(id, artifact),
+      sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
+        self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
+      acceptDelegation: (input) => self.acceptDelegation(input),
+      startCouncil: (input) => self.startCouncil(input),
+      startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+      readPlanReview: (input) => self.readPlanReview(input),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       executeBatchToolCall: (tools, toolCall, messages, signal) =>
         self.executeBatchToolCall(tools, toolCall, messages, signal),
-      appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
+      appendCompletedTurn: (user, asst) => {
+        self.appendCompletedTurn(user, asst);
+        self.acknowledgeProcessedResults(asst);
+      },
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
     };
@@ -3849,7 +5027,24 @@ export class Agent {
     userMessage: string,
     observer?: ProcessMessageObserver,
     images?: Array<{ path: string; mediaType: string; base64: string }>,
+    turnOptions?: {
+      /** Host-started and hidden from the transcript (background wake). */
+      internalActivity?: boolean;
+      /** Host-started `/ideal` autopilot turn: visible in the transcript, not the user's. */
+      autopilotContinuation?: boolean;
+      /** `/ideal start|resume` itself: the user's turn, which owns the autopilot it just armed. */
+      idealAutopilotOwner?: boolean;
+    },
   ): AsyncGenerator<StreamChunk, void, unknown> {
+    // The user always wins: a message they typed stops the /ideal autopilot. Host
+    // turns (background wake, autopilot continuation) are not the user, and
+    // `/ideal start|resume` own the autopilot they just armed.
+    if (!turnOptions?.internalActivity && !turnOptions?.autopilotContinuation && !turnOptions?.idealAutopilotOwner)
+      this.yieldIdealAutopilot("user_message");
+    // A background wake / autopilot continuation is not new user authorization to
+    // buy more reviews. Keep the same owner/cwd allowance across these host turns.
+    if (!turnOptions?.internalActivity && !turnOptions?.autopilotContinuation) this._planReviewAllowance = undefined;
+    else if (this._planReviewAllowance) this._planReviewAllowance.budget.stopRequested = false;
     const threshold = Number(process.env.MUONROI_SILENT_ROTATION_THRESHOLD) || 80000;
     const currentChars = this.estimateConversationChars();
     logger.debug("orchestrator", "Checking silent session rotation threshold", { currentChars, threshold });
@@ -3863,32 +5058,66 @@ export class Agent {
       process.env.NODE_ENV === "test";
     const forceClassify = process.env.MUONROI_FORCE_ROUTING_CLASSIFY === "1";
 
-    if (isMockMode && !forceClassify) {
-      logger.debug("orchestrator", "Skipping sub-session routing classification in mock/test mode");
-    } else {
-      try {
-        const { classifySubSessionAction } = await import("../pil/llm-classify.js");
-        // Feed the recent-conversation digest so the router can actually honour
-        // its "decide based on the conversation history" contract — otherwise a
-        // continuation ("ok làm phần đó đi") is judged in isolation and can be
-        // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
-        // on the session-size metadata block the ROTATE_SESSION rule relies on.
-        const routeResult = await classifySubSessionAction(this.modelId, userMessage, {
-          currentChars,
-          threshold,
-          recentTurns: this._buildRecentTurnsSummary(),
+    // Routing can wait on provider pacing before MessageProcessor owns a turn.
+    // Expose that wait to abort() without replacing a nested caller's controller.
+    const ownsRoutingController = !this.abortController;
+    // Only a top-level turn (no owner above it) may release the controller after a
+    // watchdog kill; a nested turn shares its owner's controller and must not null it.
+    const isTopLevelTurn = ownsRoutingController;
+    if (isTopLevelTurn) this._steersInFlight = [];
+    const routingController = this.abortController ?? new AbortController();
+    if (ownsRoutingController) this.abortController = routingController;
+    try {
+      if (this.executionRole === "orchestrator" || (isMockMode && !forceClassify)) {
+        // Name the actual reason: the orchestrator role (every TUI/headless main
+        // session) never router-forks or silently rotates, regardless of
+        // MUONROI_FORCE_ROUTING_CLASSIFY — a "mock/test mode" message here sent
+        // a harness diagnosis down the wrong path.
+        logger.debug("orchestrator", "Skipping sub-session routing classification", {
+          reason: this.executionRole === "orchestrator" ? "orchestrator-role" : "mock-mode",
+          executionRole: this.executionRole,
         });
-        if (routeResult) {
-          routeAction = routeResult.action;
-          logger.info("orchestrator", "Routing action selected for user message", {
-            action: routeAction,
-            confidence: routeResult.confidence,
-            reason: routeResult.reason,
-          });
+      } else {
+        try {
+          const { classifySubSessionAction } = await import("../pil/llm-classify.js");
+          // Feed the recent-conversation digest so the router can actually honour
+          // its "decide based on the conversation history" contract — otherwise a
+          // continuation ("ok làm phần đó đi") is judged in isolation and can be
+          // mis-routed as a fresh/unrelated task. Passing contextInfo also turns
+          // on the session-size metadata block the ROTATE_SESSION rule relies on.
+          const routeResult = await classifySubSessionAction(
+            this.modelId,
+            userMessage,
+            {
+              currentChars,
+              threshold,
+              recentTurns: this._buildRecentTurnsSummary(),
+            },
+            routingController.signal,
+          );
+          if (routeResult) {
+            routeAction = routeResult.action;
+            logger.info("orchestrator", "Routing action selected for user message", {
+              action: routeAction,
+              confidence: routeResult.confidence,
+              reason: routeResult.reason,
+            });
+          }
+        } catch (err) {
+          if (routingController.signal.aborted) {
+            logger.debug("orchestrator", "Routing classification cancelled", {
+              error: err instanceof Error ? err.message : String(err),
+            });
+          } else {
+            logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", {
+              error: err,
+            });
+          }
         }
-      } catch (err) {
-        logger.error("orchestrator", "Routing classification failed, falling back to DIRECT_ANSWER", { error: err });
       }
+      routingController.signal.throwIfAborted();
+    } finally {
+      if (ownsRoutingController && this.abortController === routingController) this.abortController = null;
     }
     breadcrumb("pre-stream.subSessionClassify.end", { sessionId: this.session?.id, routeAction });
 
@@ -3898,7 +5127,11 @@ export class Agent {
     // doing heavy multi-tool work. Deterministic, based on real execution, not a
     // prompt guess. Only rescues DIRECT_ANSWER — never hijacks a deliberate
     // ROTATE_SESSION. See reactive-delegation.ts.
-    if (routeAction === "DIRECT_ANSWER" && shouldReactivelyEscalate(this._lastTurnToolChars)) {
+    if (
+      this.executionRole !== "orchestrator" &&
+      routeAction === "DIRECT_ANSWER" &&
+      shouldReactivelyEscalate(this._lastTurnToolChars)
+    ) {
       logger.info("orchestrator", "Reactive escalation to sub-session (prior turn tool-heavy)", {
         prevTurnToolChars: this._lastTurnToolChars,
       });
@@ -3941,7 +5174,8 @@ export class Agent {
       }
     }
 
-    const shouldRotate = currentChars > threshold || routeAction === "ROTATE_SESSION";
+    const shouldRotate =
+      this.executionRole !== "orchestrator" && (currentChars > threshold || routeAction === "ROTATE_SESSION");
 
     if (shouldRotate && this.session && this.sessionStore) {
       logger.info("orchestrator", "Triggering silent session rotation", {
@@ -3989,6 +5223,9 @@ export class Agent {
     let isSubSessionForked = false;
     let parentSessionId: string | null = null;
     let subSessionId: string | null = null;
+    // Main's ledger lives only in memory; the absorb below reloads main from
+    // storage and would silently drop it (see restoreDelegationLedgerIfPending).
+    let parentCarriedDelegationLedger = false;
     // Round 9 (G13): `this.bash` is ONE shared BashTool instance for the
     // whole Agent lifetime — forking a sub-session swaps `this.session` /
     // `this.messages` but NEVER creates a new BashTool, so a `cd` the child
@@ -4003,6 +5240,7 @@ export class Agent {
     const parentCwdAtFork = this.bash.getCwd();
     const previousHelperOwner = this._helperParentSessionId;
     const previousHelperCwd = this._helperParentCwd;
+    const parentDelegationCwdAtFork = previousHelperCwd ?? this.session?.cwdAtStart ?? parentCwdAtFork;
 
     // Round 12 (G15): `routerSubSessions: false` keeps the CURRENT turn on
     // the main session/main model — router SPAWN_SUB_SESSION and reactive
@@ -4039,6 +5277,8 @@ export class Agent {
       // child's output, which must NOT run when the fork never completed)
       // never fires, silently leaking the child's model/session/messages
       // onto every subsequent turn of this Agent instance.
+      parentCarriedDelegationLedger =
+        this._delegationLedgerRestorePending || this.messages.some((m) => isDelegationLedgerMessage(m));
       const sessionBeforeFork = this.session;
       const modelIdBeforeFork = this.modelId;
       const messagesBeforeFork = this.messages;
@@ -4120,12 +5360,12 @@ export class Agent {
           // differ.
           this.modelId = this.session.model;
           const childState = loadSessionChainTranscriptState(subSessionId);
-          this.messages = childState.messages;
+          this.messages = refreshSubSessionToolContract(childState.messages);
           this.messageSeqs = childState.seqs;
           this.sessionStore.touchSession(subSessionId, this.bash.getCwd());
           isSubSessionForked = true;
           this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
-          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
+          this._helperParentCwd = parentDelegationCwdAtFork;
           logger.info("orchestrator", "Resumed child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4167,7 +5407,7 @@ export class Agent {
           // recent discussion the user pointed at ("debate THESE parts"), and
           // drifted off-topic. Keep the tail; just guarantee the summary is
           // present and persist the compaction row for the child's continuity.
-          const seedMessages: ModelMessage[] = [...this.messages];
+          const seedMessages: ModelMessage[] = refreshSubSessionToolContract(this.messages);
           const seedSeqs: Array<number | null> = [...this.messageSeqs];
           if (latest?.summary) {
             if (!isCompactionSummaryMessage(seedMessages[0])) {
@@ -4186,9 +5426,9 @@ export class Agent {
               `Your assignment is to gather evidence and perform the scoped work needed for: "${userMessage}"\n` +
               `The Main Session owns the goal, acceptance decision and final user-facing answer. Return a concise deliverable to main, not a final answer on its behalf.\n\n` +
               `Your Operating Boundaries & Rules:\n` +
-              `1. You have full access to tools (bash, edit_file, read_file, grep, etc.). Execute them as needed to build, debug, and verify the work.\n` +
+              `${SUB_SESSION_TOOL_BOUNDARY}\n` +
               `2. Stay strictly focused on completing the request. Do not engage in social chat or pleasantries.\n` +
-              `3. Once the goal is achieved and verified, you MUST return your final response using the 'respond_general' (or final answer) tool.\n` +
+              `${SUB_SESSION_COMPLETION_RULE}\n` +
               `4. Your final response MUST contain a structured summary: Key Changes (file paths), Verification Details (commands and observed results), Remaining Blockers, and Result Summary. Cite tool/artifact IDs where available so main can retrieve full evidence.\n` +
               `5. All intermediate tool calls, raw tool outputs, and diagnostic traces will remain isolated inside this sub-session and will not bloat the parent session.`,
           };
@@ -4206,7 +5446,7 @@ export class Agent {
 
           isSubSessionForked = true;
           this._helperParentSessionId = previousHelperOwner ?? parentSessionId;
-          this._helperParentCwd = previousHelperCwd ?? parentCwdAtFork;
+          this._helperParentCwd = parentDelegationCwdAtFork;
           logger.info("orchestrator", "Forked child sub-session successfully", {
             parentSessionId,
             subSessionId,
@@ -4229,14 +5469,11 @@ export class Agent {
     }
 
     let processor = new MessageProcessor(this._buildMessageProcessorDeps());
-    // Boundary between "already in the sub-session transcript" and "produced by
-    // THIS turn". Captured after the fork/resume above swapped `this.messages`
-    // to the sub-session, and read by salvageSubSessionOutput in the finally
-    // block below so a turn that produces nothing cannot hand the parent the
-    // PREVIOUS turn's answer (session 708f0fc4ac8b). Declared out here because
-    // `finally` cannot see bindings scoped to the `try` block.
-    const preTurnMessageCount = this.messages.length;
-    const autoCommitOn = isAutoCommitEnabled();
+    // Persisted boundary for THIS helper turn. Sequence numbers survive the
+    // compaction that can replace/shrink this.messages before handoff. They also
+    // exclude earlier answers when a resumed child produces no new deliverable.
+    const preTurnFirstSeq = isSubSessionForked && subSessionId ? getNextMessageSequence(subSessionId) : undefined;
+    const autoCommitOn = this.executionRole !== "orchestrator" && isAutoCommitEnabled();
     const cwd = this.bash.getCwd();
     const dirtyBefore = autoCommitOn ? await snapshotDirtyPaths(cwd) : new Set<string>();
 
@@ -4280,7 +5517,7 @@ export class Agent {
         try {
           attempts++;
           try {
-            const stream = withTurnWatchdog(processor.run(userMessage, observer, images), {
+            const stream = withTurnWatchdog(processor.run(userMessage, observer, images, turnOptions), {
               idleMs: turnIdleMs,
               totalMs: turnTotalMs,
               label: "assistant turn",
@@ -4316,7 +5553,39 @@ export class Agent {
                 kind: stallErr.kind,
                 message: stallErr.message,
               });
-              this.abortController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              const killedController = this.abortController;
+              killedController?.abort(new DOMException(stallErr.message, "TimeoutError"));
+              // The killed turn's own `finally` is what normally clears the controller, but
+              // it only runs once the hung provider call settles — and a call that ignores
+              // the abort never does. Left in place, the aborted controller made every
+              // later `processMessage` throw in its routing preamble (session
+              // 7f24048ad75d: 21 typed messages, no turn). A top-level turn releases it
+              // here; the killed run's finally compares identity, so it stays harmless.
+              if (isTopLevelTurn && killedController && this.abortController === killedController) {
+                this.abortController = null;
+              }
+              // Messages typed during the killed request were drained into it and never
+              // answered. Hand them back to the host to re-queue; with no host hook say so.
+              const unanswered = this._steersInFlight;
+              this._steersInFlight = [];
+              let unansweredNotice = "";
+              if (unanswered.length > 0) {
+                let handedBack = false;
+                try {
+                  if (this.steerRestore) {
+                    this.steerRestore(unanswered);
+                    handedBack = true;
+                  }
+                } catch (restoreErr) {
+                  logger.error("orchestrator", "steer hand-back after watchdog kill failed", {
+                    error: (restoreErr as Error)?.message,
+                    count: unanswered.length,
+                  });
+                }
+                if (!handedBack) {
+                  unansweredNotice = ` Not answered: ${unanswered.map((t) => JSON.stringify(t.slice(0, 120))).join(", ")}.`;
+                }
+              }
               // A watchdog kill must leave the SAME three artifacts a thrown
               // provider error leaves (tool-engine.ts error path) — otherwise it
               // ends the turn more quietly than a crash and the whole failure is
@@ -4328,7 +5597,7 @@ export class Agent {
               //   2. the write-ahead user row flipped off `pending`,
               //   3. an `error` chunk, not a toast — the UI folds `error` content
               //      into the transcript, while a toast auto-dismisses.
-              const stallMessage = `Turn ended by watchdog: ${stallErr.message}`;
+              const stallMessage = `Turn ended by watchdog: ${stallErr.message}${unansweredNotice}`;
               // Attribute the hang to the phase that STARTED without a closing
               // breadcrumb — see the `preStreamPhase` helper in
               // message-processor.ts and the coarse "pre-stream.toolEngine"
@@ -4366,7 +5635,7 @@ export class Agent {
                   logger.error("orchestrator", "watchdog pending-message mark failed", { error: markErr });
                 }
               }
-              yield { type: "error", content: stallMessage, isAuthError: false };
+              yield { type: "error", content: stallMessage, isAuthError: false, isWatchdogStall: true };
               yield { type: "done" };
             } else {
               throw stallErr;
@@ -4425,7 +5694,7 @@ export class Agent {
       try {
         if (isSubSessionForked && parentSessionId && this.sessionStore) {
           try {
-            const finalMessages = salvageSubSessionOutput(this.messages, preTurnMessageCount);
+            const { loadTranscriptState } = await import("../storage/transcript.js");
 
             // Restore parent session
             this.session = this.sessionStore.getRequiredSession(parentSessionId);
@@ -4451,19 +5720,44 @@ export class Agent {
               });
             }
 
-            const { loadTranscriptState } = await import("../storage/transcript.js");
             const parentState = loadTranscriptState(parentSessionId);
             this.messages = parentState.messages;
             this.messageSeqs = parentState.seqs;
+            // Re-arm only when main carried one: a ledger appearing where none
+            // was would shift main's whole cached message prefix.
+            if (parentCarriedDelegationLedger) this._delegationLedgerRestorePending = true;
 
             this._helperParentSessionId = previousHelperOwner;
             this._helperParentCwd = previousHelperCwd;
+            // Restore ownership before attempting a child transcript read:
+            // a failed read must not strand the UI on the helper context.
+            const childState = loadTranscriptState(subSessionId!);
+            const finalMessages = salvageSubSessionOutput(childState.messages, {
+              firstSeq: preTurnFirstSeq!,
+              messageSeqs: childState.seqs,
+            });
             if (helperTurnSettled && !helperController?.signal.aborted) {
               helperReceipt = buildHelperReceipt(subSessionId!, finalMessages, helperFailure);
               const receiptMessage: ModelMessage = { role: "system", content: helperReceipt };
               const receiptSeqs = appendMessages(parentSessionId, [receiptMessage]);
               this.messages.push(receiptMessage);
               this.messageSeqs.push(...receiptSeqs);
+              // Child reads become owner delivery only once their evidence has
+              // actually been persisted into main's receipt. An interrupted
+              // helper must not consume the owner's only completion notice.
+              for (const message of finalMessages) {
+                if (message.role !== "tool" || !Array.isArray(message.content)) continue;
+                for (const result of message.content) {
+                  if (
+                    result.type !== "tool-result" ||
+                    result.toolName !== "delegation_read" ||
+                    result.output.type !== "text"
+                  )
+                    continue;
+                  const jobId = result.output.value.match(/^jobId=([^\r\n]+)/)?.[1];
+                  if (jobId) await this.delegations.read(jobId, true, "notice");
+                }
+              }
               logger.info("orchestrator", "Returned helper evidence to main for acceptance", {
                 parentSessionId,
                 subSessionId,
@@ -4483,13 +5777,16 @@ export class Agent {
           yield { type: "toast", toastLevel: "info", content: "Main đang đánh giá kết quả từ helper..." };
           const mainProcessor = new MessageProcessor(this._buildMessageProcessorDeps());
           try {
-            yield* withTurnWatchdog(mainProcessor.run(userMessage, observer, images, { retainModel: true }), {
-              idleMs: turnIdleMs,
-              totalMs: turnTotalMs,
-              label: "main acceptance turn",
-              shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
-              hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
-            });
+            yield* withTurnWatchdog(
+              mainProcessor.run(userMessage, observer, images, { retainModel: true, ...turnOptions }),
+              {
+                idleMs: turnIdleMs,
+                totalMs: turnTotalMs,
+                label: "main acceptance turn",
+                shouldSuppressFire: () => isInteractivePaused() || isToolActivityLive(),
+                hasProgressSince: (sinceMs) => hasTurnProgressSince(sinceMs),
+              },
+            );
           } catch (err) {
             logger.error("orchestrator", "Main helper acceptance failed", { parentSessionId, error: String(err) });
             if (err instanceof TurnStallError) {
@@ -4501,7 +5798,12 @@ export class Agent {
                 });
                 markLatestPendingMessageErrored(this.session.id);
               }
-              yield { type: "error", content: `Turn ended by watchdog: ${err.message}`, isAuthError: false };
+              yield {
+                type: "error",
+                content: `Turn ended by watchdog: ${err.message}`,
+                isAuthError: false,
+                isWatchdogStall: true,
+              };
               yield { type: "done" };
             } else {
               // biome-ignore lint/correctness/noUnsafeFinally: Main acceptance is a new turn; propagate its failure after the nested ownership cleanup.
@@ -4560,6 +5862,7 @@ export class Agent {
   private _buildMessageProcessorDeps(): MessageProcessorDeps {
     const self = this;
     return {
+      requestHistory: self._requestHistory,
       get messages() {
         return self.messages;
       },
@@ -4580,6 +5883,15 @@ export class Agent {
       },
       get modelId() {
         return self.modelId;
+      },
+      get executionRole() {
+        return self.executionRole;
+      },
+      get planReviewBudget() {
+        return self.requestPlanReviewBudget();
+      },
+      get reasoningEffort() {
+        return self.getReasoningEffort();
       },
       get providerId() {
         return self.providerId;
@@ -4667,6 +5979,7 @@ export class Agent {
       },
       getCompactedThisTurn: () => self._compactedThisTurn,
       getCompactionStats: () => self.getCompactionStats(),
+      getContextProtection: () => self.getContextProtection(),
       reportTurnToolLoad: (chars) => {
         self._lastTurnToolChars = Number.isFinite(chars) && chars > 0 ? chars : 0;
         self._turnLoadOrdinal += 1;
@@ -4767,7 +6080,7 @@ export class Agent {
         self.fireHook(input as Parameters<Agent["fireHook"]>[0], signal) as ReturnType<
           MessageProcessorDeps["fireHook"]
         >,
-      consumeBackgroundNotifications: () => self.consumeBackgroundNotifications(),
+      consumeBackgroundNotifications: () => self.consumeNotificationsForTurn(),
       initOAuthProvider: () => self._initOAuthProvider(),
       buildRecentTurnsSummary: () => self._buildRecentTurnsSummary(),
       estimateProjectSize: () => self._estimateProjectSize(),
@@ -4779,15 +6092,54 @@ export class Agent {
       postTurnCompact: (provider, system, cw, signal) => self.postTurnCompact(provider, system, cw, signal),
       runTask: (request, signal) => self.runTask(request, signal),
       runDelegation: (request, signal) => self.runDelegation(request, signal),
-      readDelegation: (id) => self.readDelegation(id),
+      readDelegation: (id, artifact) => self.readDelegation(id, artifact),
+      sendDelegation: (id, message, replyTo, toolCallId, signal, writeScope) =>
+        self.sendDelegation(id, message, replyTo, toolCallId, signal, writeScope),
+      acceptDelegation: (input) => self.acceptDelegation(input),
+      startCouncil: (input) => self.startCouncil(input),
+      startPlanReview: (input, signal) => self.startPlanReview(input, signal),
+      readPlanReview: (input) => self.readPlanReview(input),
+      verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
-      drainSteerMessages: () => self.steerDrain?.() ?? [],
+      drainSteerMessages: () => {
+        const drained = self.steerDrain?.() ?? [];
+        // One drain per prepareStep: a new one proves the previous request completed.
+        self._steersInFlight = drained.map((m) => m.text);
+        return drained;
+      },
       appendMidTurnMessages: (msgs) => self.appendMidTurnMessages(msgs),
-      appendCompletedTurn: (user, asst) => self.appendCompletedTurn(user, asst),
+      appendCompletedTurn: (user, asst) => {
+        self.appendCompletedTurn(user, asst);
+        self.acknowledgeProcessedResults(asst);
+      },
       discardAbortedTurn: (user) => self.discardAbortedTurn(user),
       recordUsage: (usage, source, model, shape) => self.recordUsage(usage, source, model, shape),
-      respondToToolApproval: (id, ok) => self.respondToToolApproval(id, ok),
+      askToolApproval: async (info, signal) => {
+        const h = self._toolApprovalHandler;
+        if (!h || signal?.aborted) {
+          logger.warn("orchestrator", "askToolApproval: no approval decision possible — not running the tool", {
+            toolName: info.toolName,
+            toolCallId: info.toolCallId,
+            reason: h ? "turn aborted" : "no approval handler registered",
+          });
+          return "no-approver";
+        }
+        // Hold both watchdogs open while the human decides (see interactive-pause.ts).
+        beginInteractivePause();
+        try {
+          return await h(info, signal);
+        } catch (err) {
+          logger.error("orchestrator", "askToolApproval handler crashed — not running the tool", {
+            toolName: info.toolName,
+            toolCallId: info.toolCallId,
+            error: err,
+          });
+          return "no-approver";
+        } finally {
+          endInteractivePause();
+        }
+      },
       askToolLoopContinue: async (info) => {
         const h = self._toolLoopCapHandler;
         if (!h) return "stop";
@@ -4946,6 +6298,7 @@ export class Agent {
   private async _initOAuthProvider(): Promise<void> {
     if (this._oauthInitDone) return;
     this._oauthInitDone = true;
+    if (this.authMode === "api-key") return;
 
     // Re-resolve auth for the CURRENT provider. Runs when either:
     //  (a) no explicit API key / the "oauth" sentinel is held — OAuth may
@@ -4962,19 +6315,16 @@ export class Agent {
       const ids = await listOAuthProviderIds();
       const oauthCapable = ids.includes(this.providerId);
 
-      // One auth mode per provider (OAuth XOR API key): if this OAuth-capable
-      // provider has a live token, OAuth wins OUTRIGHT — even over a real held
-      // API key. This is the shadowing-bug fix: a stale sk-proj key must not
-      // beat a valid ChatGPT OAuth login. Check token presence BEFORE the
-      // early-out so a held key can no longer suppress OAuth.
+      // Subscription stays primary; a held API key remains a backup.
       let hasOAuthTokens = false;
       if (oauthCapable) {
         try {
           const cfg = await getOAuthProviderConfig(this.providerId);
-          const tokens = cfg ? await cfg.loadTokensWithRefresh().catch(() => null) : null;
+          const tokens = cfg ? await cfg.loadTokensWithRefresh() : null;
           hasOAuthTokens = !!tokens?.accessToken;
-        } catch {
-          hasOAuthTokens = false;
+        } catch (error) {
+          logger.file("warn", "orchestrator", `[auth] subscription token check failed: ${(error as Error).message}`);
+          throw error;
         }
       }
 
@@ -4993,8 +6343,16 @@ export class Agent {
             : undefined;
         const result = await createProviderFactoryAsync(this.providerId, {
           baseURL: effectiveBaseURL ?? undefined,
+          apiKey: this.apiKey && this.apiKey !== "oauth" ? this.apiKey : undefined,
         });
-        this.apiKey = "oauth";
+        if (keyIsSentinelOrEmpty) {
+          try {
+            this.apiKey = await loadKeyForProvider(this.providerId);
+          } catch (error) {
+            logger.file("debug", "orchestrator", `[auth] subscription has no backup key: ${(error as Error).message}`);
+            this.apiKey = "oauth";
+          }
+        }
         this.provider = result.factory;
         return;
       }
@@ -5011,7 +6369,7 @@ export class Agent {
           this.apiKey = key;
           const staleBaseURL = isAnyProviderApiBase(this.baseURL) && this.baseURL !== apiBaseFor(this.providerId);
           if (staleBaseURL) this.baseURL = null;
-          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined);
+          this.provider = createProvider(this.providerId, key, this.baseURL ?? undefined, this.authMode);
         } else if (providerDeferred) {
           this.provider = null;
         }
@@ -5030,9 +6388,14 @@ export class Agent {
           this.provider = null;
         }
       }
-    } catch {
-      // Registry unavailable — fail-open; the existing provider (if any) is
-      // left untouched and requireProvider() will surface any error.
+    } catch (error) {
+      this._oauthInitDone = false;
+      logger.file(
+        "warn",
+        "orchestrator",
+        `[auth] initialization failed for ${this.providerId}: ${(error as Error).message}`,
+      );
+      throw error;
     }
   }
 

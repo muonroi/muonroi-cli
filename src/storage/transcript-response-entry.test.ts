@@ -62,6 +62,29 @@ vi.mock("./transcript-view", () => ({
 
 const { buildChatEntries } = await import("./transcript");
 
+describe("internal display provenance survives transcript reload", () => {
+  it("keeps raw system receipts while tagging their display entry internal", () => {
+    MESSAGE_ROWS = [row(1, "system", "Background agent complete: exact saved receipt")];
+    expect(buildChatEntries("s1")).toContainEqual(
+      expect.objectContaining({ content: "Background agent complete: exact saved receipt", internal: true }),
+    );
+    expect(JSON.parse(MESSAGE_ROWS[0].message_json).content).toBe("Background agent complete: exact saved receipt");
+  });
+  it("only a host-tagged wake is internal; identical user text stays visible", () => {
+    const raw = "[background jobs finished]\n\nExact full receipt";
+    const host = row(1, "user", raw);
+    host.message_json = JSON.stringify({
+      role: "user",
+      content: raw,
+      providerOptions: { muonroi: { internalActivity: true } },
+    });
+    MESSAGE_ROWS = [host, row(2, "user", raw)];
+    const entries = buildChatEntries("s1").filter((e) => e.type === "user");
+    expect(entries.map((e) => e.internal === true)).toEqual([true, false]);
+    expect(entries.every((e) => e.content === raw)).toBe(true);
+  });
+});
+
 afterEach(() => {
   MESSAGE_ROWS = [];
 });

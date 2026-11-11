@@ -40,12 +40,32 @@ export type BuiltinSubagentId =
   | "computer";
 
 export interface TaskRequest {
+  /** Host-only durable evidence sink; never exposed in model tool schemas. */
+  artifactJobPath?: string;
+  /** A fresh, host-constrained independent verification of this exact saved result. */
+  reviewOf?: { jobId: string; resultVersion: string };
   agent: BuiltinSubagentId | string;
   description: string;
   prompt: string;
+  /** Explicit execution workspace; never infer a directory from prose. */
+  cwd?: string;
   maxToolRounds?: number;
   /** When set, bypasses parent-tier cap and uses this model for the sub-agent. */
   modelId?: string;
+  /** Explicit worker effort; omitted uses the selected model's saved/catalog default. */
+  reasoningEffort?: ReasoningEffort;
+  /** Exact MCP capability grants for this worker; never grants orchestration tools. */
+  allowedMcpTools?: string[];
+  /** Workspace-relative file names, or recursive directories ending in '/'; [] is read-only. */
+  writeScope?: string[];
+  /**
+   * Explicit choice of unscoped (shared, non-isolated) execution for an
+   * edit-capable worker that must run shell commands. Required instead of
+   * writeScope; omitting both is refused (workerWriteScopeRequiredError).
+   */
+  sharedExecution?: boolean;
+  /** Return a durable background-worker receipt instead of waiting for completion. */
+  background?: boolean;
 }
 
 export interface TaskRun {
@@ -55,7 +75,7 @@ export interface TaskRun {
   activity?: string;
 }
 
-export type DelegationStatus = "running" | "complete" | "error";
+export type DelegationStatus = "running" | "complete" | "error" | "cancelled";
 
 /**
  * Known, actionable failure cause of a background delegation.
@@ -65,14 +85,52 @@ export type DelegationStatus = "running" | "complete" | "error";
  */
 export type DelegationFailureKind = "rate-limited";
 
+/** Host observations, never a diagnosis of why a provider/harness failed. */
+export interface DelegationFailureRecovery {
+  /**
+   * Typed observation of the terminal failure text (the host reads the marker so
+   * the orchestrator does not interpret raw provider errors). `auth-failure`,
+   * `rate-limit`, `context-overflow` and `provider-schema-refusal` are provider
+   * answers; the rest are host/worker terminal markers.
+   */
+  symptom:
+    | "missing-final-answer"
+    | "output-limit"
+    | "model-message-schema"
+    | "provider-stall"
+    | "auth-failure"
+    | "rate-limit"
+    | "context-overflow"
+    | "provider-schema-refusal"
+    | "unclassified";
+  /** Provider of the worker model, when the job record names one (used to refuse fan-out after auth failure). */
+  provider?: string;
+  /** One-line host instruction for this symptom; absent when the symptom has none. */
+  action?: string;
+  rootCause: "not-established";
+  capturedToolCalls: number;
+  mutationToolCalls: number;
+  commandToolCalls: number;
+  artifactError?: string;
+  /** Files named by captured edit/write calls (attempted, not proof of a landed change). */
+  attemptedWritePaths?: string[];
+  /** Last bounded mutation/command references; the full manifest remains authoritative. */
+  inspect: Array<{ toolCallId: string; toolName: string; digest: string }>;
+}
+
 export interface DelegationRun {
+  writeScope?: string[];
+  writeScopeVersion?: number;
   id: string;
-  agent: "explore";
+  agent: string;
   description: string;
   summary: string;
   status: DelegationStatus;
+  resultVersion?: string;
+  deliveryStatus?: "pending" | "delivered" | "acknowledged";
   /** Set on a failed delegation whose cause is known (see {@link DelegationFailureKind}). */
   failureKind?: DelegationFailureKind;
+  failureRecovery?: DelegationFailureRecovery;
 }
 
 export interface SubagentStatus {
@@ -210,7 +268,11 @@ export interface VerifyArtifact {
 }
 
 export interface ToolResult {
+  /** Host collected; never parsed from model claims. */
+  reviewEvidence?: ReviewToolEvidence[];
   success: boolean;
+  /** Validated file diff only; no mutation was applied. */
+  preview?: boolean;
   output?: string;
   error?: string;
   diff?: FileDiff;
@@ -231,6 +293,45 @@ export interface ToolResult {
   bashRunId?: string;
   /** Total chars of cached stdout+stderr for this bashRunId, pre-truncation. */
   bashTotalChars?: number;
+}
+
+export interface ReviewToolEvidence {
+  tool: "verification_run" | "read_file" | "grep" | "lsp_query" | "retrieve_tool_result";
+  success: boolean;
+  input: unknown;
+  outputDigest: string;
+  completedAt: string;
+  cwd?: string;
+  exitCode?: number | null;
+  outputPreview?: string;
+  scope?: "workspace" | "external" | "unknown" | "worker-artifact";
+  artifact?: {
+    jobId: string;
+    resultVersion: string;
+    toolCallId: string;
+    digest: string;
+    offset: number;
+    chars: number;
+    totalChars: number;
+  };
+  resolvedPaths?: string[];
+}
+export interface ReviewVerdict {
+  verdict: "pass" | "fail";
+  evidence: string[];
+}
+export interface DelegationAcceptanceInput {
+  jobId: string;
+  resultVersion: string;
+  reviewJobId: string;
+  reviewResultVersion: string;
+}
+export interface DelegationArtifactReadInput {
+  /** Omitted = page through the saved result itself (offset/maxChars), not a tool artifact. */
+  toolCallId?: string;
+  resultVersion?: string;
+  offset?: number;
+  maxChars?: number;
 }
 
 export interface ToolCall {
@@ -270,6 +371,16 @@ export interface ToolGroup {
 export interface ChatEntry {
   type: "user" | "assistant" | "tool_call" | "tool_result" | "structured_response" | "tool_group";
   content: string;
+  /** Host-owned display metadata; raw content remains available to main/export. */
+  internal?: boolean;
+  /**
+   * Host-local output (`/help`, `/skills`, `/ideal status`, …): rendered by the
+   * TUI without a model call, so it is never saved to the session history and
+   * never reaches the model. The end-of-turn transcript rebuild from saved
+   * history (`mergeLocalEntries`) re-inserts these by timestamp instead of
+   * dropping them.
+   */
+  local?: boolean;
   timestamp: Date;
   modeColor?: string;
   remoteKey?: string;
@@ -281,16 +392,6 @@ export interface ChatEntry {
   toolGroup?: ToolGroup;
   structuredResponse?: StructuredResponse;
   reasoning?: string;
-}
-
-export interface PaymentPrecheck {
-  security?: string;
-  securityLabel?: string;
-  securityUrl?: string;
-  amount?: string;
-  network?: string;
-  asset?: string;
-  description?: string;
 }
 
 export interface StructuredResponse {
@@ -730,7 +831,6 @@ export interface StreamChunk {
     | "content"
     | "tool_calls"
     | "tool_result"
-    | "tool_approval_request"
     | "council_question"
     /**
      * The counterpart to `council_question`: the waiter that opened it gave up
@@ -772,9 +872,14 @@ export interface StreamChunk {
   toolCalls?: ToolCall[];
   toolCall?: ToolCall;
   toolResult?: ToolResult;
-  approvalId?: string;
-  paymentPrecheck?: PaymentPrecheck;
   isAuthError?: boolean;
+  /**
+   * The error chunk is a turn-watchdog kill (the turn produced no output for the
+   * idle window, e.g. a provider stream that stalled) — transient, unlike a
+   * provider/tool error. The /ideal autopilot retries such a turn a bounded
+   * number of times instead of ending the whole run (session 876b87182b86).
+   */
+  isWatchdogStall?: boolean;
   structuredResponse?: StructuredResponse;
   councilQuestion?: CouncilQuestionData;
   /** Populated when type === "council_question_withdrawn". */

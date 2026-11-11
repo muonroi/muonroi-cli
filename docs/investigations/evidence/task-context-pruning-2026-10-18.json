@@ -1,0 +1,141 @@
+﻿{
+  "kind": "task-context-pruning-verification",
+  "capturedAt": "2026-10-18T11:05:10.2271784Z",
+  "report": "docs/investigations/task-context-pruning-2026-10-18.md",
+  "regression": {
+    "filesPassed": 27,
+    "testsPassed": 230,
+    "exitCode": 0,
+    "artifact": ".scratch/task-context-pruning-20261018/accepted-tests.log",
+    "isolation": "Private HOME/USERPROFILE plus CLI/auth/env roots; NODE_ENV=test"
+  },
+  "compiled": {
+    "artifact": ".scratch/task-context-pruning-20261018/compiled-controls.json",
+    "startedAt": "2026-10-18T11:00:08.163Z",
+    "finishedAt": "2026-10-18T11:00:09.282Z",
+    "pass": true,
+    "checks": {
+      "nativeSelectionSucceeded": true,
+      "measuredContextReduced": true,
+      "actualMainSDKPrunesEveryStep": true,
+      "mainRetainsNegativeDependencyAndBlocker": true,
+      "nativeUpdateReplacesInjectedLedger": true,
+      "canonicalSQLiteStillHasArchivedText": true,
+      "ownedReceiptRestoresAcrossTurns": true,
+      "foreignOwnerCannotRestore": true,
+      "childSelectionSucceeded": true,
+      "actualChildSDKPrunes": true,
+      "childScopeAndCurrentEvidenceStay": true,
+      "resetRestoresAvailableCanonicalContext": true,
+      "actualEmergencyCompactionPersistsOwnedState": true,
+      "restartStillPrunesAndRetainsDependency": true
+    },
+    "measurements": {
+      "projection": {
+        "beforeChars": 25616,
+        "afterChars": 1789,
+        "taskContextChars": 1147,
+        "taskHandoffChars": 0,
+        "taskContextRevision": 0,
+        "contextPrunedChars": 25110,
+        "contextPrunedTurns": 1,
+        "workingContextChars": 305
+      },
+      "rootSDKSteps": 2,
+      "childSDKSteps": 1
+    },
+    "boundary": "Fresh compiled Agent and StreamRunner, actual AI SDK with scripted local model, native context_load, private SQLite. Character/protocol/continuity fixture; no live-provider quality/cost claim."
+  },
+  "nativeSelfverify": {
+    "artifact": ".scratch/task-context-pruning-20261018/native-selfverify.json",
+    "runId": "b19dd4c2-fdd8-4d84-beef-acd5cb09f79b",
+    "pass": true,
+    "summary": {
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    },
+    "boundary": "Fresh built tools-MCP native selfverify, isolated home, actual Bun TUI, offline provider; boot evidence only"
+  },
+  "checks": {
+    "typecheckExitCode": 0,
+    "buildExitCode": 0,
+    "semanticExitCode": 0,
+    "logDirectory": ".scratch/task-context-pruning-20261018"
+  },
+  "fixtureIncident": {
+    "triggerAbsent": true,
+    "ownedFixtureSessionsRemoved": 14,
+    "noOtherSessionsRemoved": true,
+    "privateRemediationArtifact": ".scratch/task-context-pruning-20261018/db-fixture-remediation.json",
+    "privateBackup": ".scratch/task-context-pruning-20261018/owned-fixture-rows-backup.json",
+    "ambiguousRecordsPreserved": true,
+    "byteIdenticalRestorationClaimed": false
+  },
+  "hashes": [
+    {
+      "path": "src/orchestrator/working-context.ts",
+      "sha256": "4e5e5124c87695d29ac637957facd178203fadd89abb185a66faaa03a458c311"
+    },
+    {
+      "path": "src/orchestrator/task-context.ts",
+      "sha256": "64c22ed57dd48f68a2599c49266e636a0ef0519527efcb6eea7dd545a6ec0b27"
+    },
+    {
+      "path": "src/tools/context-load.ts",
+      "sha256": "c4a0fa25b319dd180a254789d450783d3e7826bc243adf436e8c7b22fa1d8397"
+    },
+    {
+      "path": "src/orchestrator/turn-runner-deps.ts",
+      "sha256": "bd8c98a1effde9cc9feefdd1fbc87beb46b513f2f03c8399e8901b0ccbee99a0"
+    },
+    {
+      "path": "src/orchestrator/tool-engine.ts",
+      "sha256": "76a655f14b1ae07651ee5226ad2bb184fc71b43e4eb3f4aaef30b2c0b98ed796"
+    },
+    {
+      "path": "src/orchestrator/stream-runner.ts",
+      "sha256": "ff367e34e64bcffd4617622f3567525b888db3da356dea568bc02e7ca5753bc1"
+    },
+    {
+      "path": "src/orchestrator/orchestrator.ts",
+      "sha256": "d070c1ad2055ded2efd0f590bb51c06801be181973aeb9bd525a6c8ae372471c"
+    },
+    {
+      "path": "src/storage/transcript.ts",
+      "sha256": "7a0a5909bae340db24a09e42ad7dcb1a0e11889d07140436234b4ee9b706765c"
+    },
+    {
+      "path": "src/orchestrator/subagent-compactor.ts",
+      "sha256": "85f9a3364d58bc68ac963ea25e906a003004d047b540bec26dba020c54f839f0"
+    },
+    {
+      "path": "src/pil/context-modules.ts",
+      "sha256": "c5ca579e1fa65e1371b8b6f13107d68eac738184811d89fe8ece3c5ffae7ef32"
+    },
+    {
+      "path": "src/pil/native-capabilities-workbook.ts",
+      "sha256": "fba476807a5108166405cc6be1f81c2a286207729b3eb733ee42c85ed993f715"
+    },
+    {
+      "path": "src/orchestrator/__tests__/working-context.test.ts",
+      "sha256": "9b31437a8cac3696cb8927b6377a2234b093e5ea8346ab5ed4abe04faac9e847"
+    },
+    {
+      "path": "src/orchestrator/__tests__/working-context-compaction.test.ts",
+      "sha256": "58605af10d9f6d99196d2d77e35553e6d71fbd1e5bfaac538fa78fcca8953d30"
+    },
+    {
+      "path": "dist/src/index.js",
+      "sha256": "9bb3c08f7d825ab0a53f94c05bde7c2d70041347579a49817c09f9fc8284cf06"
+    }
+  ],
+  "limits": [
+    "Local scripted model, not live provider behavior or billing savings",
+    "Boot check covers boot only",
+    "No full test suite, push, publication or deployment",
+    "Existing batch Phase-0 transport remains unavailable"
+  ]
+}

@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { classifyStreamError } from "../../orchestrator/retry-classifier.js";
 import {
   __resetProviderBackoffForTests,
+  getProviderErrorDetails,
   isProviderBackoffActive,
   isQuotaExhaustion,
   isRateLimitError,
@@ -249,6 +250,66 @@ describe("withProviderRateLimitRetry", () => {
     process.env.MUONROI_RATE_LIMIT_RETRY_BUDGET_MS = "0";
     const err = apiError(429, "x");
     await expect(withProviderRateLimitRetry(vi.fn().mockRejectedValue(err))).rejects.toBe(err);
+  });
+
+  it("never starts an already cancelled attempt", async () => {
+    const controller = new AbortController();
+    const reason = new Error("caller already cancelled");
+    controller.abort(reason);
+    const run = vi.fn().mockResolvedValue("unexpected dispatch");
+    await expect(withProviderRateLimitRetry(run, { signal: controller.signal })).rejects.toBe(reason);
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it("preserves wrapped provider evidence without claiming exhausted credits", () => {
+    const cause = apiError(429, "Rate limit reached, please try again later.", {
+      responseBody: '{"error":{"type":"rate_limited"}}',
+      headers: {
+        "X-Trace-Id": "trace-fixture",
+        "x-request-id": "request-fixture",
+        "Retry-After": "6",
+        "set-cookie": "private-fixture",
+        authorization: "private-fixture",
+      },
+    });
+    const inner = new ProviderRateLimitError({ provider: "fixture", attempts: 2, waitedMs: 4000, cause });
+    const wrapped = new ProviderRateLimitError({ attempts: 1, waitedMs: 0, cause: { lastError: inner } });
+    expect(wrapped).toMatchObject({
+      statusCode: 429,
+      responseBody: cause.responseBody,
+      traceId: "trace-fixture",
+      requestId: "request-fixture",
+    });
+    expect(wrapped.responseHeaders).toEqual({
+      "x-trace-id": "trace-fixture",
+      "x-request-id": "request-fixture",
+      "retry-after": "6",
+    });
+    expect(wrapped.message).not.toContain("The limit is the account's budget");
+    expect(wrapped.message).toContain("HTTP 429 alone");
+  });
+
+  it("extracts nested evidence from cyclic error chains and Headers objects", () => {
+    const root: { cause?: unknown } = {};
+    root.cause = {
+      cause: root,
+      lastError: {
+        statusCode: 429,
+        responseBody: "provider body",
+        responseHeaders: new Headers({
+          "X-Trace-Id": "trace-cycle",
+          "Retry-After": "7",
+          "set-cookie": "private-fixture",
+        }),
+      },
+    };
+    expect(getProviderErrorDetails(root)).toEqual({
+      statusCode: 429,
+      responseBody: "provider body",
+      responseHeaders: { "x-trace-id": "trace-cycle", "retry-after": "7" },
+      traceId: "trace-cycle",
+      requestId: undefined,
+    });
   });
 
   it("an abort during the wait ends it immediately", async () => {

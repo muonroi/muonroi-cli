@@ -3,6 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+// The suite pin (vitest-setup.ts); user files live under MUONROI_CLI_HOME, not under HOME.
+const PINNED_CLI_HOME = process.env.MUONROI_CLI_HOME;
+
 const tmpHome = path.join(os.tmpdir(), `muonroi-cli-auto-setup-${process.pid}`);
 
 describe("ensureDefaultMcpServers — research servers", () => {
@@ -15,6 +18,7 @@ describe("ensureDefaultMcpServers — research servers", () => {
     origUserProfile = process.env.USERPROFILE;
     process.env.HOME = tmpHome;
     process.env.USERPROFILE = tmpHome;
+    process.env.MUONROI_CLI_HOME = path.join(tmpHome, ".muonroi-cli");
     vi.resetModules();
   });
 
@@ -24,6 +28,8 @@ describe("ensureDefaultMcpServers — research servers", () => {
     else process.env.HOME = origHome;
     if (origUserProfile === undefined) delete process.env.USERPROFILE;
     else process.env.USERPROFILE = origUserProfile;
+    if (PINNED_CLI_HOME === undefined) delete process.env.MUONROI_CLI_HOME;
+    else process.env.MUONROI_CLI_HOME = PINNED_CLI_HOME;
   });
 
   it("registers context7 (and legacy fetch/tavily entries) for a fresh user", async () => {

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-15T01:47:52.870Z",
+  "synthetic": true,
+  "clock": "real",
+  "networkRequests": 0,
+  "cooldownMs": 1500,
+  "abortAfterMs": 75,
+  "completionMs": 1521,
+  "underlyingCallAfterMs": 1521,
+  "underlyingSawAborted": true,
+  "errorName": "AbortError",
+  "fixtureHome": "C:\\Users\\phila\\AppData\\Local\\Temp\\muonroi-abort-replay-yIS6TK"
+}

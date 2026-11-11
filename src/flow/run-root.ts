@@ -15,8 +15,8 @@
  * The stray contained ONLY `planning/` (config.json, CONTEXT.md, PLAN.md,
  * ROADMAP.md, STATE.md, phases/02-sprint-2-plan/) — no `runs/`, no
  * `roadmap.md`, no `state.md` — so it was NOT `ensureFlowDir`'s doing. It is a
- * GSD planning tree, and every GSD path resolves through `planningRoot(cwd)`
- * (src/gsd/paths.ts).
+ * FLOW planning tree, and every FLOW path resolves through `planningRoot(cwd)`
+ * (src/workflow/paths.ts).
  *
  * The cwd it resolved is recorded in the DB. For that run's session
  * (`65856a53e25d`, and its verify sub-agent `5ec7999af53f`):
@@ -28,7 +28,7 @@
  * `cd /d/sources/CompanyLibs/tcis-libraries/src && dotnet run …`, and the bash
  * tool's `cd` handler mutates `BashTool.cwd` permanently (src/tools/bash.ts:176
  * `this.cwd = nextCwd`). Every flow-state resolver downstream reads that value
- * — `src/tools/registry.ts:1420` hands `bash.getCwd()` to the GSD workflow
+ * — `src/tools/registry.ts:1420` hands `bash.getCwd()` to the FLOW workflow
  * tools, and `src/orchestrator/orchestrator.ts` hands the same value to
  * `runProductLoop` and `ensureFlowDir`. The stray's first file (config.json,
  * 15:25:45Z) lands 3m49s after that `cd`.

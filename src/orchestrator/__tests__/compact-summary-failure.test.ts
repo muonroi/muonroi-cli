@@ -49,6 +49,9 @@ vi.mock("../compaction.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../compaction.js")>();
   return {
     ...actual,
+    // This suite measures the summary fallback/cooldown chain, not the proposer.
+    // The real proposer is covered separately; never send a dummy key to a live provider here.
+    proposeCompaction: vi.fn(async () => null),
     generateCompactionSummary: (...args: unknown[]) =>
       (mockGenerateCompactionSummary as (...a: unknown[]) => unknown)(...args),
   };
@@ -99,7 +102,10 @@ function makeLongConversation(): Array<{ role: "user" | "assistant"; content: st
 const MAIN_MODEL = "deepseek-v4-pro";
 
 function makeAgent() {
-  const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, { persistSession: true });
+  const agent = new Agent("sk-dummy", undefined, MAIN_MODEL, undefined, {
+    persistSession: true,
+    executionRole: "infrastructure",
+  });
   // biome-ignore lint/suspicious/noExplicitAny: reaching private state directly is the pragmatic seam for this test
   const a = agent as any;
   a.messages = makeLongConversation();

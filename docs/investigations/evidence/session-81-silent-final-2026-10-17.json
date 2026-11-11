@@ -1,0 +1,182 @@
+{
+  "capturedAt": "2026-10-17T03:21:36.457Z",
+  "session": "81e606ae4fda",
+  "boundary": "Read-only original DB incident; repaired behavior through isolated mock provider/compiled guard; dirty working tree, no release",
+  "incident": [
+    {
+      "id": 60308,
+      "sid": "81e606ae4fda",
+      "at": "2026-10-17T02:48:42.134Z",
+      "type": "error",
+      "subtype": "tool_markup_leak",
+      "model": "step-3.7-flash",
+      "duration": null,
+      "meta": {
+        "op": "stream",
+        "chars": 1149
+      }
+    },
+    {
+      "id": 60309,
+      "sid": "81e606ae4fda",
+      "at": "2026-10-17T02:48:42.149Z",
+      "type": "f6_synthesis",
+      "subtype": null,
+      "model": null,
+      "duration": null,
+      "meta": {
+        "outcome": "error",
+        "lastMsgRole": "assistant",
+        "elapsedMs": 13026,
+        "chars": 0,
+        "error": "Provider returned native tool-call markup as its entire answer on a turn with no tools (model=step-3.7-flash); 1149 chars suppressed",
+        "ceilingHit": false,
+        "scrubbedLen": 3
+      }
+    },
+    {
+      "id": 60310,
+      "sid": "81e606ae4fda",
+      "at": "2026-10-17T02:48:42.197Z",
+      "type": "agent_response",
+      "subtype": null,
+      "model": "step-3.7-flash",
+      "duration": 37401,
+      "meta": {
+        "textLength": 0,
+        "toolCallCount": 2,
+        "compacted": false,
+        "dsmlLeak": false,
+        "bashCodeBlock": false,
+        "textToolXmlLeak": false,
+        "textToolXmlTool": null
+      }
+    }
+  ],
+  "tests": "\n RUN  v4.1.5 D:/sources/Core/muonroi-cli\n\nWarning: A vi.mock(\"bun:sqlite\") call in \"D:/sources/Core/muonroi-cli/src/__test-stubs__/vitest-setup.ts\" is not at the top level of the module. Although it appears nested, it will be hoisted and executed before any tests run. Move it to the top level to reflect its actual execution order. This will become an error in a future version.\nSee: https://vitest.dev/guide/mocking/modules#how-it-works\n\n Test Files  5 passed (5)\n      Tests  47 passed (47)\n   Start at  10:06:32\n   Duration  18.68s (transform 2.42s, setup 113ms, import 8.67s, tests 8.92s, environment 0ms)\n\n",
+  "caps": "\n RUN  v4.1.5 D:/sources/Core/muonroi-cli\n\nWarning: A vi.mock(\"bun:sqlite\") call in \"D:/sources/Core/muonroi-cli/src/__test-stubs__/vitest-setup.ts\" is not at the top level of the module. Although it appears nested, it will be hoisted and executed before any tests run. Move it to the top level to reflect its actual execution order. This will become an error in a future version.\nSee: https://vitest.dev/guide/mocking/modules#how-it-works\n\n Test Files  1 passed (1)\n      Tests  15 passed (15)\n   Start at  10:09:14\n   Duration  258ms (transform 54ms, setup 48ms, import 57ms, tests 8ms, environment 0ms)\n\n",
+  "compiled": {
+    "startedAt": "2026-10-17T03:14:24.137Z",
+    "boundary": "Actual compiled Agent, SDK mock provider, real markup guard and isolated SQLite; no paid calls",
+    "fixture": "D:\\sources\\Core\\muonroi-cli\\.scratch\\session-81-interruption\\recovery-y1YJeE",
+    "checks": {
+      "homeIsIsolated": true,
+      "actualNoToolsGuardRejectedMarkup": true,
+      "automaticRecoveryWithoutUserContinue": true,
+      "recoverySeesCompletedEvidence": true,
+      "completedReadNotRepeated": true,
+      "rejectedBashNeverExecuted": true,
+      "recoveredFinalPersisted": true,
+      "noRawMarkupVisible": true
+    },
+    "measurements": {
+      "model": "step-3.7-flash",
+      "sessionId": "1c5e6557ab58",
+      "mainCalls": 3,
+      "markupCalls": 1,
+      "eventCounts": {
+        "agent_response": 1,
+        "f6_synthesis": 2,
+        "prompt_breakdown": 3,
+        "call_accounting": 4,
+        "stream_start": 2,
+        "final_answer_recovery": 1,
+        "error": 1,
+        "tool_result": 1,
+        "ee_intercept": 1,
+        "tool_call": 1,
+        "routing": 1,
+        "ee_injection": 1,
+        "pil": 1,
+        "user_message": 1
+      }
+    },
+    "finishedAt": "2026-10-17T03:14:25.463Z"
+  },
+  "controls": {
+    "checks": {
+      "settingsHomeIsIsolated": true,
+      "nativeFtsPreflight": true,
+      "completeProposalEnvelope": true,
+      "truncatedProposalRejected": true,
+      "ambiguousProposalRejected": true,
+      "lspStubHasRealPreviewGuidance": true,
+      "healthDoesNotClaimRecallReadiness": true,
+      "defaultProjectPinPreserved": true,
+      "routeStatusShowsPin": true,
+      "routeStatusDoesNotWrite": true,
+      "explicitSuggestKeepsBaselineSetting": true,
+      "autoUsesSameProviderCheaperTier": true,
+      "suggestKeepsBaselineAndReportsCandidate": true,
+      "cachedSuggestRechecksCap": true,
+      "liveTuiModeCommandAndStatus": true,
+      "nativeSelfverifyRebuiltMcpBootAndStatus": true
+    },
+    "runId": "bd397c6c-b56e-46bc-a961-9dfa8cb22486",
+    "harness": {
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "inconclusive": 0,
+      "passRate": 1
+    }
+  },
+  "hashes": [
+    {
+      "file": "src/orchestrator/tool-engine.ts",
+      "sha256": "58ef5c74f9c3a899417aa2780d2e17ae01455b487ad5c6b74870d44d37f83a4c"
+    },
+    {
+      "file": "src/storage/interaction-log.ts",
+      "sha256": "71339b16bb371ca84cca3ed2243dbd0d628c896a4802d906a98ef9f57d9feaf7"
+    },
+    {
+      "file": "src/orchestrator/__tests__/empty-final-recovery.test.ts",
+      "sha256": "36a03b4d93acc78ea581dfc093edc5ca1186509ebff4c9dbaea372425e872ad2"
+    },
+    {
+      "file": "dist/src/orchestrator/tool-engine.js",
+      "sha256": "501db0cf45fbfdae006dd24de57693575b2bcd55567d47d077dd774728d8d5bd"
+    },
+    {
+      "file": "dist/src/storage/interaction-log.js",
+      "sha256": "58a937fcb0df2c74a2528e3654c07e831594e7932f3345596d940a8d77903d5f"
+    },
+    {
+      "file": ".scratch/session-81-interruption/inspect.py",
+      "sha256": "40b53765320db0d4131b0b27b02cdbf22e01ac97ab01eea1ad8871fd47cdef7b"
+    },
+    {
+      "file": ".scratch/session-81-interruption/red.log",
+      "sha256": "6c3eddad4174d1b890cd83eca8615a36b80c384eddd10e263558c0e041552a52"
+    },
+    {
+      "file": ".scratch/session-81-interruption/accepted-tests.log",
+      "sha256": "d414d7ebeeb67f5178e55dd3a9b725280fb5ad8cc31e23257f4bdeac7ffaca65"
+    },
+    {
+      "file": ".scratch/session-81-interruption/cap-tests.log",
+      "sha256": "c7a52ef6f410d06444292addb75cdc7f712969b7abb79857a61a32f78edfc6cf"
+    },
+    {
+      "file": ".scratch/session-81-interruption/build.log",
+      "sha256": "e2593da21b1f4c82529d4868b7b4ea5a1cea78e774701220c9d111265407b4a9"
+    },
+    {
+      "file": ".scratch/session-81-interruption/compiled-recovery.mjs",
+      "sha256": "6983fdce2d31f664ab16332c3d46014cfb9a7c8a43fd47f970edc918d30a16aa"
+    },
+    {
+      "file": ".scratch/session-81-interruption/compiled-recovery.json",
+      "sha256": "4f30782e5021222b1cf310663ad41249007796fe84db1e83a0868e43ad08f909"
+    },
+    {
+      "file": ".scratch/session-81-interruption/compiled-controls.mjs",
+      "sha256": "cafe5a312955c161d92b7087cdeb959cb01d00d13e1b776598a6e369d554dcd0"
+    },
+    {
+      "file": ".scratch/session-81-interruption/compiled-controls.json",
+      "sha256": "11d2641b59affe24f97fd3ebb18cf463f789a464f8323467cb449d944c5388ff"
+    }
+  ]
+}

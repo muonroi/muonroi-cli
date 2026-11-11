@@ -216,6 +216,8 @@ describe("use-app-logic.tsx opens the halt card through the derivation", () => {
   });
 
   it("Enter does nothing while nothing is pre-selected", () => {
-    expect(source).toContain("if (haltSelectedIndex < 0) return;");
+    // Read from the live ref so a ↑/↓ in the same stdin chunk is seen (live-state.ts).
+    expect(source).toContain("const haltIndexNow = haltSelectedIndexRef.current;");
+    expect(source).toContain("if (haltIndexNow < 0) return;");
   });
 });

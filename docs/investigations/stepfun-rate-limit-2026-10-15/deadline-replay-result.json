@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-15T01:50:22.039Z",
+  "synthetic": true,
+  "networkRequests": 0,
+  "raceDeadlineMs": 40,
+  "signalDeadlineMs": 80,
+  "observedDeadlineMs": 56,
+  "timedSignalAbortedAfterCleanupAndParentAbort": false,
+  "underlyingCallsAtMs": [1, 102, 210, 316, 437],
+  "underlyingCallsAfterDeadline": 4,
+  "underlyingCompletionMs": 438,
+  "finalError": "ProviderRateLimitError"
+}

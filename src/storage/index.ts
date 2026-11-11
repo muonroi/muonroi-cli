@@ -10,6 +10,7 @@ export {
   appendSystemMessage,
   buildChatEntries,
   getLastApprovedPlan,
+  getLastIdealRun,
   getLastTodoWriteArgs,
   getNextMessageSequence,
   getSessionChain,
@@ -24,12 +25,14 @@ export {
   markMessageErrored,
   markToolCallErrored,
   persistApprovedPlan,
+  persistIdealRun,
   persistMessageWriteAhead,
   persistToolCallWriteAhead,
   persistToolResultWriteAhead,
   revertLatestCompaction,
   type SessionChainNode,
-  sessionUsedGsdWorkflow,
+  sessionUsedFlowWorkflow,
+  setLatestCompactionShrink,
 } from "./transcript";
 export { buildEffectiveTranscript, type LoadedTranscriptState, type PersistedCompaction } from "./transcript-view";
 export { logUIInteraction, type UIInteractionSubtype } from "./ui-interaction-log.js";

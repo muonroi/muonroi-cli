@@ -8,12 +8,13 @@
  */
 import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { logger } from "../utils/logger.js";
+import { muonroiHome } from "../utils/muonroi-home.js";
 import { redactor } from "../utils/redactor.js";
 
 export function envFilePath(): string {
-  return process.env.MUONROI_ENV_FILE ?? join(homedir(), ".muonroi-cli", ".env");
+  return process.env.MUONROI_ENV_FILE ?? join(muonroiHome(), ".env");
 }
 
 function readLines(): string[] {
@@ -221,14 +222,18 @@ export function loadEnvFileIntoProcess(): void {
 
     redactor.enrollSecret(ambient);
     if (ambientWinsForSecrets()) {
-      console.error(
+      logger.file(
+        "warn",
+        "cli",
         `[env-store] ${parsed.key}: OS environment (${maskSecret(ambient)}) overrides the CLI store ` +
           `(${maskSecret(parsed.value)}) — MUONROI_ENV_PRECEDENCE=ambient is set. If auth fails, the ` +
           `OS variable is the one being used.`,
       );
       continue;
     }
-    console.error(
+    logger.file(
+      "warn",
+      "cli",
       `[env-store] ${parsed.key}: the CLI store (${maskSecret(parsed.value)}) takes precedence over a ` +
         `conflicting OS environment variable (${maskSecret(ambient)}). Remove the OS variable to silence ` +
         `this, or set MUONROI_ENV_PRECEDENCE=ambient to let it win.`,
