@@ -70,7 +70,7 @@ which writes it into the pidfile and sets `EXP_SERVER_PORT` in the child env
 ## 4. Stopping a started brain
 
 A brain started by `setupLocalBrain` is tracked by a pidfile at
-`<home>/local-brain.json` (`src/ee/local-brain-spawn.ts:218-220`). The file
+`<home>/.experience/local-brain.json` (`src/ee/local-brain-spawn.ts:218-220`). The file
 is written as `<pid>.tmp` then renamed, and the read-back is verified before
 spawn returns success (`src/ee/local-brain-spawn.ts:364-408`).
 
@@ -83,7 +83,7 @@ the child, reports the log tail, and returns an error
 (`src/ee/local-brain.ts:424-446`).
 
 ### Manual stop via the CLI
-`killLocalBrain` reads the pidfile and verifies ALL of the following before
+Run `muonroi-cli ee stop-local`. It calls `killLocalBrain`, which reads the pidfile and verifies ALL of the following before
 signalling (`src/ee/local-brain-spawn.ts:580-668`):
 - The pidfile exists and is valid JSON with the expected shape.
 - The recorded pid is alive (signal 0 probe).
@@ -92,10 +92,10 @@ signalling (`src/ee/local-brain-spawn.ts:580-668`):
   `serverRoot`).
 Any failure is a refusal with a refusal reason (`no-pidfile`, `stale`,
 `port-unknown`, `port-mismatch`, `cmdline-unknown`, `cmdline-mismatch`,
-`signal-failed`).
+`signal-failed`, `still-running`). After signalling it waits up to 5 s for the process to exit and reports success only once it is gone, then removes the pidfile.
 
 Signalling itself is platform-specific:
-- Windows: `taskkill /pid <pid> /T /F`
+- Windows: `taskkill /pid <pid> /T /F` (awaited)
 - POSIX: `SIGTERM`
 (`src/ee/local-brain-spawn.ts:512-520`)
 
@@ -103,4 +103,4 @@ Signalling itself is platform-specific:
 If `killLocalBrain` cannot verify the pidfile or the checks fail, the error
 text explicitly tells the operator to stop the process manually. A typical
 manual stop is `tasklist` / `taskkill` on Windows or `kill` / `lsof` on POSIX,
-followed by removing `<home>/local-brain.json` if the tracking file is stale.
+followed by removing `<home>/.experience/local-brain.json` if the tracking file is stale.

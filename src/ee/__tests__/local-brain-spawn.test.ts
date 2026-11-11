@@ -396,6 +396,7 @@ describe("readLocalBrainPidfile (stale detection)", () => {
   });
 
   it("rejects a malformed pidfile rather than trusting it", async () => {
+    mkdirSync(dirname(localBrainPidfilePath(harness.home)), { recursive: true });
     writeFileSync(localBrainPidfilePath(harness.home), "{ not json", "utf8");
     expect(await readLocalBrainPidfile(harness.home, makeKillDeps(harness))).toBeNull();
   });

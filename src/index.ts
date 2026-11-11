@@ -1881,6 +1881,24 @@ usage
     await runPerfRegression({ compare: opts.compare, json: opts.json });
   });
 
+const ee = program.command("ee").description("Experience Engine brain helpers");
+ee.command("stop-local")
+  .description(
+    "Stop the local EE brain started by the connect card's 'Set up local brain' (verifies its pid, port and command line before signalling)",
+  )
+  .action(async () => {
+    const os = await import("node:os");
+    const { killLocalBrain } = await import("./ee/local-brain-spawn.js");
+    // Same home the setup used (defaultLocalBrainDeps().resolveUserHome = os.homedir()).
+    const result = await killLocalBrain({ home: os.homedir() });
+    if (result.ok) {
+      console.log(`Stopped the local EE brain (pid ${result.pid}, port ${result.port}).`);
+      return;
+    }
+    console.error(result.error);
+    process.exitCode = 1;
+  });
+
 const mcp = program.command("mcp").description("Manage MCP server configuration");
 
 mcp

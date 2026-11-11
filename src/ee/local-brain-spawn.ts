@@ -90,7 +90,7 @@ export interface LocalBrainSpawnDeps {
   now: () => number;
 }
 
-/** Record written to `<injected home>/local-brain.json`. */
+/** Record written to `<injected home>/.experience/local-brain.json`. */
 export interface LocalBrainPidfile {
   pid: number;
   port: number;
@@ -211,13 +211,18 @@ export function resolveLocalBrainSpawnDeps(partial?: Partial<LocalBrainSpawnDeps
 }
 
 /** Log file for a brain whose home is `home`. Derived, never guessed. */
+/**
+ * Tracking files live in `<home>/.experience/` (the brain's own directory, created
+ * with its store before spawn) — not in `<home>` itself: with the production home
+ * (os.homedir()) that put local-brain.json/.log straight into the user's home root.
+ */
 export function localBrainLogPath(home: string): string {
-  return path.join(home, LOCAL_BRAIN_LOG_NAME);
+  return path.join(home, ".experience", LOCAL_BRAIN_LOG_NAME);
 }
 
 /** Tracking file for a brain whose home is `home`. Derived, never guessed. */
 export function localBrainPidfilePath(home: string): string {
-  return path.join(home, LOCAL_BRAIN_PIDFILE_NAME);
+  return path.join(home, ".experience", LOCAL_BRAIN_PIDFILE_NAME);
 }
 
 /**
