@@ -601,6 +601,19 @@ export function discoverEntryPoints(treeRoot: string, known: Set<string>): Set<s
   for (const rel of known) {
     if (/^scripts\/[^/]+\.[cm]?tsx?$/.test(rel)) roots.add(rel);
   }
+  // A nested script that starts with a shebang is an executable too
+  // (`bun scripts/bench/replay-tcis.ts`); a nested module without one is a library and gets no
+  // root of its own — it is live only through what imports it.
+  for (const rel of known) {
+    if (roots.has(rel) || !/^scripts\/.+\.[cm]?tsx?$/.test(rel) || isTestPath(rel)) continue;
+    try {
+      if (readFileSync(join(treeRoot, rel), "utf8").startsWith("#!")) roots.add(rel);
+    } catch (err) {
+      console.error(
+        `[export-reachability] shebang probe failed for ${rel}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   return roots;
 }

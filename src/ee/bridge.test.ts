@@ -124,12 +124,17 @@ describe("bridge — missing core (BRIDGE-02)", () => {
   beforeEach(() => {
     resetBridge();
     vi.clearAllMocks();
+    // These cases describe a box with NO local core AND no remote brain configured. The suite
+    // sets MUONROI_EE_BASE_URL to an unreachable stub (vitest.config.ts), which would route
+    // classifyViaBrain to the thin-client path first; "" is treated as unset (auth.ts).
+    vi.stubEnv("MUONROI_EE_BASE_URL", "");
     // Simulate file not found
     mockAccess.mockRejectedValue(new Error("ENOENT: no such file or directory"));
   });
 
   afterEach(() => {
     resetBridge();
+    vi.unstubAllEnvs();
   });
 
   it("Test 6: classifyViaBrain returns null when core file missing", async () => {
