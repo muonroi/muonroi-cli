@@ -85,8 +85,10 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      # Pinned to 11: npm@latest is now 12, which needs Node ^22.22.2 || ^24.15.0 and
+      # failed EBADENGINE on a Node 20 runner (quick-codex run 42972704424, 2026-11-11).
       - name: npm with trusted publishing (>= 11.5.1)
-        run: npm install -g npm@latest
+        run: npm install -g npm@^11.5.1
       - name: Install
         run: bun install --frozen-lockfile
       - name: Build
