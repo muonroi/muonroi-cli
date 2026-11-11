@@ -81,7 +81,9 @@ export function installReactHarness(opts: ReactHarnessOptions): ReactHarnessHand
   function tick(): void {
     if (cancelled) return;
 
-    // @ts-expect-error: compile-time define
+    // __MUONROI_HARNESS__ is a compile-time define, declared in src/types.d.ts. The
+    // former `@ts-expect-error` here became unused once that declaration existed and
+    // failed the tsup DTS build ("TS2578: Unused '@ts-expect-error' directive").
     if (typeof __MUONROI_HARNESS__ !== "undefined" && __MUONROI_HARNESS__) {
       const snap = opts.registry.snapshot();
       const hash = stableHash({ focus: snap.focus ?? null, modals: snap.modals ?? null, nodes: snap.nodes });

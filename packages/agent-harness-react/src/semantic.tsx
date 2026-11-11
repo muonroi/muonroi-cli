@@ -65,7 +65,7 @@ let _Semantic: (props: SemanticProps) => ReactNode;
 
 // Keep the compile-time expression directly on the branch so bundlers can
 // eliminate registry code without propagating a module-level variable.
-// @ts-expect-error: compile-time define
+// (__MUONROI_HARNESS__ is declared in src/types.d.ts — no @ts-expect-error.)
 if (typeof __MUONROI_HARNESS__ !== "undefined" && __MUONROI_HARNESS__) {
   const { Provider, SemanticNode } = buildHarnessComponents();
   _Provider = Provider;
