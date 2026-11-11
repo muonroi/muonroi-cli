@@ -1,6 +1,11 @@
 {
   "name": "@muonroi/agent-harness-react",
   "version": "0.1.1",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muonroi/muonroi-cli.git",
+    "directory": "packages/agent-harness-react"
+  },
   "publishConfig": {
     "access": "public"
   },
