@@ -1303,7 +1303,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               required: ["jobId", "resultVersion"],
               additionalProperties: false,
               description:
-                "Fresh independent verification of this exact successful saved implementation result. Forces verify role, read/test-only tools and durable job.",
+                "Fresh independent verification of this exact successful saved implementation result. Forces verify role, read/test-only tools and durable job. The worker gets read_file/grep/lsp_query/verification_run only (no shell): give read-only instructions, never 'run X'. To have commands run, dispatch agent=verify WITHOUT reviewOf first, then reviewOf on its saved result.",
             },
             allowedMcpTools: {
               type: "array",

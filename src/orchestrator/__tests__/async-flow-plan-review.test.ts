@@ -441,6 +441,44 @@ describe("durable nonblocking root Flow plan review", () => {
     expect(canExecute(cwd, "heavy").allowed).toBe(false);
   });
 
+  // Session 26516fe0c62e: two consecutive refusals each named a single gap. One refusal names all.
+  it("names every missing completion field in one plan_review_refused", async () => {
+    const { root, source } = await staleCouncil();
+    const run = async (input: object) =>
+      JSON.parse((await root.flow_plan_review!.execute!({ action: "complete", ...input }, context)) as string);
+
+    const none = await run({});
+    expect(none.code).toBe("plan_review_refused");
+    expect(none.message).toContain("missing: jobId, resultVersion, assessment");
+
+    const onlyAssessment = await run({ assessment: "evidence" });
+    expect(onlyAssessment.code).toBe("plan_review_refused");
+    expect(onlyAssessment.message).toContain("missing: jobId, resultVersion");
+    expect(onlyAssessment.message).not.toContain("assessment (");
+
+    const noAssessment = await run({ jobId: source.id, resultVersion: source.resultVersion });
+    expect(noAssessment.code).toBe("plan_review_refused");
+    expect(noAssessment.message).toContain("missing: assessment");
+  });
+
+  it("names every binding problem of an unread, mismatched result at once", async () => {
+    const budget = { used: 2, max: 3, stopRequested: false };
+    const { root } = tools("heavy", budget);
+    await root.flow_plan_review!.execute!({}, context);
+    await completeDelegation(jobPath(), verdict("revise"));
+    const source = await loadDelegation(jobPath());
+    const refused = JSON.parse(
+      (await root.flow_plan_review!.execute!(
+        { action: "complete", jobId: source.id, resultVersion: "wrong-version" },
+        context,
+      )) as string,
+    );
+    expect(refused.code).toBe("plan_review_refused");
+    expect(refused.message).toContain("missing: assessment");
+    expect(refused.message).toContain("resultVersion does not match");
+    expect(refused.message).toContain("result not read yet");
+  });
+
   it("deduplicates restarts and refuses an overlapping amendment while verification runs", async () => {
     const { root, budget, input } = await staleCouncil();
     const amended = {
