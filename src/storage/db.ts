@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { logger } from "../utils/logger.js";
 import { muonroiHome } from "../utils/muonroi-home.js";
 import { applyMigrations } from "./migrations";
 
@@ -65,6 +66,44 @@ function loadDriver(filename: string): SQLiteDatabase {
   }
 }
 
+const BUSY_RETRY_ATTEMPTS = 8;
+const BUSY_RETRY_BASE_MS = 50;
+
+function isBusyError(err: unknown): boolean {
+  const e = err as { code?: unknown; message?: unknown } | null;
+  return /SQLITE_BUSY|database is locked/i.test(`${e?.code ?? ""} ${e?.message ?? ""}`);
+}
+
+/**
+ * Runs a PRAGMA, retrying a bounded number of times on SQLITE_BUSY. busy_timeout
+ * alone does not cover the WAL switch: SQLite may return BUSY at once instead of
+ * invoking the busy handler when waiting could deadlock, and a fresh DB opened by
+ * several processes hit exactly that (ci-matrix windows, 2026-11-11, job
+ * 130416565204: migrations-concurrent "database is locked" at the journal_mode
+ * pragma with busy_timeout = 5000 already set). Any other error is thrown at once.
+ */
+export function pragmaRetryingBusy(
+  database: Pick<SQLiteDatabase, "pragma">,
+  query: string,
+  sleep: (ms: number) => void = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+): unknown {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return database.pragma(query);
+    } catch (err) {
+      if (!isBusyError(err) || attempt >= BUSY_RETRY_ATTEMPTS) throw err;
+      const waitMs = BUSY_RETRY_BASE_MS * attempt;
+      logger.warn("storage", "PRAGMA hit SQLITE_BUSY; retrying", {
+        query,
+        attempt,
+        waitMs,
+        error: (err as Error)?.message,
+      });
+      sleep(waitMs);
+    }
+  }
+}
+
 export function getDatabase(): SQLiteDatabase {
   if (db) return db;
 
@@ -74,7 +113,7 @@ export function getDatabase(): SQLiteDatabase {
   // at once with SQLITE_BUSY (migrations-concurrent.test.ts: "database is locked"
   // from the journal_mode pragma when it ran before busy_timeout).
   database.pragma("busy_timeout = 5000");
-  database.pragma("journal_mode = WAL");
+  pragmaRetryingBusy(database, "journal_mode = WAL");
   database.pragma("foreign_keys = ON");
   database.pragma("synchronous = NORMAL");
   applyMigrations(database);
