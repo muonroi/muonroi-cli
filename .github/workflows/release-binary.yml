@@ -93,8 +93,23 @@ jobs:
         run: bun install --frozen-lockfile
       - name: Build
         run: bun run build
+      # Skip when this version is already on npm, like the harness loop below, so a re-run after a
+      # later step failed does not die on "cannot publish over" (release v1.11.0, run 43000669223:
+      # muonroi-cli published, then agent-harness-core failed E422 on an empty repository.url).
       - name: Publish muonroi-cli
-        run: npm publish --access public --provenance
+        run: |
+          set -euo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          status=$(node -e "fetch('https://registry.npmjs.org/$name/$version').then(r=>console.log(r.status))")
+          if [ "$status" = "200" ]; then
+            echo "skip $name@$version (already on npm)"
+          elif [ "$status" = "404" ]; then
+            npm publish --access public --provenance
+          else
+            echo "registry check for $name@$version returned $status" >&2
+            exit 1
+          fi
       - name: Publish agent-harness packages (versions not yet on npm)
         run: |
           set -euo pipefail
