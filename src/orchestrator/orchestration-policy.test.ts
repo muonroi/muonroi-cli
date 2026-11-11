@@ -129,6 +129,19 @@ describe("worker write-scope decision (M9)", () => {
   it("is enforced at dispatch validation before model checks", async () => {
     await expect(validateWorkerSelection({ ...base, agent: "general" })).rejects.toThrow("worker_write_scope_required");
   });
+  // Session 26516fe0c62e: writeScope:[] + sharedExecution:true started a worker that could write nothing.
+  it("refuses writeScope:[] combined with sharedExecution:true, keeping [] alone as the read-only grant", async () => {
+    const request = { ...base, agent: "general", writeScope: [], sharedExecution: true };
+    const error = workerWriteScopeRequiredError(request);
+    expect(error).toMatch(/^worker_write_scope_contradiction: /);
+    expect(error).toContain("No worker was started");
+    expect(error).toContain("Omit writeScope for shared execution");
+    await expect(validateWorkerSelection(request)).rejects.toThrow("worker_write_scope_contradiction");
+    expect(workerWriteScopeRequiredError({ ...base, agent: "general", writeScope: [] })).toBeUndefined();
+    expect(
+      workerWriteScopeRequiredError({ ...base, agent: "general", writeScope: ["a.ts"], sharedExecution: true }),
+    ).toBeUndefined();
+  });
 });
 
 describe("worker modelId schema (M18)", () => {

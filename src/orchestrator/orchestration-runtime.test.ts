@@ -211,6 +211,10 @@ describe("orchestrator runtime integration", () => {
       };
       expect(schema.properties).toHaveProperty("modelId");
       expect(schema.required).toContain("modelId");
+      // The reviewOf guidance must land before the call (worker_capability_refused x3 in session 26516fe0c62e).
+      const reviewOfDescription = (schema.properties.reviewOf as { description: string }).description;
+      expect(reviewOfDescription).toContain("read_file/grep/lsp_query/verification_run only");
+      expect(reviewOfDescription).toContain("agent=verify WITHOUT reviewOf first");
       const input = {
         agent: "general",
         description: "Owned scope",

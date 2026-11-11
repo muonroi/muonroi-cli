@@ -450,12 +450,29 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
             }
           }
           if (input.action === "complete") {
-            if (!input.jobId || !input.resultVersion || !input.assessment?.trim())
+            // Name every gap in ONE refusal; a one-gap-per-call refusal costs the caller a round trip each.
+            const missing = [
+              !input.jobId && "jobId",
+              !input.resultVersion && "resultVersion",
+              !input.assessment?.trim() && "assessment (main's non-empty evidence assessment)",
+            ].filter(Boolean) as string[];
+            if (missing.length > 0) {
+              const problems = [`missing: ${missing.join(", ")}`];
+              if (input.jobId && input.resultVersion) {
+                // Also surface the review-binding problem (unread/mismatched result) so it is not hidden behind the missing fields.
+                try {
+                  await opts.readPlanReview({ jobId: input.jobId, resultVersion: input.resultVersion });
+                } catch (err) {
+                  console.error(`[flow] plan review completion pre-check failed: ${(err as Error).message}`);
+                  problems.push((err as Error).message.replace(/^plan_review_refused:\s*/, ""));
+                }
+              }
               return json({
                 ok: false,
                 code: "plan_review_refused",
-                message: "Completion requires jobId, resultVersion and main's non-empty evidence assessment.",
+                message: `Completion requires jobId, resultVersion and main's non-empty evidence assessment. ${problems.join("; ")}`,
               });
+            }
             try {
               completed = await opts.readPlanReview({ jobId: input.jobId, resultVersion: input.resultVersion });
               await completed.assertCurrent();

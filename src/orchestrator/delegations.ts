@@ -666,20 +666,27 @@ export class DelegationManager {
 
   async readPlanReview(input: PlanReviewRead): Promise<CompletedPlanReview> {
     const record = await this.getById(input.jobId);
-    if (
-      !this.getOwnerId() ||
-      !record ||
-      record.parentSessionId !== this.getOwnerId() ||
-      (record.kind !== "council" && !record.planRevalidation) ||
-      !record.planReview ||
-      path.resolve(record.cwd) !== path.resolve(this.getCwd()) ||
-      record.status !== "complete" ||
-      !input.resultVersion ||
-      record.resultVersion !== input.resultVersion ||
-      record.planReviewReadVersion !== input.resultVersion
-    ) {
+    // Collect every failing condition so the refusal names them all at once.
+    const problems: string[] = [];
+    if (!this.getOwnerId()) problems.push("no owning session");
+    if (!record) problems.push(`job ${input.jobId} not found`);
+    else {
+      if (record.parentSessionId !== this.getOwnerId()) problems.push("job is not owned by this session");
+      if ((record.kind !== "council" && !record.planRevalidation) || !record.planReview)
+        problems.push("job is not a native plan review");
+      if (path.resolve(record.cwd) !== path.resolve(this.getCwd())) problems.push("job belongs to another workspace");
+      if (record.status !== "complete") problems.push(`job is ${record.status}, not complete`);
+      if (!input.resultVersion) problems.push("resultVersion missing");
+      else {
+        if (record.resultVersion !== input.resultVersion)
+          problems.push(`resultVersion does not match the saved result (current: ${record.resultVersion})`);
+        if (record.planReviewReadVersion !== input.resultVersion)
+          problems.push("result not read yet (delegation_read it at this resultVersion first)");
+      }
+    }
+    if (problems.length > 0 || !record || !record.planReview) {
       throw new Error(
-        "plan_review_refused: Read the owning completed native review and supply its exact resultVersion.",
+        `plan_review_refused: Read the owning completed native review and supply its exact resultVersion. Problems: ${problems.join("; ")}.`,
       );
     }
     const output = await fs.readFile(record.outputPath, "utf8");

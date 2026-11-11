@@ -186,6 +186,11 @@ const WRITE_SCOPE_EXEMPT_AGENTS: ReadonlySet<string> = new Set([
  * model must choose: writeScope, or sharedExecution:true for shell work.
  */
 export function workerWriteScopeRequiredError(request: TaskRequest): string | undefined {
+  // `writeScope: []` is the documented read-only grant, but sharedExecution:true asks for
+  // unscoped writes: the pair contradicts (session 26516fe0c62e started a worker that could
+  // write nothing and was killed 8s later). Refuse it rather than guess which one was meant.
+  if (request.sharedExecution === true && Array.isArray(request.writeScope) && request.writeScope.length === 0)
+    return `worker_write_scope_contradiction: agent=${request.agent} has sharedExecution:true (writes anywhere in cwd) but writeScope:[] (no writes allowed). No worker was started. Omit writeScope for shared execution, or list the paths the worker may write; drop sharedExecution for a read-only worker.`;
   if (request.writeScope !== undefined || request.reviewOf || request.sharedExecution === true) return undefined;
   if (WRITE_SCOPE_EXEMPT_AGENTS.has(request.agent)) return undefined;
   return `worker_write_scope_required: agent=${request.agent} can edit files, so the dispatch must state its write grant. No worker was started. Set writeScope to the exact files or directories (ending in '/') this task may change ([] for no writes); or, only when the task must run shell commands (build, test, git) that a scoped worker cannot, set sharedExecution:true — it writes anywhere in cwd and is not isolated. Read-only research uses delegate/explore; test runs can use agent=verify.`;
