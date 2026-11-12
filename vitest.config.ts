@@ -77,6 +77,13 @@ export default defineConfig({
     env: {
       // Suppress the agent-harness shim deprecation warning for in-repo runs.
       MUONROI_INTERNAL_SHIM_OK: "1",
+      // Hermetic EE: without this, any test that runs a turn reads the developer's real
+      // ~/.experience/config.json and calls the hosted brain with a 10s remote timeout, so the
+      // suite passes or fails with experience.muonroi.com's uptime (2026-11-11: /health timed
+      // out and orchestrator-role-guidance.test.ts hit its 30s limit on unchanged code). A
+      // refused local port fails at once (100ms local timeout). Tests that exercise base-URL
+      // resolution set or delete this themselves (e.g. src/ui/slash/__tests__/ee-config.test.ts).
+      MUONROI_EE_BASE_URL: "http://127.0.0.1:1",
     },
   },
 });

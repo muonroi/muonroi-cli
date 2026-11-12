@@ -248,6 +248,25 @@ describe("withStreamRetry — rate-limit schedule", () => {
     expect(factory).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps an out-of-credit 429 off the long schedule and surfaces the provider's own error", async () => {
+    // Verbatim provider text from /ideal run 4bd053dbd1a0: it was classified as a rate limit,
+    // waited 184s over 7 tries, then reported "429 alone does not establish exhausted credits".
+    const noCredit = Object.assign(new Error("you have no left credit for step plan"), { statusCode: 429 });
+    const delays: number[] = [];
+    const factory = vi.fn().mockRejectedValue(noCredit);
+    const err = await withStreamRetry(factory, {
+      rateLimitBudgetMs: 240_000,
+      jitter: 0,
+      delay: (ms) => {
+        delays.push(ms);
+        return Promise.resolve();
+      },
+    }).catch((e: unknown) => e);
+    expect(err).toBe(noCredit);
+    expect(err).not.toBeInstanceOf(ProviderRateLimitError);
+    expect(delays).toEqual([500, 2000]);
+  });
+
   it("budget 0 restores the short schedule for rate limits", async () => {
     const delays: number[] = [];
     const factory = vi.fn().mockRejectedValue(rateLimited());

@@ -184,6 +184,8 @@ export class TaskContext {
 
   /** Host facts (native FLOW completion scope) consulted when main marks the root goal complete. */
   completionFacts?: () => RootCompletionFacts | null;
+  /** Unmet deliverable requirements (commits, tracked files, fidelity) measured by the host; empty = none. */
+  deliverableRefusals?: () => Promise<string[]>;
   contextProtection?: () => Promise<ContextProtection>;
   async refreshProtection(): Promise<void> {
     if (!this.contextProtection) return;

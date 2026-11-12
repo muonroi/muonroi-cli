@@ -104,6 +104,25 @@ describe("orchestrator flow_execute / flow_verify / flow_ship", () => {
     expect(after.root_status).toBe("complete");
   });
 
+  it("root_status=complete is refused while the host deliverable check has unmet requirements", () => {
+    const w = new WorkingContext("owner", cwd, []);
+    w.update({ action: "update", expected_revision: 0, task_id: "t", goal: "wave", root_goal: "ROOT" });
+    const refused = w.update(
+      { action: "update", expected_revision: w.snapshot().revision, root_status: "complete" },
+      undefined,
+      ["the goal asks for a commit but there are 0 commits since base commit a413be7e"],
+    );
+    expect(refused.error).toContain("deliverable check found unmet requirements");
+    expect(refused.error).toContain("0 commits since base commit a413be7e");
+    expect(refused.root_status).toBe("open");
+    const accepted = w.update(
+      { action: "update", expected_revision: w.snapshot().revision, root_status: "complete" },
+      undefined,
+      [],
+    );
+    expect(accepted.error).toBeUndefined();
+  });
+
   it("a failing flow_verify records recorded_fail and keeps the claim refused", async () => {
     const { writeFileSync } = await import("node:fs");
     writeFileSync(planningArtifact(cwd, "PLAN.md"), "# Plan\n");

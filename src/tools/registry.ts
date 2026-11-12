@@ -129,6 +129,8 @@ interface ToolRegistryOpts {
   readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
   /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
   verifyWorkerEvidence?: () => Promise<string>;
+  /** Host-measured deliverable facts and refusals (commits, tracked files, fidelity probe) for the completion/verify gate. */
+  deliverableReport?: () => Promise<import("../orchestrator/deliverable-gate.js").DeliverableReport | null>;
   listDelegations?: () => Promise<ToolResult>;
   killDelegation?: (id: string) => Promise<ToolResult>;
   modelId?: string;
@@ -1303,7 +1305,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
               required: ["jobId", "resultVersion"],
               additionalProperties: false,
               description:
-                "Fresh independent verification of this exact successful saved implementation result. Forces verify role, read/test-only tools and durable job.",
+                "Fresh independent verification of this exact successful saved implementation result. Forces verify role, read/test-only tools and durable job. The worker gets read_file/grep/lsp_query/verification_run only (no shell): give read-only instructions, never 'run X'. To have commands run, dispatch agent=verify WITHOUT reviewOf first, then reviewOf on its saved result.",
             },
             allowedMcpTools: {
               type: "array",
@@ -2103,6 +2105,7 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
       startPlanReview: opts?.startPlanReview,
       readPlanReview: opts?.readPlanReview,
       verifyWorkerEvidence: opts?.verifyWorkerEvidence,
+      deliverableReport: opts?.deliverableReport,
     });
   }
 

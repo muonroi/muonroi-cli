@@ -21,6 +21,8 @@ export interface IdealCoordinationRun {
   goal: string;
   /** ISO timestamp; every delegation started at or after it belongs to the run. */
   startedAt: string;
+  /** HEAD when the run started (deliverable-gate.ts measures commits since it); absent outside a git repository. */
+  baseCommit?: string;
   /** Host autopilot state (ideal-autopilot.ts); absent when the run was started with the autopilot off. */
   autopilot?: PersistedAutopilot;
 }

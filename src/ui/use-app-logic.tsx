@@ -5102,14 +5102,21 @@ export function useAppLogic(props: AppLogicProps) {
   );
   useEffect(() => {
     let active = true;
+    // A consume can outlast the 2s tick (every job lock that never frees costs a
+    // ~10.5s timeout). Starting another while one is pending only stacks work.
+    let consumeInFlight = false;
     const id = setInterval(() => {
       refreshBackgroundSnapshot();
       // While a turn runs, leave notices queued: the model cannot see a notice
       // claimed mid-turn, and the next turn's pre-stream consume delivers it.
       // Once the turn ends this tick claims it and wakes the agent.
-      if (isProcessingRef.current) return;
+      if (isProcessingRef.current || consumeInFlight) return;
+      consumeInFlight = true;
       agent
         .consumeBackgroundNotifications()
+        .finally(() => {
+          consumeInFlight = false;
+        })
         .then((notifications) => {
           if (!active || notifications.length === 0) return;
           setMessages((prev) => [
@@ -7857,6 +7864,12 @@ export function useAppLogic(props: AppLogicProps) {
       if (showMcpModalRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-modal")) {
         const row = mcpRows[mcpModalIndex];
         if (isEscapeKey(key)) {
+          // Write the refs NOW, not in the post-commit effect: keys queued behind this Escape in
+          // the same stdin chunk run against this closure before React re-renders, and would still
+          // see the modal as open — typed text lands in the search box and Enter toggles the
+          // highlighted saved server (tests/harness/mcp-oauth.spec.ts, CI runs 43173666474 and 43000599014).
+          showMcpEditorRef.current = false;
+          showMcpModalRef.current = false;
           setShowMcpEditor(false);
           setShowMcpModal(false);
           setMcpSearchQuery("");

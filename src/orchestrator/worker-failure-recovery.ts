@@ -30,6 +30,7 @@ export function isMutationTool(toolName: string): boolean {
  */
 export function attemptedWritePaths(
   captures: ReadonlyArray<{ toolName: string; input?: unknown }>,
+  limit = MAX_ATTEMPTED_WRITE_PATHS,
 ): string[] | undefined {
   const paths: string[] = [];
   for (const capture of captures) {
@@ -41,7 +42,7 @@ export function attemptedWritePaths(
     if (at >= 0) paths.splice(at, 1);
     paths.push(target);
   }
-  return paths.length ? paths.slice(-MAX_ATTEMPTED_WRITE_PATHS) : undefined;
+  return paths.length ? paths.slice(-limit) : undefined;
 }
 
 // Provider answers, matched on the TERMINAL failure text only (never on partial

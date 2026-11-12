@@ -68,4 +68,41 @@ describe("runVerifyCouncil", () => {
     expect(res.verdict).toBe("revise");
     expect(res.verdictSource).toBe("parse-failed");
   });
+
+  it("every perspective prompt carries the fidelity and concern-scope rules", async () => {
+    const prompts: string[] = [];
+    const runPerspectiveFn = vi.fn(async (prompt: string) => {
+      prompts.push(prompt);
+      return '```council-verdict\n{"verdict":"approve","concerns":[],"evidence":[],"rationale":"ok"}\n```';
+    });
+    await runVerifyCouncil({ cwd, sessionModelId: "sess-model", depth: "heavy", runPerspectiveFn });
+    expect(prompts).toHaveLength(4);
+    for (const prompt of prompts) {
+      expect(prompt).toContain("sampled passages of the SOURCE appear in the OUTPUT with equivalent normalized text");
+      expect(prompt).toContain("outside the deliverable and the done-criteria");
+    }
+  });
+
+  it("an out-of-scope advisory finding does not block, a false-claim blocker still does", async () => {
+    const advisory =
+      '```council-verdict\n{"verdict":"approve","concerns":["notes file has no generating script"],"evidence":["deliverable sample matches source"],"rationale":"ok","findings":[{"id":"F1","severity":"advisory","status":"open","claim":"notes file not script-generated","planReference":"PLAN.md notes","evidenceKind":"observed","evidence":["notes/inventory.md"],"reproduction":[],"closure":"optional"}]}\n```';
+    const ok = await runVerifyCouncil({
+      cwd,
+      sessionModelId: "sess-model",
+      depth: "standard",
+      runDebate: vi.fn(async () => advisory),
+    });
+    expect(ok.verdict).toBe("pass");
+
+    const falseClaim =
+      '```council-verdict\n{"verdict":"revise","concerns":["evidence claims 72 code fences, measured 70"],"evidence":[],"rationale":"false claim"}\n```';
+    const bad = await runVerifyCouncil({
+      cwd,
+      sessionModelId: "sess-model",
+      depth: "standard",
+      runDebate: vi.fn(async () => falseClaim),
+    });
+    expect(bad.verdict).toBe("revise");
+    expect(bad.concerns.join(" ")).toContain("72 code fences");
+  });
 });

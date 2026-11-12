@@ -208,7 +208,12 @@ export async function sourceFingerprint(cwd: string, parent?: SnapshotState): Pr
         if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
       }
       hash.update("\0working-diff\0");
-      hash.update(await gitRead(["diff", "--no-ext-diff", "--no-textconv", "--binary", "--", "."]));
+      // The raw listing names every working change by path and status, deletions included.
+      // A deleted path's content is its index blob, already hashed in the manifest, so the
+      // binary patch skips deletions (--diff-filter=d): a 117k-deletion patch alone took
+      // 8.5-9.4s of the 30s Git deadline unloaded and timed out under load (1.6s filtered).
+      hash.update(workingModes);
+      hash.update(await gitRead(["diff", "--no-ext-diff", "--no-textconv", "--binary", "--diff-filter=d", "--", "."]));
       // Sparse absent paths retain their index blob identity. Present S/s paths
       // need byte hashing because Git deliberately suppresses their working diff.
       for (const entry of flags.split("\0")) {

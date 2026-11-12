@@ -158,6 +158,24 @@ describe("export reachability — signal", () => {
     expect(symbolsOf(findings)).not.toContain("deadTwin");
   });
 
+  it("a nested script with a shebang is an entry point; a nested library without one is not", () => {
+    const lib = `export function liveness(): boolean {\n  return true;\n}\nexport function orphan(): boolean {\n  return false;\n}\n`;
+    const dir = scaffold({
+      ...treeFiles,
+      "scripts/bench/runner.ts": `#!/usr/bin/env bun\nimport { liveness } from "./lib.js";\nconsole.log(liveness());\n`,
+      "scripts/bench/lib.ts": lib,
+    });
+    const findings = analyze({
+      treeRoot: dir,
+      changedFiles: ["scripts/bench/lib.ts"],
+      baselineSources: new Map(),
+    }).findings;
+    // Reached through the executable runner…
+    expect(symbolsOf(findings)).not.toContain("liveness");
+    // …while the library's other export is still dead: the library itself is no root.
+    expect(symbolsOf(findings)).toContain("orphan");
+  });
+
   it("treats a symbol re-exported by a package's public surface as API, not dead", () => {
     const dir = scaffold({
       "package.json": JSON.stringify({ name: "fx", main: "dist/src/index.js" }),

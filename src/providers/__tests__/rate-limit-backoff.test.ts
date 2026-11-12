@@ -76,6 +76,9 @@ describe("isRateLimitError — generic across provider shapes (no provider-id br
   it.each([
     ["z.ai balance 429", apiError(429, "Insufficient balance or no resource package. Please recharge.")],
     ["OpenAI quota 429", apiError(429, "You exceeded your current quota, please check your plan and billing details.")],
+    // Verbatim provider text from /ideal run 4bd053dbd1a0 (job brisk-ivory-lynx).
+    ["StepFun step-plan credit 429", apiError(429, "you have no left credit for step plan")],
+    ["no credit remaining 429", apiError(429, "No credit remaining on this account")],
     ["401 that mentions a limit", apiError(401, "Invalid key (rate limit tier: free)")],
     ["500", apiError(500, "Internal error")],
     ["plain network error", new TypeError("fetch failed")],
@@ -88,6 +91,9 @@ describe("isRateLimitError — generic across provider shapes (no provider-id br
     expect(isRateLimitFailureText("Task failed: HTTP 429: Rate limit reached, please try again later.")).toBe(true);
     expect(isRateLimitFailureText("Rate limit reached, please try again later.")).toBe(true);
     expect(isRateLimitFailureText("Task failed: HTTP 429: Insufficient balance")).toBe(false);
+    expect(isRateLimitFailureText("Task failed: HTTP 429: you have no left credit for step plan")).toBe(false);
+    // A plain rate limit that merely mentions credits is still a rate limit.
+    expect(isRateLimitFailureText("Task failed: HTTP 429: Rate limit reached; credits are fine")).toBe(true);
     expect(isRateLimitFailureText("Task failed: ENOENT")).toBe(false);
     expect(isQuotaExhaustion("insufficient_quota")).toBe(true);
   });

@@ -40,7 +40,8 @@
  *   --permission <mode>     pass --permission <mode> to the CLI (safe | auto-edit | yolo)
  *   --budget-usd <n>        abort when spend exceeds n (default 15)
  *   --max-wall-min <n>      abort after n minutes (default 120)
- *   --quiet-sec <n>         settled = no UI change AND no running worker for n s (default 90)
+ *   --quiet-sec <n>         settled = no UI change AND no running worker AND no in-flight council call
+ *                           (fresh council.heartbeat of this CLI) for n s (default 90)
  *   --auto-continue <n>     when the run settles with the orchestrator waiting on a human, send
  *                           AUTO_CONTINUE_TEXT up to n times (default 0). The baseline had a human
  *                           who sent 37 steering messages ("bắt đầu làm theo recommend của bạn",
@@ -67,6 +68,7 @@ import { createLineSplitter } from "@muonroi/agent-harness-core/transports/sidec
 import { spawnAgentTui } from "../../src/agent-harness/test-spawn.js";
 import { computeFlowMetrics, formatFlowMetrics, openReadOnlyDatabase } from "../../src/cli/flow-metrics.js";
 import { compareFlowMetrics, formatComparison } from "../../src/cli/flow-metrics-compare.js";
+import { readCouncilLiveness } from "./council-liveness.js";
 
 /**
  * HEAD of the source repo when the original request began. Evidence: worker
@@ -404,6 +406,14 @@ async function main(): Promise<void> {
   // a2a6d27eb5ca right as its last worker finished, before the wake-up turn.
   let lastWorkerSeenAt = Date.now();
   let spendAtLaunch: number | undefined;
+  let councilAlive = false;
+  const councilHooks = {
+    // A missing breadcrumb file is normal before the first council call; only shown with MUONROI_BENCH_DEBUG=1.
+    debug: (msg: string) => {
+      if (process.env.MUONROI_BENCH_DEBUG === "1") log(msg);
+    },
+    warn: log,
+  };
   for (;;) {
     await new Promise((r) => setTimeout(r, 5_000));
     ids = findSessions(runDb, cwd);
@@ -429,6 +439,20 @@ async function main(): Promise<void> {
       break;
     }
     if (running.length > 0) lastWorkerSeenAt = Date.now();
+    // The in-process council (verify/debate) is silent in the UI and has no detached worker, but
+    // its heartbeat proves a model call is in flight. Treat that as activity (run
+    // ideal6-M-tcis-mcpdocs lost its verify to a 300 s quiet kill mid-council.research). The
+    // wall and budget caps above stay authoritative, so a truly hung council still ends the run.
+    const council = readCouncilLiveness(runHome, { pid: proc.pid, sessionIds: idSet }, councilHooks);
+    if (council.alive) lastWorkerSeenAt = Date.now();
+    if (council.alive !== councilAlive) {
+      councilAlive = council.alive;
+      log(
+        council.alive
+          ? `council in flight (${council.markers.join(", ")}; heartbeat ${Math.round((council.ageMs ?? 0) / 1000)}s old) — settle deferred`
+          : "council no longer in flight — normal settle rule applies",
+      );
+    }
     const quietFor = Date.now() - Math.max(lastChangeAt, lastWorkerSeenAt);
     if (quietFor > quietMs && running.length === 0 && stored.assistantMessages > 0) {
       if (autoContinues < autoContinueMax) {

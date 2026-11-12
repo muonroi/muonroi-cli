@@ -26,10 +26,8 @@ export async function withFileLock<T>(filePath: string, fn: () => Promise<T>, op
   const next = new Promise<void>((r) => {
     resolveInProcess = r;
   });
-  inProcessLocks.set(
-    filePath,
-    prev.then(() => next),
-  );
+  const tail = prev.then(() => next);
+  inProcessLocks.set(filePath, tail);
 
   try {
     // Wait for our turn in-process first.
@@ -37,8 +35,9 @@ export async function withFileLock<T>(filePath: string, fn: () => Promise<T>, op
     return await acquireFileLock(filePath, fn, opts);
   } finally {
     resolveInProcess();
-    // Clean up map entry once this waiter has resolved its slot.
-    if (inProcessLocks.get(filePath) === prev.then(() => next)) {
+    // Clean up map entry once this waiter has resolved its slot — only if no later waiter
+    // chained behind us (compare the stored promise itself; a fresh `.then()` never matches).
+    if (inProcessLocks.get(filePath) === tail) {
       inProcessLocks.delete(filePath);
     }
   }
@@ -85,6 +84,7 @@ async function acquireFileLock<T>(filePath: string, fn: () => Promise<T>, opts: 
       if (e?.code !== "EEXIST" && e?.code !== "EPERM") throw e;
       lastCode = e.code;
       if (opts.staleMs !== undefined && (await breakStaleLock(lockPath, opts.staleMs))) continue;
+      if (await reclaimDeadOwnerLock(lockPath)) continue;
       if (Date.now() - startedAt > timeoutMs) {
         throw new Error(
           `withFileLock: timed out waiting for ${lockPath} after ${Date.now() - startedAt}ms (${await describeLockHolder(lockPath, lastCode)})`,
@@ -125,4 +125,93 @@ async function breakStaleLock(lockPath: string, staleMs: number): Promise<boolea
     });
     return false;
   }
+}
+
+/**
+ * Whether `pid` names a process that no longer exists. `process.kill(pid, 0)`
+ * sends no signal: ESRCH = gone, EPERM = exists but not ours (alive). Any other
+ * outcome is treated as alive — never break a lock on a guess.
+ */
+function isProcessDead(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "ESRCH";
+  }
+}
+
+/**
+ * Remove `lockPath` when the pid recorded in it belongs to a dead process (the
+ * holder was killed mid-critical-section and can never release it). Lock files
+ * whose content is not a positive integer pid are left alone. Returns whether
+ * the lock was removed, i.e. whether the caller should retry acquisition now.
+ *
+ * Race-safety: the file is first renamed to a private name (only one waiter's
+ * rename can succeed), then its content is re-verified. If a live holder
+ * re-acquired the path between our read and our rename, the file we grabbed is
+ * theirs, so it is linked back instead of deleted.
+ */
+async function reclaimDeadOwnerLock(lockPath: string): Promise<boolean> {
+  let pid: number;
+  let ageMs: number;
+  try {
+    const [{ mtimeMs }, raw] = await Promise.all([fs.stat(lockPath), fs.readFile(lockPath, "utf8")]);
+    const text = raw.trim();
+    if (!/^\d+$/.test(text)) return false;
+    pid = Number(text);
+    ageMs = Math.round(Date.now() - mtimeMs);
+  } catch (err) {
+    // Vanished (released normally) or unreadable — just retry the open.
+    logger.file("debug", "storage", "withFileLock: dead-owner check skipped", {
+      lockPath,
+      code: (err as NodeJS.ErrnoException)?.code,
+    });
+    return false;
+  }
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid === process.pid || !isProcessDead(pid)) return false;
+
+  const grabbed = `${lockPath}.reclaim-${process.pid}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await fs.rename(lockPath, grabbed);
+  } catch (err) {
+    // Another waiter reclaimed it first, or the file is momentarily busy.
+    logger.file("debug", "storage", "withFileLock: dead-owner reclaim rename lost", {
+      lockPath,
+      pid,
+      code: (err as NodeJS.ErrnoException)?.code,
+    });
+    return false;
+  }
+  try {
+    const grabbedPid = (await fs.readFile(grabbed, "utf8")).trim();
+    if (grabbedPid !== String(pid)) {
+      // A live holder re-acquired between our read and rename: give the lock back.
+      await fs.link(grabbed, lockPath);
+      logger.file("warn", "storage", "withFileLock: dead-owner reclaim raced a new holder; lock restored", {
+        lockPath,
+        deadPid: pid,
+        newHolder: grabbedPid,
+      });
+      return false;
+    }
+  } catch (err) {
+    logger.file("warn", "storage", "withFileLock: dead-owner reclaim could not verify/restore", {
+      lockPath,
+      pid,
+      code: (err as NodeJS.ErrnoException)?.code,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  } finally {
+    await fs.unlink(grabbed).catch((err: NodeJS.ErrnoException) => {
+      logger.file("warn", "storage", "withFileLock: failed to remove reclaimed lock file", {
+        lockPath: grabbed,
+        code: err?.code,
+        error: err?.message,
+      });
+    });
+  }
+  logger.file("warn", "storage", "withFileLock: reclaimed lock held by dead process", { lockPath, pid, ageMs });
+  return true;
 }

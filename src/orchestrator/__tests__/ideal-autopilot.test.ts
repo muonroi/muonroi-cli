@@ -64,6 +64,14 @@ describe("continue", () => {
     expect(state).toMatchObject({ status: "running", turns: 1, totalTurns: 1, noProgressStreak: 0 });
   });
 
+  it("states an unmet host deliverable check in the continuation", () => {
+    const { decision } = step(fresh(), {
+      facts: { verification: "recorded_pass", openItems: 0, deliverables: ["0 commits since base commit a413be7e"] },
+    });
+    expect(decision.action).toBe("continue");
+    if (decision.action === "continue") expect(decision.prompt).toContain("deliverable check is unmet: 0 commits");
+  });
+
   it("tells the model when the last turns changed nothing, with the threshold", () => {
     let s = fresh();
     s = step(s, { signals: sig() }).state; // no change: streak 1

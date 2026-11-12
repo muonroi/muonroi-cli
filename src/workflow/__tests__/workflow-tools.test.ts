@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadCatalog } from "../../models/registry.js";
+import type { DeliverableReport } from "../../orchestrator/deliverable-gate.js";
 import { filterExecutionTools } from "../../orchestrator/orchestration-policy.js";
 import { BashTool } from "../../tools/bash.js";
 import { createBuiltinTools } from "../../tools/registry.js";
@@ -247,6 +248,67 @@ describe("flow workflow tools registry", () => {
       expect(topics).toHaveLength(1);
       expect(topics[0]).toContain("### Host-recorded worker evidence");
       expect(topics[0]).toContain("both homes unchanged");
+    } finally {
+      resolution.mockRestore();
+    }
+  });
+
+  // Run 0a0d0430e149: "Commit message ..." in the prompt, 0 commits, untracked + gitignored deliverables,
+  // and still a final answer. The host measures the deliverable; evidence text cannot satisfy it.
+  it("flow_verify refuses to record a pass while the host deliverable check has unmet requirements", async () => {
+    ensurePlanningWorkspace(tmp, "test-model");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Convert\n", "utf8");
+    const debate = vi.fn(async () => '```council-verdict\n{"verdict":"approve","concerns":[]}\n```');
+    const refusal = "the goal asks for a commit but there are 0 commits since base commit a413be7e: out/a.md";
+    const tools = createBuiltinTools(new BashTool(tmp), "agent", {
+      modelId: "test-model",
+      depthTier: "standard",
+      runDebate: debate,
+      deliverableReport: async () =>
+        ({ refusals: [refusal], evidence: "### Host-measured deliverable facts" }) as unknown as DeliverableReport,
+    });
+    const execute = tools.flow_verify!.execute as (...args: any[]) => Promise<string>;
+    const out = JSON.parse(
+      await execute({ passed: true, evidence: "tests passed" }, { toolCallId: "verify-deliv", messages: [] }),
+    );
+    expect(out.passed).toBe(false);
+    expect(out.deliverableRefusals).toEqual([refusal]);
+    expect(out.message).toContain("0 commits");
+    expect(debate).not.toHaveBeenCalled();
+    const verify = readFileSync(planningArtifact(tmp, "VERIFY.md"), "utf8");
+    expect(verify).toMatch(/^verdict: fail$/m);
+    expect(verify).toContain("out/a.md");
+  });
+
+  it("flow_verify hands the deliverable facts to the council ahead of the worker evidence when nothing is unmet", async () => {
+    const leader = await import("../../council/leader.js");
+    const resolution = vi.spyOn(leader, "resolvePlanCouncilLeader").mockResolvedValue({ modelId: "test-leader" });
+    ensurePlanningWorkspace(tmp, "test-model");
+    writeFileSync(planningArtifact(tmp, "PLAN.md"), "# Plan\n1. Convert\n", "utf8");
+    const topics: string[] = [];
+    const debate = vi.fn(async (topic: string) => {
+      topics.push(topic);
+      return '```council-verdict\n{"verdict":"approve","concerns":[]}\n```';
+    });
+    const tools = createBuiltinTools(new BashTool(tmp), "agent", {
+      modelId: "test-model",
+      depthTier: "standard",
+      runDebate: debate,
+      verifyWorkerEvidence: async () => "- worker-one done",
+      deliverableReport: async () =>
+        ({
+          refusals: [],
+          evidence: "### Host-measured deliverable facts\n- commits since base: 2",
+        }) as unknown as DeliverableReport,
+    });
+    try {
+      const execute = tools.flow_verify!.execute as (...args: any[]) => Promise<string>;
+      const out = JSON.parse(
+        await execute({ passed: true, evidence: "tests passed" }, { toolCallId: "verify-deliv-ok", messages: [] }),
+      );
+      expect(out.passed).toBe(true);
+      expect(topics[0]).toContain("- commits since base: 2");
+      expect(topics[0]!.indexOf("Host-measured deliverable facts")).toBeLessThan(topics[0]!.indexOf("worker-one done"));
     } finally {
       resolution.mockRestore();
     }
