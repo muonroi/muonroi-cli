@@ -451,6 +451,21 @@ describe("source snapshot coverage", () => {
     fs.writeFileSync(path.join(cwd, "extra.test.cjs"), "new source");
     expect(await sourceFingerprint(cwd)).not.toBe(second);
   });
+  it("distinguishes deleting different tracked files although the patch omits deletions", async () => {
+    execFileSync("git", ["init", cwd], { stdio: "ignore" });
+    execFileSync("git", ["-C", cwd, "add", "value.cjs", "value.test.cjs"], { stdio: "ignore" });
+    const clean = await sourceFingerprint(cwd);
+    const valueSource = fs.readFileSync(path.join(cwd, "value.cjs"));
+    fs.unlinkSync(path.join(cwd, "value.cjs"));
+    const valueDeleted = await sourceFingerprint(cwd);
+    expect(valueDeleted).not.toBe(clean);
+    fs.writeFileSync(path.join(cwd, "value.cjs"), valueSource);
+    expect(await sourceFingerprint(cwd)).toBe(clean);
+    fs.unlinkSync(path.join(cwd, "value.test.cjs"));
+    const testDeleted = await sourceFingerprint(cwd);
+    expect(testDeleted).not.toBe(clean);
+    expect(testDeleted).not.toBe(valueDeleted);
+  });
   it("does not bless an empty Git manifest inside an ignored nested workspace", async () => {
     execFileSync("git", ["init", home], { stdio: "ignore" });
     fs.writeFileSync(path.join(home, ".gitignore"), "workspace/\n");
