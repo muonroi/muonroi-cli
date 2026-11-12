@@ -1,7 +1,8 @@
+import { type ChildProcess, spawn } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { reportCleanupFailure } from "../../__test-stubs__/cleanup";
 import { withFileLock } from "../file-lock.js";
 
@@ -69,6 +70,111 @@ describe("withFileLock", () => {
       }),
     ]);
     expect(overlapped).toBe(true);
+  });
+
+  describe("dead-owner reclaim", () => {
+    const children: ChildProcess[] = [];
+    afterEach(() => {
+      for (const c of children.splice(0)) c.kill("SIGKILL");
+    });
+
+    /** Spawn a real process; resolves once it is running. */
+    async function spawnLive(): Promise<ChildProcess> {
+      const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore" });
+      children.push(child);
+      await new Promise<void>((resolve, reject) => {
+        child.once("spawn", () => resolve());
+        child.once("error", reject);
+      });
+      return child;
+    }
+
+    /** A pid that provably belonged to a process which has exited. */
+    async function deadPid(): Promise<number> {
+      const child = await spawnLive();
+      const exited = new Promise<void>((r) => child.once("exit", () => r()));
+      child.kill("SIGKILL");
+      await exited;
+      return child.pid as number;
+    }
+
+    it("reclaims a lock whose recorded owner process is dead, then runs fn", async () => {
+      const pid = await deadPid();
+      await fs.writeFile(`${tmpFile}.lock`, String(pid));
+      let ran = false;
+      await withFileLock(
+        tmpFile,
+        async () => {
+          ran = true;
+        },
+        { timeoutMs: 500 },
+      );
+      expect(ran).toBe(true);
+      await expect(fs.stat(`${tmpFile}.lock`)).rejects.toThrow();
+      const leftovers = (await fs.readdir(path.dirname(tmpFile))).filter((f) => f.includes(".reclaim-"));
+      expect(leftovers).toEqual([]);
+    });
+
+    it("does NOT break a lock held by a live process", async () => {
+      const live = await spawnLive();
+      await fs.writeFile(`${tmpFile}.lock`, String(live.pid));
+      let ran = false;
+      await expect(
+        withFileLock(
+          tmpFile,
+          async () => {
+            ran = true;
+          },
+          { timeoutMs: 200 },
+        ),
+      ).rejects.toThrow(/timed out waiting for .*\(held by pid \d+/);
+      expect(ran).toBe(false);
+      expect(await fs.readFile(`${tmpFile}.lock`, "utf8")).toBe(String(live.pid));
+    });
+
+    it("does NOT break a lock whose pid is this process (another in-flight holder)", async () => {
+      await fs.writeFile(`${tmpFile}.lock`, String(process.pid));
+      await expect(withFileLock(tmpFile, async () => {}, { timeoutMs: 150 })).rejects.toThrow(/timed out/);
+      expect(await fs.readFile(`${tmpFile}.lock`, "utf8")).toBe(String(process.pid));
+    });
+
+    it.each([
+      "manual",
+      "",
+      "0",
+      "-5",
+      "123abc",
+      "99999999999999999999",
+    ])("leaves a lock with unparsable content %j untouched and times out", async (content) => {
+      await fs.writeFile(`${tmpFile}.lock`, content);
+      await expect(withFileLock(tmpFile, async () => {}, { timeoutMs: 150 })).rejects.toThrow(/timed out/);
+      expect(await fs.readFile(`${tmpFile}.lock`, "utf8")).toBe(content);
+    });
+
+    it("lets exactly one of several concurrent waiters reclaim, all of them run serialized", async () => {
+      const pid = await deadPid();
+      await fs.writeFile(`${tmpFile}.lock`, String(pid));
+      let inside = 0;
+      let maxInside = 0;
+      let ran = 0;
+      await Promise.all(
+        Array.from({ length: 5 }, () =>
+          withFileLock(
+            tmpFile,
+            async () => {
+              inside += 1;
+              maxInside = Math.max(maxInside, inside);
+              await new Promise((r) => setTimeout(r, 10));
+              inside -= 1;
+              ran += 1;
+            },
+            { timeoutMs: 2000 },
+          ),
+        ),
+      );
+      expect(ran).toBe(5);
+      expect(maxInside).toBe(1);
+    });
   });
 
   it("respects retry timeout", async () => {
