@@ -294,6 +294,8 @@ export class WorkingContext {
   update(
     input: Record<string, unknown>,
     completionFacts?: () => RootCompletionFacts | null,
+    /** Unmet deliverable requirements measured by the host (deliverable-gate.ts); non-empty refuses "complete". */
+    deliverableRefusals: readonly string[] = [],
   ): WorkingContextState & { error?: string } {
     const fail = (error: string) => ({ ...this.snapshot(), error });
     if (input.expected_revision !== this.state.revision)
@@ -370,9 +372,12 @@ export class WorkingContext {
           ? `native FLOW plan "${facts.declaredPlanScope ?? "(untitled PLAN.md)"}" has implementationVerification=${facts.implementationVerification}; record a passing flow_verify (VERIFY.md verdict: pass) for the whole plan first`
           : "";
       const remaining = next.open_items.length ? `open_items still lists ${JSON.stringify(next.open_items)}` : "";
-      if (unverified || remaining)
+      const deliverables = deliverableRefusals.length
+        ? `the host's deliverable check found unmet requirements: ${deliverableRefusals.join(" | ")}`
+        : "";
+      if (unverified || remaining || deliverables)
         return fail(
-          `Refused root_status="complete" for root goal "${next.root_goal}": ${[unverified, remaining].filter(Boolean).join("; ")}. A completed wave, worker, commit or approved plan does not complete the root goal. Report partial progress and the remaining deliverables instead.`,
+          `Refused root_status="complete" for root goal "${next.root_goal}": ${[unverified, remaining, deliverables].filter(Boolean).join("; ")}. A completed wave, worker, commit or approved plan does not complete the root goal. Report partial progress and the remaining deliverables instead.`,
         );
     }
     if (!this.valid(next) || !next.task_id.trim() || !next.goal.trim())

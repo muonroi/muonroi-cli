@@ -32,6 +32,8 @@ export interface RootCompletion {
   /** `implementationVerification` of the native plan; null when the session has no native plan. */
   verification: string | null;
   openItems: number;
+  /** Unmet deliverable requirements (commits, tracked files, fidelity) measured by the host; non-empty keeps the run open. */
+  deliverableRefusals?: string[];
 }
 
 export interface IdealAutopilotDeps {
@@ -225,7 +227,11 @@ export class IdealAutopilotHost {
         awaitingHuman: turn.awaitingHuman === true,
       },
       rootComplete: completion.complete,
-      facts: { verification: completion.verification, openItems: completion.openItems },
+      facts: {
+        verification: completion.verification,
+        openItems: completion.openItems,
+        deliverables: completion.deliverableRefusals ?? [],
+      },
       runningJobs: jobs.filter((j) => j.status === "running").length,
       autoWake: this.deps.autoWake(),
       signals,

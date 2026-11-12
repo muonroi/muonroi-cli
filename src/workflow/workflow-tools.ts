@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, posix, relative, sep } from "node:path";
 import { dynamicTool, jsonSchema, type ToolSet } from "ai";
+import type { DeliverableReport as DeliverableGateReport } from "../orchestrator/deliverable-gate.js";
 import type { ExecutionRole } from "../orchestrator/orchestration-policy.js";
 import { canonicalize } from "../tools/write-scope.js";
 import type { TaskRequest, ToolResult } from "../types/index.js";
@@ -49,6 +50,8 @@ export interface FlowWorkflowToolOpts extends AsyncPlanReviewHost {
   runDebate?: (topic: string, abortSignal?: AbortSignal, synthesisOutputContract?: string) => Promise<string>;
   /** Host-recorded evidence of this session's finished workers, handed to the verify council. */
   verifyWorkerEvidence?: () => Promise<string>;
+  /** Host-measured deliverable facts and refusals (commits, tracked files, fidelity probe) for the completion/verify gate. */
+  deliverableReport?: () => Promise<DeliverableGateReport | null>;
 }
 
 function json(data: unknown): string {
@@ -648,16 +651,32 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
       // council (cheap: no LLM spend on an already-known failure).
       let effectivePassed = passed;
       let councilConcerns: string[] = [];
-      if (passed && depth !== "quick") {
+      // Host deliverable gate, before any council spend and at EVERY depth: the commits the goal asked
+      // for, files the workers wrote that the repository ignores or does not track, source-vs-output
+      // fidelity. The host measures these from the repository/filesystem; a model's evidence cannot
+      // satisfy them.
+      let deliverable: DeliverableGateReport | null = null;
+      if (passed) {
+        try {
+          deliverable = (await opts.deliverableReport?.()) ?? null;
+        } catch (err) {
+          console.error(`[flow] verify deliverable report unavailable, not gating on it: ${(err as Error).message}`);
+        }
+        if (deliverable?.refusals.length) effectivePassed = false;
+      }
+      const deliverableConcerns = deliverable?.refusals ?? [];
+      if (effectivePassed && depth !== "quick") {
         try {
           const diff = readImplementationDiff(cwd);
-          let hostEvidence = "";
+          let workerEvidence = "";
           try {
-            hostEvidence = (await opts.verifyWorkerEvidence?.()) ?? "";
+            workerEvidence = (await opts.verifyWorkerEvidence?.()) ?? "";
           } catch (err) {
             // The council still runs on main's evidence; a missing host block is logged, not fatal.
             console.error(`[flow] verify-council host worker evidence unavailable: ${(err as Error).message}`);
           }
+          // Deliverable facts first: the council's host-evidence cap must never crowd them out.
+          const hostEvidence = [deliverable?.evidence, workerEvidence].filter(Boolean).join("\n\n");
           const council = await runVerifyCouncil({
             cwd,
             sessionModelId,
@@ -685,10 +704,12 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
 
       abortSignal?.throwIfAborted();
       const verdictLine = effectivePassed ? "verdict: pass" : "verdict: fail";
-      const concernBlock = councilConcerns.length
-        ? `\n\n## Council concerns\n${councilConcerns.map((c) => `- ${c}`).join("\n")}`
-        : "";
-      if (input.evidence?.trim() || councilConcerns.length) {
+      const concernBlock =
+        (deliverableConcerns.length
+          ? `\n\n## Host deliverable check (unmet; measured from git and the filesystem)\n${deliverableConcerns.map((c) => `- ${c}`).join("\n")}`
+          : "") +
+        (councilConcerns.length ? `\n\n## Council concerns\n${councilConcerns.map((c) => `- ${c}`).join("\n")}` : "");
+      if (input.evidence?.trim() || councilConcerns.length || deliverableConcerns.length) {
         writeFileSync(
           planningArtifact(cwd, "VERIFY.md"),
           `${verdictLine}\n\n${input.evidence?.trim() ?? ""}${concernBlock}\n`,
@@ -713,6 +734,12 @@ export function registerFlowWorkflowTools(tools: ToolSet, opts: FlowWorkflowTool
         phase: effectivePassed ? "review" : "debug",
         passed: effectivePassed,
         councilConcerns,
+        ...(deliverableConcerns.length
+          ? {
+              deliverableRefusals: deliverableConcerns,
+              message: `Refused to record a pass: ${deliverableConcerns.join(" ")}`,
+            }
+          : {}),
         loop: verifyResult,
       });
     },

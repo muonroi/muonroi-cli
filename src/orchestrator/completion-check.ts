@@ -72,6 +72,8 @@ export interface CompletionCheck {
   openItems: string[];
   /** Not-completed items of the latest todo_write list. */
   openTodos: string[];
+  /** Unmet deliverable requirements measured by the host (deliverable-gate.ts). */
+  deliverables: string[];
   implementationVerification: RootCompletionFacts["implementationVerification"] | null;
   declaredPlanScope: string | null;
 }
@@ -87,11 +89,12 @@ export function checkCompletionClaim(
   state: Pick<WorkingContextState, "root_goal" | "root_status" | "open_items"> | null,
   facts: RootCompletionFacts | null,
   openTodos: readonly string[] = [],
+  deliverableRefusals: readonly string[] = [],
 ): CompletionCheck | null {
   const openRoot = state && state.root_goal && state.root_status === "open" ? state : null;
   const openItems = openRoot ? openRoot.open_items.filter((item) => item.trim()) : [];
   const unverified = facts && facts.implementationVerification !== "recorded_pass" ? facts : null;
-  if (!openItems.length && !unverified && !openTodos.length) return null;
+  if (!openItems.length && !unverified && !openTodos.length && !deliverableRefusals.length) return null;
   const claim = findCompletionClaim(text);
   if (!claim) return null;
   return {
@@ -99,6 +102,7 @@ export function checkCompletionClaim(
     rootGoal: openRoot?.root_goal ?? "",
     openItems,
     openTodos: [...openTodos],
+    deliverables: [...deliverableRefusals],
     implementationVerification: unverified?.implementationVerification ?? null,
     declaredPlanScope: unverified?.declaredPlanScope ?? null,
   };
@@ -120,6 +124,10 @@ export function buildCompletionFooter(check: CompletionCheck): string {
     if (check.openTodos.length > MAX_ITEMS_SHOWN)
       shown.push(`>   - … ${check.openTodos.length - MAX_ITEMS_SHOWN} more`);
     lines.push(`> The todo list still has ${check.openTodos.length} unfinished item(s):`, ...shown);
+  }
+  if (check.deliverables.length) {
+    const shown = check.deliverables.slice(0, MAX_ITEMS_SHOWN).map((item) => `>   - ${item}`);
+    lines.push(`> The host deliverable check found ${check.deliverables.length} unmet requirement(s):`, ...shown);
   }
   if (check.implementationVerification)
     lines.push(

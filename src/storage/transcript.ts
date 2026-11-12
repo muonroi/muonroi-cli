@@ -1507,6 +1507,8 @@ export interface PersistedIdealRun {
   goal: string;
   /** ISO timestamp; every delegation started at or after it belongs to the run. */
   startedAt: string;
+  /** HEAD of the repository when the run started; the base of "commits since" (orchestrator/deliverable-gate.ts). */
+  baseCommit?: string;
   /** Host autopilot state (orchestrator/ideal-autopilot.ts); absent on records written before it existed. */
   autopilot?: PersistedAutopilot;
 }
@@ -1650,7 +1652,12 @@ export function getLastIdealRun(sessionId: string): PersistedIdealRun | null {
     const autopilot = parseAutopilot(parsed.autopilot);
     if (parsed.autopilot !== undefined && !autopilot)
       logger.warn("storage", "Unreadable /ideal autopilot state — treating the autopilot as not armed", { sessionId });
-    return { goal: parsed.goal, startedAt: parsed.startedAt, ...(autopilot ? { autopilot } : {}) };
+    return {
+      goal: parsed.goal,
+      startedAt: parsed.startedAt,
+      ...(typeof parsed.baseCommit === "string" && parsed.baseCommit ? { baseCommit: parsed.baseCommit } : {}),
+      ...(autopilot ? { autopilot } : {}),
+    };
   } catch (err) {
     logger.error("storage", "Unparseable /ideal run record — treating the run as absent", {
       sessionId,
