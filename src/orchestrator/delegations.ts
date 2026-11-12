@@ -409,20 +409,26 @@ export class DelegationManager {
     if (!digest || !this.getOwnerId()) return [];
     const pending: WorkerApprovalView[] = [];
     for (const jobPath of await this.jobPaths()) {
-      await withFileLock(jobPath, async () => {
-        const record = await loadDelegation(jobPath);
-        if (
-          this.approvalControllerDigest !== digest ||
-          record.parentSessionId !== this.getOwnerId() ||
-          record.status !== "running" ||
-          record.approvalController?.digest !== digest ||
-          !(Date.parse(record.approvalController.expiresAt) > Date.now())
-        )
-          return;
-        record.approvalController.expiresAt = new Date(Date.now() + WORKER_APPROVAL_LIMITS.leaseMs).toISOString();
-        await writeRecord(jobPath, record);
-        pending.push(...pendingWorkerApprovals(record));
-      });
+      try {
+        await withFileLock(jobPath, async () => {
+          const record = await loadDelegation(jobPath);
+          if (
+            this.approvalControllerDigest !== digest ||
+            record.parentSessionId !== this.getOwnerId() ||
+            record.status !== "running" ||
+            record.approvalController?.digest !== digest ||
+            !(Date.parse(record.approvalController.expiresAt) > Date.now())
+          )
+            return;
+          record.approvalController.expiresAt = new Date(Date.now() + WORKER_APPROVAL_LIMITS.leaseMs).toISOString();
+          await writeRecord(jobPath, record);
+          pending.push(...pendingWorkerApprovals(record));
+        });
+      } catch (err) {
+        // One wedged job (e.g. a lock whose holder died) must not hide the
+        // approvals of every other job, nor reject the whole snapshot poll.
+        logger.warn("orchestrator", "Worker approval poll skipped a job", { jobPath, error: String(err) });
+      }
     }
     return pending;
   }
