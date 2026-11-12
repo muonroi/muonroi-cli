@@ -1810,6 +1810,24 @@ export class Agent {
    * says the job STARTED; this is where its real state lives.
    */
   async getBackgroundJobSnapshot(): Promise<BackgroundJobSnapshot> {
+    // The TUI polls this every 2s with no in-flight guard. One call can block for
+    // many seconds (each job lock that never frees costs a ~10.5s withFileLock
+    // timeout, and withFileLock queues same-path callers in-process), so
+    // un-coalesced polls pile up, each retaining its parsed job records. Measured
+    // by .tmp-repro: 75 calls in flight and heap +100MB after 180s. Callers share
+    // the one pending read; the next tick after it settles starts a fresh one.
+    if (!this._backgroundSnapshotInFlight) {
+      const pending = this.readBackgroundJobSnapshot().finally(() => {
+        if (this._backgroundSnapshotInFlight === pending) this._backgroundSnapshotInFlight = null;
+      });
+      this._backgroundSnapshotInFlight = pending;
+    }
+    return this._backgroundSnapshotInFlight;
+  }
+
+  private _backgroundSnapshotInFlight: Promise<BackgroundJobSnapshot> | null = null;
+
+  private async readBackgroundJobSnapshot(): Promise<BackgroundJobSnapshot> {
     const delegations: BackgroundJobSnapshot["delegations"] = {};
     try {
       for (const d of await this.delegations.list()) {
