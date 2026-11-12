@@ -26,10 +26,8 @@ export async function withFileLock<T>(filePath: string, fn: () => Promise<T>, op
   const next = new Promise<void>((r) => {
     resolveInProcess = r;
   });
-  inProcessLocks.set(
-    filePath,
-    prev.then(() => next),
-  );
+  const tail = prev.then(() => next);
+  inProcessLocks.set(filePath, tail);
 
   try {
     // Wait for our turn in-process first.
@@ -37,8 +35,9 @@ export async function withFileLock<T>(filePath: string, fn: () => Promise<T>, op
     return await acquireFileLock(filePath, fn, opts);
   } finally {
     resolveInProcess();
-    // Clean up map entry once this waiter has resolved its slot.
-    if (inProcessLocks.get(filePath) === prev.then(() => next)) {
+    // Clean up map entry once this waiter has resolved its slot — only if no later waiter
+    // chained behind us (compare the stored promise itself; a fresh `.then()` never matches).
+    if (inProcessLocks.get(filePath) === tail) {
       inProcessLocks.delete(filePath);
     }
   }

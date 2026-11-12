@@ -79,13 +79,32 @@ describe("collectDeliverableReport: commit requirement", () => {
     expect(r.refusals[0]).toMatch(/untracked: a\.md/);
   });
 
-  it("refuses ignored deliverables whether or not a commit is required", () => {
+  function repoIgnoringDocs() {
     const { cwd, base } = makeRepo();
     writeFileSync(join(cwd, ".gitignore"), "/docs\n");
     git(cwd, "add", ".gitignore");
     git(cwd, "commit", "-q", "-m", "ignore docs");
     mkdirSync(join(cwd, "docs"));
     writeFileSync(join(cwd, "docs", "guide.md"), "doc\n");
+    return { cwd, base };
+  }
+
+  it("refuses ignored deliverables when the goal asks for a commit", () => {
+    const { cwd, base } = repoIgnoringDocs();
+    const r = collectDeliverableReport({
+      cwd,
+      goalTexts: [COMMIT_GOAL],
+      baseCommit: base,
+      writtenPaths: ["docs/guide.md"],
+    });
+    expect(r.ignored).toEqual(["docs/guide.md"]);
+    expect(r.refusals.join("\n")).toMatch(/ignored by git.*docs\/guide\.md/);
+  });
+
+  it("reports but does not refuse ignored deliverables when no commit is asked for", () => {
+    // A goal like "create a local .env" legitimately writes an ignored file; refusing it
+    // would make the run impossible to close.
+    const { cwd, base } = repoIgnoringDocs();
     const r = collectDeliverableReport({
       cwd,
       goalTexts: ["Write the guide."],
@@ -93,7 +112,8 @@ describe("collectDeliverableReport: commit requirement", () => {
       writtenPaths: ["docs/guide.md"],
     });
     expect(r.ignored).toEqual(["docs/guide.md"]);
-    expect(r.refusals.join("\n")).toMatch(/ignored by git.*docs\/guide\.md/);
+    expect(r.refusals).toEqual([]);
+    expect(r.evidence).toContain("ignored by git: docs/guide.md");
   });
 
   it("allows commits present and every written deliverable tracked and clean", () => {

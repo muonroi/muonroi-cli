@@ -292,7 +292,10 @@ function addGitRefusals(report: DeliverableReport): void {
     report.refusals.push(
       `the goal asks for a commit (${JSON.stringify(commit)}) but there are 0 commits since ${report.commits.basis}. Stage the deliverables (git add -f for ignored paths) and commit them with the requested message.`,
     );
-  if (report.ignored.length)
+  // Ignored output only blocks when the goal wants it committed: an ignored file can never
+  // reach a commit (tcis run 0a0d0430e149: docs/ ignored by `.gitignore:414 /docs`). Without a
+  // commit request it may be intended (e.g. a local .env), so it stays evidence only.
+  if (commit && report.ignored.length)
     report.refusals.push(
       `deliverable(s) written by workers are ignored by git and invisible to any commit: ${list(report.ignored)}. Remove the ignore rule or force-add them, or move the output to a tracked path.`,
     );

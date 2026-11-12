@@ -104,7 +104,9 @@ describe("DelegationManager.pollApprovals survives a wedged job lock", () => {
     const b = path.join(jobsDir, "p", "ok.json");
     fs.mkdirSync(path.dirname(a), { recursive: true });
     for (const p of [a, b]) fs.writeFileSync(p, JSON.stringify({ id: path.basename(p), parentSessionId: "owner" }));
-    fs.writeFileSync(`${a}.lock`, "999999");
+    // Held by a LIVE process (this one): withFileLock reclaims locks of dead pids, so a
+    // dead-pid lock would no longer wedge. A live holder that never releases still does.
+    fs.writeFileSync(`${a}.lock`, String(process.pid));
     vi.spyOn(manager as unknown as { jobPaths(): Promise<string[]> }, "jobPaths").mockResolvedValue([a, b]);
 
     // Bound the wait: the wedged lock would otherwise cost the full 10s timeout.
