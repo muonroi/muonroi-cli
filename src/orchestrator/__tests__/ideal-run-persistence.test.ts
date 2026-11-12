@@ -105,6 +105,20 @@ describe("storage: /ideal run record", () => {
     expect(getLastIdealRun("s-a")).toBeNull();
   });
 
+  it("keeps the base commit recorded at /ideal start", () => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    db.prepare(
+      "INSERT INTO workspaces (id, scope_key, canonical_path, display_name, last_seen_at) VALUES ('w', 'scope', '/w', 'w', ?)",
+    ).run(now);
+    db.prepare(
+      "INSERT INTO sessions (id, workspace_id, model, mode, cwd_at_start, cwd_last, status, created_at, updated_at) VALUES ('s-base', 'w', 'm', 'agent', '/w', '/w', 'active', ?, ?)",
+    ).run(now, now);
+    const baseCommit = "a413be7e0000000000000000000000000000abcd";
+    expect(persistIdealRun("s-base", { goal: "g", startedAt: now, baseCommit })).toBe(true);
+    expect(getLastIdealRun("s-base")).toEqual({ goal: "g", startedAt: now, baseCommit });
+  });
+
   it("an unreadable row is logged and treated as no run; a write to an unknown session reports failure", () => {
     const db = getDatabase();
     const now = new Date().toISOString();

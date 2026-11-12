@@ -76,7 +76,12 @@ import {
   type WriterLike,
   workerCommandCapabilityError,
 } from "./worker-dispatch-guard.js";
-import { failureRecoveryGuidance, isMutationTool, workerFailureRecovery } from "./worker-failure-recovery.js";
+import {
+  attemptedWritePaths,
+  failureRecoveryGuidance,
+  isMutationTool,
+  workerFailureRecovery,
+} from "./worker-failure-recovery.js";
 
 const { adjectives: ID_ADJECTIVES, colors: ID_COLORS, animals: ID_ANIMALS } = DELEGATION_ID_WORDS;
 
@@ -1051,6 +1056,23 @@ export class DelegationManager {
       );
     }
     return blocks.join("\n");
+  }
+
+  /**
+   * Targets of the captured edit/write calls of this session's workers that started at or after
+   * `sinceIso` (all of them when omitted): the files the run ATTEMPTED to write, newest last. The
+   * deliverable gate checks which of them exist and whether git tracks them (deliverable-gate.ts).
+   */
+  async writtenPaths(sinceIso?: string | null): Promise<string[]> {
+    const perJob: Array<{ startedAt: string; paths: string[] }> = [];
+    for (const jobPath of await this.jobPaths()) {
+      const record = await this.reconcile(jobPath);
+      if (!record || !this.canAccess(record) || record.kind === "council" || record.planReview) continue;
+      if (sinceIso && record.startedAt < sinceIso) continue;
+      const paths = attemptedWritePaths(await readMutationCaptures(jobPath, record), WRITTEN_PATHS_PER_JOB) ?? [];
+      perJob.push({ startedAt: record.startedAt, paths });
+    }
+    return perJob.sort((a, b) => a.startedAt.localeCompare(b.startedAt)).flatMap((job) => job.paths);
   }
 
   async ledgerSnapshot(): Promise<DelegationLedgerEntry[]> {
@@ -2379,6 +2401,7 @@ export function pageResultText(id: string, output: string, offset = 0, maxChars?
 }
 
 const VERIFY_EVIDENCE_JOBS = 12;
+const WRITTEN_PATHS_PER_JOB = 200;
 const VERIFY_EVIDENCE_EXCERPT = 1200;
 
 /** The worker's own answer: after the header separator, before the host proof block. */

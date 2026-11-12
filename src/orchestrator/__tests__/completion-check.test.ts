@@ -88,6 +88,16 @@ describe("checkCompletionClaim", () => {
     );
   });
 
+  it("flags a done claim while the host deliverable check has unmet requirements, naming them", () => {
+    const refusal = "0 commits since base commit a413be7e; untracked: docs/a.md";
+    const check = checkCompletionClaim("The task is complete.", null, null, [], [refusal]);
+    expect(check?.deliverables).toEqual([refusal]);
+    const footer = buildCompletionFooter(check!);
+    expect(footer).toContain("host deliverable check found 1 unmet requirement(s)");
+    expect(footer).toContain("docs/a.md");
+    expect(checkCompletionClaim("Wave 2 landed.", null, null, [], [refusal])).toBeNull();
+  });
+
   it("stays silent when the ledger agrees or the text claims nothing", () => {
     expect(checkCompletionClaim("All done.", { ...openRoot, open_items: [] }, null)).toBeNull();
     expect(checkCompletionClaim("All done.", { ...openRoot, root_status: "complete" }, null)).toBeNull();

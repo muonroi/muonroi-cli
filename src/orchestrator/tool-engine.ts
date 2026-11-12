@@ -187,7 +187,12 @@ import { consumeProactiveCompact, getCompactionFocus } from "./compact-request.j
 import { relaxCompactionSettings } from "./compaction";
 import { evaluateCompactionConsult } from "./compaction-consult.js";
 import { takeProposerStallNotice } from "./compaction-stall-notice.js";
-import { buildCompletionFooter, checkCompletionClaim, latestOpenTodos } from "./completion-check.js";
+import {
+  buildCompletionFooter,
+  checkCompletionClaim,
+  findCompletionClaim,
+  latestOpenTodos,
+} from "./completion-check.js";
 import { completionScopeGuidance, ownedCompletionScope } from "./completion-scope.js";
 import { readContextPreservation } from "./context-preservation.js";
 import { buildConvergenceMirror } from "./convergence-mirror.js";
@@ -993,6 +998,8 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
       // before accepting root_status="complete" (session 4edc02516a92 seq 680 claimed done; its plan dir has no VERIFY.md).
       taskContext.completionFacts = () =>
         ownedCompletionScope(deps.bash.getCwd(), deps.session?.id, deps.executionRole, currentTurnFlowUsed);
+      // Host-measured deliverable requirements (commits the goal asked for, tracked files, fidelity probe).
+      taskContext.deliverableRefusals = async () => (await deps.deliverableReport?.())?.refusals ?? [];
       // Decide whether a fired stall watchdog should re-prompt (re-issue the
       // same request) instead of falling through to rescue/error. Returns the
       // backoff ms to wait before re-issuing, or null to NOT re-prompt. Reads
@@ -1148,6 +1155,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
           startPlanReview: deps.startPlanReview,
           readPlanReview: deps.readPlanReview,
           verifyWorkerEvidence: deps.verifyWorkerEvidence,
+          deliverableReport: deps.deliverableReport,
           listDelegations: () => deps.listDelegations(),
           killDelegation: (id) => deps.killDelegation(id),
           modelId: turnModelId,
@@ -4625,6 +4633,11 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                 const _history = [...(deps.messages as unknown[]), ...(scrubbed as unknown[])];
                 const _recorded = recordVerifications(deps.session?.id ?? "_anon", outcomesFromMessages(_history));
                 const _vClaims = checkVerificationClaims(assistantText, _recorded);
+                // The repository is read only when the answer actually claims completion.
+                const _deliverables =
+                  deps.executionRole === "orchestrator" && findCompletionClaim(assistantText)
+                    ? await taskContext.deliverableRefusals?.()
+                    : undefined;
                 const _completion =
                   deps.executionRole === "orchestrator"
                     ? checkCompletionClaim(
@@ -4632,6 +4645,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                         taskContext.working.snapshot(),
                         taskContext.completionFacts?.() ?? null,
                         latestOpenTodos(_history),
+                        _deliverables ?? [],
                       )
                     : null;
                 const _har = (globalThis as Record<string, unknown>).__muonroiAgentRuntime as
@@ -4670,7 +4684,7 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
                     t: "event",
                     kind: "toast",
                     level: "warn",
-                    text: `completion: answer says done but ${_completion.openItems.length + _completion.openTodos.length} item(s) remain open${_completion.implementationVerification ? ` and FLOW verification is ${_completion.implementationVerification}` : ""}`,
+                    text: `completion: answer says done but ${_completion.openItems.length + _completion.openTodos.length + _completion.deliverables.length} item(s) remain open${_completion.implementationVerification ? ` and FLOW verification is ${_completion.implementationVerification}` : ""}`,
                   });
                   if (deps.session)
                     logInteraction(deps.session.id, "completion_check", {

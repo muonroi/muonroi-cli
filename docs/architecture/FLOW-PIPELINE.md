@@ -152,3 +152,35 @@ count and clears the stop); a restart alone never starts a turn — only a human
 (`start` | `continue` | `wait` | `stop`, with `reason` on stop) and, for the terminal stop, `run-finished`
 (`complete` → `outcome=approved`, `error` → `error`, anything else → `halted`; `reason` = the stop code).
 E2E: `tests/harness/ideal-autopilot.spec.ts`.
+
+## Host deliverable gate and fidelity probe
+
+Every other gate checks the PROCESS; this one checks the DELIVERABLE against the request, from
+git and the filesystem, not from any model's claim. Evidence: session 26516fe0c62e passed verify
+with 274 literal `\_` and ~12 `&lt;`/`&gt;` inside code spans (docs conversion, no source-vs-output
+comparison anywhere); run 0a0d0430e149's prompt said "Commit message ..." and it produced 0 commits
+(deliverables untracked, `docs/` gitignored) yet ended in a final answer.
+
+`Agent.deliverableReport()` (`orchestrator.ts`) builds the input and calls `collectDeliverableReport`
+(`src/orchestrator/deliverable-gate.ts`):
+
+- Goal texts = the `/ideal` run goal + the pinned root goal + ledger constraints/open items.
+  `goalRequiresCommit` finds a non-negated commit request ("do not commit", "không commit" ignored).
+- Base = `baseCommit` (HEAD recorded in the `__ideal_run` record at `/ideal start`), else the run /
+  session start time. Commits are counted `base..HEAD`.
+- Written paths = targets of the workers' captured `edit_file`/`write_file`/`apply_patch` calls
+  (`DelegationManager.writtenPaths`), plus untracked files newer than the run start (shell-created).
+- Refusals, each naming the exact paths and the fix: commit asked for but 0 commits since base;
+  written file ignored by git (always); commit asked for and written files untracked or with
+  uncommitted edits. Not a git repo: nothing is measured, nothing refused.
+- Fidelity probe (`src/workflow/fidelity-probe.ts`): runs when the goal has explicit conversion
+  wording AND names an existing source file (`.html/.xml/.md/.txt`) AND workers wrote `.md/.mdx/.txt`
+  output. 25 evenly spaced source passages (markup stripped, entities decoded, markdown folded) must
+  appear in the normalized output (>= 50 %); literal `\_`, `\*`, `&lt;`, `&gt;`, `&amp;` beyond the
+  source's own count fail. 5 MB caps; unreadable/oversized input = skipped, never a refusal.
+
+Where it bites: `flow_verify` (any depth; a pass is recorded as `verdict: fail` with the refusals
+in `VERIFY.md`, before any council spend), `context_load(root_status="complete")`
+(`WorkingContext.update`), the completion-claim footer (`completion-check.ts`), and the autopilot
+(`idealRootCompletion` keeps the run open and states the unmet check in the continuation prompt).
+When nothing is refused the facts still head the verify council's "Host-recorded worker evidence".

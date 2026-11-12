@@ -95,6 +95,7 @@ const OFF = new Set(["0", "false", "off", "no"]);
 
 /** A limit for display: an unlimited one (0 in settings/env) reads as the infinity sign. */
 const lim = (n: number): string => (Number.isFinite(n) ? String(n) : "∞");
+const clip = (text: string, max: number): string => (text.length <= max ? text : `${text.slice(0, max)}…`);
 
 /**
  * Env knobs (each overrides the matching `idealAutopilot.*` setting):
@@ -198,7 +199,7 @@ export interface AutopilotObservation {
   /** Host-gated: `root_status=complete` on the working ledger AND (when a native plan exists) a recorded verification pass. */
   rootComplete: boolean;
   /** Facts echoed to the model in the continuation message. */
-  facts: { verification: string | null; openItems: number };
+  facts: { verification: string | null; openItems: number; deliverables?: string[] };
   runningJobs: number;
   /** Whether a finished worker wakes the model by itself (UI auto-wake). */
   autoWake: boolean;
@@ -272,6 +273,9 @@ function continuation(state: PersistedAutopilot, limits: AutopilotLimits, obs: A
     "root goal not recorded complete",
     obs.facts.verification ? `FLOW verification: ${obs.facts.verification}` : null,
     obs.facts.openItems > 0 ? `${obs.facts.openItems} open item(s)` : null,
+    obs.facts.deliverables?.length
+      ? `the host deliverable check is unmet: ${clip(obs.facts.deliverables.join(" | "), 500)}`
+      : null,
     (state.transientErrorStreak ?? 0) > 0
       ? `the previous turn was ended by the turn watchdog (no output for the idle window); resume from the last completed step (retry ${state.transientErrorStreak}/${MAX_TRANSIENT_ERROR_RETRIES})`
       : null,

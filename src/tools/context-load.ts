@@ -120,7 +120,10 @@ export function registerContextLoader(
         }
         if (action !== "update" && action !== "reset")
           return JSON.stringify({ error: "working_set action must be inspect, update or reset" });
-        return JSON.stringify(context.working.update(input, context.completionFacts));
+        // Measured only when main asks to close the root goal: it reads the repository and the workers' writes.
+        const deliverableRefusals =
+          input?.root_status === "complete" ? ((await context.deliverableRefusals?.()) ?? []) : [];
+        return JSON.stringify(context.working.update(input, context.completionFacts, deliverableRefusals));
       }
       if (topic === "stage") {
         const misplaced = WORKING_SET_ONLY_FIELDS.filter((field) => input?.[field] !== undefined);

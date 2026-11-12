@@ -99,6 +99,8 @@ export interface TurnRunnerDepsBase {
   readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
   /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
   verifyWorkerEvidence?: () => Promise<string>;
+  /** Host-measured deliverable facts and refusals (commits, tracked files, fidelity probe) for the completion/verify gate. */
+  deliverableReport?: () => Promise<import("./deliverable-gate.js").DeliverableReport | null>;
   listDelegations(): Promise<ToolResult>;
   killDelegation(id: string): Promise<ToolResult>;
 

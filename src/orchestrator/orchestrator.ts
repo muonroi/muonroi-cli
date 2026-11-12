@@ -213,6 +213,7 @@ import {
   isDelegationLedgerMessage,
 } from "./delegation-ledger.js";
 import { DelegationManager, withoutInlineResults } from "./delegations";
+import { collectDeliverableReport, type DeliverableReport, readHeadCommit } from "./deliverable-gate.js";
 import { loadFlowResumeDigest } from "./flow-resume.js";
 import { buildHelperReceipt } from "./helper-receipt.js";
 import { type AutopilotDecision, resolveAutopilotConfig } from "./ideal-autopilot.js";
@@ -432,6 +433,7 @@ function createTools(
     readPlanReview?: import("../workflow/async-plan-review.js").AsyncPlanReviewHost["readPlanReview"];
     /** Host-recorded evidence of the session's finished workers, for the FLOW verify council. */
     verifyWorkerEvidence?: () => Promise<string>;
+    deliverableReport?: () => Promise<DeliverableReport | null>;
     planReviewBudget?: PlanReviewBudget;
     listDelegations?: () => Promise<ToolResult>;
     killDelegation?: (id: string) => Promise<ToolResult>;
@@ -454,6 +456,7 @@ function createTools(
     startPlanReview: _opts?.startPlanReview,
     readPlanReview: _opts?.readPlanReview,
     verifyWorkerEvidence: _opts?.verifyWorkerEvidence,
+    deliverableReport: _opts?.deliverableReport,
     planReviewBudget: _opts?.planReviewBudget,
     listDelegations: _opts?.listDelegations,
     killDelegation: _opts?.killDelegation,
@@ -1914,9 +1917,14 @@ export class Agent {
    * `flow_verify` pass — the same two facts the ledger's own completion gate
    * required when the claim was accepted (working-context.ts).
    */
-  private async idealRootCompletion(): Promise<{ complete: boolean; verification: string | null; openItems: number }> {
+  private async idealRootCompletion(): Promise<{
+    complete: boolean;
+    verification: string | null;
+    openItems: number;
+    deliverableRefusals: string[];
+  }> {
     const sessionId = this.session?.id;
-    if (!sessionId) return { complete: false, verification: null, openItems: 0 };
+    if (!sessionId) return { complete: false, verification: null, openItems: 0, deliverableRefusals: [] };
     const [{ WorkingContext }, { ownedCompletionScope }] = await Promise.all([
       import("./working-context.js"),
       import("./completion-scope.js"),
@@ -1926,11 +1934,54 @@ export class Agent {
     const facts = ownedCompletionScope(cwd, sessionId, "orchestrator", false);
     const verification = facts?.implementationVerification ?? null;
     const rootClosed = ledger.root_goal.trim() !== "" && ledger.root_status === "complete";
+    // A closed ledger is not enough: the deliverable itself (commits, tracked files) is measured from git.
+    const deliverableRefusals = rootClosed ? ((await this.deliverableReport())?.refusals ?? []) : [];
     return {
-      complete: rootClosed && (verification === null || verification === "recorded_pass"),
+      complete:
+        rootClosed && (verification === null || verification === "recorded_pass") && !deliverableRefusals.length,
       verification,
       openItems: ledger.root_status === "open" ? ledger.open_items.filter((i) => i.trim()).length : 0,
+      deliverableRefusals,
     };
+  }
+
+  /**
+   * Host-measured facts about the run's deliverable (commits since the run's base, untracked/ignored
+   * files the workers wrote, a source-vs-output fidelity probe for conversion goals) and the refusals
+   * that follow. Null when nothing can be measured or the session has no goal text yet. Never throws:
+   * a measurement failure is logged and the gate stays open rather than blocking on a broken probe.
+   */
+  async deliverableReport(): Promise<DeliverableReport | null> {
+    try {
+      const sessionId = this.session?.id;
+      if (!sessionId) return null;
+      const { WorkingContext } = await import("./working-context.js");
+      const cwd = this.bash.getCwd();
+      let run: IdealCoordinationRun | null = null;
+      try {
+        run = this.readIdealRun();
+      } catch (err) {
+        logger.warn("orchestrator", "deliverable gate: /ideal run record unreadable", { error: String(err) });
+      }
+      const ledger = new WorkingContext(sessionId, cwd, this.messages).snapshot();
+      const goalTexts = [run?.goal, ledger.root_goal, ...ledger.constraints, ...ledger.open_items].filter(
+        (t): t is string => typeof t === "string" && t.trim() !== "",
+      );
+      if (!goalTexts.length) return null;
+      const sinceIso = run?.startedAt ?? this.session?.createdAt?.toISOString() ?? null;
+      return collectDeliverableReport({
+        cwd,
+        goalTexts,
+        baseCommit: run?.baseCommit ?? null,
+        sinceIso,
+        writtenPaths: await this.delegations.writtenPaths(sinceIso),
+      });
+    } catch (err) {
+      logger.warn("orchestrator", "deliverable gate: measurement failed; not refusing on it", {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   /**
@@ -4011,9 +4062,11 @@ export class Agent {
       const goal = payload.idea?.trim();
       if (payload.subcommand === "start") {
         // Arming persists the record (with the autopilot state) in one write.
+        const startHead = readHeadCommit(this.bash.getCwd());
         const run = await this.idealAutopilot.arm({
           goal: goal || "(the current conversation's goal)",
           startedAt: new Date().toISOString(),
+          ...(startHead ? { baseCommit: startHead } : {}),
         });
         let saved = true;
         try {
@@ -4911,6 +4964,7 @@ export class Agent {
           startPlanReview: (input, signal) => self.startPlanReview(input, signal),
           readPlanReview: (input) => self.readPlanReview(input),
           verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
+          deliverableReport: () => self.deliverableReport(),
         });
         return filterExecutionTools(native, native, self.executionRole);
       },
@@ -6100,6 +6154,7 @@ export class Agent {
       startPlanReview: (input, signal) => self.startPlanReview(input, signal),
       readPlanReview: (input) => self.readPlanReview(input),
       verifyWorkerEvidence: () => self.delegations.verifyWorkerEvidence(),
+      deliverableReport: () => self.deliverableReport(),
       listDelegations: () => self.listDelegations(),
       killDelegation: (id) => self.killDelegation(id),
       drainSteerMessages: () => {

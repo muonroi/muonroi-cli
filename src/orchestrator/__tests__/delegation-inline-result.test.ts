@@ -240,6 +240,28 @@ describe("completion notice carries the saved result", () => {
     expect(stored(older).deliveredVersion).toBeUndefined();
   });
 
+  it("writtenPaths lists the targets of workers' captured edit/write calls since the run start, never councils", async () => {
+    const early = writeJob("early-worker", { startedAt: "2026-01-01T00:00:00.000Z" });
+    await saveDelegationToolResult(early, "e1", "write_file", { file_path: "old/out.md" }, "ok");
+    await completeDelegation(early, "done");
+    const worker = writeJob("conv-worker", { startedAt: "2026-06-01T00:00:00.000Z" });
+    await saveDelegationToolResult(worker, "w1", "write_file", { file_path: "docs/a.md" }, "ok");
+    await saveDelegationToolResult(worker, "w2", "edit_file", { path: "docs/b.md" }, "ok");
+    await saveDelegationToolResult(worker, "w3", "read_file", { file_path: "docs/read-only.md" }, "ok");
+    await saveDelegationToolResult(worker, "w4", "bash", { command: "echo hi > docs/c.md" }, "ok");
+    await completeDelegation(worker, "done");
+    const council = writeJob("plan-council", {
+      agent: "council",
+      kind: "council",
+      startedAt: "2026-06-01T00:00:00.000Z",
+    });
+    await saveDelegationToolResult(council, "c1", "write_file", { file_path: "docs/council.md" }, "ok");
+    await completeDelegation(council, "COUNCIL-BODY");
+
+    expect(await manager.writtenPaths("2026-03-01T00:00:00.000Z")).toEqual(["docs/a.md", "docs/b.md"]);
+    expect(await manager.writtenPaths()).toEqual(["old/out.md", "docs/a.md", "docs/b.md"]);
+  });
+
   it("leaves a result without host proof untouched", () => {
     const record = { id: "plain" } as unknown as StoredDelegation;
     expect(resultModelView(record, "plain body")).toBe("plain body");
