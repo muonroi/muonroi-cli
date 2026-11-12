@@ -99,11 +99,13 @@ export function plannedRateLimitAttempts(budgetMs: number): number {
 /**
  * "Out of balance / quota" phrasings. Several providers answer an empty wallet
  * with HTTP 429 (measured: z.ai "Insufficient balance or no resource package.
- * Please recharge."; OpenAI "You exceeded your current quota"). That is not a
+ * Please recharge."; OpenAI "You exceeded your current quota"; StepFun step plan
+ * "you have no left credit for step plan", which cost /ideal run 4bd053dbd1a0 seven
+ * worker retries and four leader retries before the autopilot stopped). That is not a
  * rate window — no amount of waiting refills it.
  */
 export function isQuotaExhaustion(text: string): boolean {
-  return /insufficient[_ ](balance|quota|credit|funds)|out of (balance|credit)|recharge|no resource package|exceeded your current quota|quota[_ ]exceeded|billing|payment required/i.test(
+  return /insufficient[_ ](balance|quota|credit|funds)|out of (balance|credit)|no (left|remaining) (credit|balance|quota)|no (credit|balance|quota) (left|remaining)|recharge|no resource package|exceeded your current quota|quota[_ ]exceeded|billing|payment required/i.test(
     text,
   );
 }
