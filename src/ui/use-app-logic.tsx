@@ -7857,6 +7857,12 @@ export function useAppLogic(props: AppLogicProps) {
       if (showMcpModalRef.current && modalOwnsKeyboard(modalOwnerNow, "mcp-modal")) {
         const row = mcpRows[mcpModalIndex];
         if (isEscapeKey(key)) {
+          // Write the refs NOW, not in the post-commit effect: keys queued behind this Escape in
+          // the same stdin chunk run against this closure before React re-renders, and would still
+          // see the modal as open — typed text lands in the search box and Enter toggles the
+          // highlighted saved server (tests/harness/mcp-oauth.spec.ts, CI runs 43173666474 and 43000599014).
+          showMcpEditorRef.current = false;
+          showMcpModalRef.current = false;
           setShowMcpEditor(false);
           setShowMcpModal(false);
           setMcpSearchQuery("");
