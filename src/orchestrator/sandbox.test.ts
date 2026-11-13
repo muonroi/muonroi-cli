@@ -67,8 +67,12 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
       persistSession: false,
       sandboxMode: "shuru", // accepted for back-compat but ignored
     });
-    const modelId = agent.getModel(); // Catalog-selected enabled model for this root's provider.
-    expect(getModelInfo(modelId)).toBeDefined();
+    const mainModel = agent.getModel(); // Catalog-selected enabled model for this root's provider.
+    expect(getModelInfo(mainModel)).toBeDefined();
+    // A worker must cost less than main (workerCostCeiling): dispatch one the inventory allows.
+    const { workerModelInventory } = await import("./orchestration-policy.js");
+    const provider = getModelInfo(mainModel)!.provider as import("../providers/types.js").ProviderId;
+    const modelId = String((await workerModelInventory(provider, mainModel))[0]!.modelId);
     const startMock = vi.fn(async () => ({ success: true, output: "ok" }));
     (agent as unknown as { delegations: { start: typeof startMock } }).delegations.start = startMock;
 
@@ -111,8 +115,12 @@ describe("Agent sandbox mode", { timeout: 30_000 }, () => {
       sandboxMode: "shuru",
       sandboxSettings: settings,
     });
-    const modelId = agent.getModel(); // Catalog-selected enabled model for this root's provider.
-    expect(getModelInfo(modelId)).toBeDefined();
+    const mainModel = agent.getModel(); // Catalog-selected enabled model for this root's provider.
+    expect(getModelInfo(mainModel)).toBeDefined();
+    // A worker must cost less than main (workerCostCeiling): dispatch one the inventory allows.
+    const { workerModelInventory } = await import("./orchestration-policy.js");
+    const provider = getModelInfo(mainModel)!.provider as import("../providers/types.js").ProviderId;
+    const modelId = String((await workerModelInventory(provider, mainModel))[0]!.modelId);
     const startMock = vi.fn(async () => ({ success: true, output: "ok" }));
     (agent as unknown as { delegations: { start: typeof startMock } }).delegations.start = startMock;
 

@@ -1138,12 +1138,13 @@ export async function* executeToolEngine(args: ToolEngineArgs): AsyncGenerator<S
         // task/delegate modelId enum = the live worker inventory (stable within a
         // session, so the tool schema stays cache-stable across steps).
         const workerModelIds =
-          deps.executionRole === "orchestrator" ? await liveWorkerModelIds(deps.providerId) : undefined;
+          deps.executionRole === "orchestrator" ? await liveWorkerModelIds(deps.providerId, deps.modelId) : undefined;
         const baseToolsRaw = createBuiltinTools(deps.bash, deps.mode, {
           planReviewBudget,
           executionRole: deps.executionRole,
           credentialedProvider: deps.providerId,
           workerModelIds,
+          orchestratorModelId: deps.modelId,
           taskContext,
           runTask: (request, abortSignal) => deps.runTask(request, combineAbortSignals(signal, abortSignal)),
           runDelegation: (request, abortSignal) =>

@@ -68,15 +68,73 @@ export async function configuredWorkerProviders(currentProvider?: ProviderId): P
   return providers;
 }
 
-export async function workerModelInventory(currentProvider?: ProviderId): Promise<Array<Record<string, unknown>>> {
+/**
+ * A worker must cost less than the orchestrator that dispatches it: a lower catalog tier and
+ * no higher input or output price. In the 2026-11 delegation records 227 of 375 explicit-model
+ * workers dispatched by a step-5-preview (premium) orchestrator ran step-5-preview itself: the
+ * explicit modelId required since b014c9b9 bypasses resolveModelForTask's parentTier ceiling.
+ * When no candidate qualifies (a fast orchestrator, a premium-only setup) the orchestrator's own
+ * model is the only worker allowed, never one above it. undefined = no ceiling, because the
+ * orchestrator model is not in the catalog and so has no tier or price to compare against.
+ */
+export function workerCostCeiling(
+  orchestratorModelId: string | undefined,
+  candidates: readonly ModelInfo[],
+): ((model: ModelInfo) => boolean) | undefined {
+  if (!orchestratorModelId) return undefined;
+  const parent = getModelInfo(orchestratorModelId);
+  if (!parent?.tier) {
+    logger.warn("orchestrator", "Worker cost ceiling skipped: orchestrator model has no catalog tier", {
+      orchestratorModelId,
+    });
+    return undefined;
+  }
+  const cheaper = (m: ModelInfo) =>
+    tierRank[m.tier ?? "fast"] < tierRank[parent.tier!] &&
+    m.inputPrice <= parent.inputPrice &&
+    m.outputPrice <= parent.outputPrice;
+  if (candidates.some(cheaper)) return cheaper;
+  return (m) => m.id === parent.id;
+}
+
+async function eligibleWorkerModels(currentProvider?: ProviderId, orchestratorModelId?: string): Promise<ModelInfo[]> {
   const providers = await configuredWorkerProviders(currentProvider);
-  return MODELS.filter(
+  const candidates = MODELS.filter(
     (row) =>
       row.provider &&
       providers.has(row.provider as ProviderId) &&
       !isModelDisabled(row.id) &&
       isWorkerModelEligible(row),
-  ).map((row) => ({
+  );
+  const ceiling = workerCostCeiling(orchestratorModelId, candidates);
+  return ceiling ? candidates.filter(ceiling) : candidates;
+}
+
+/**
+ * The worker model when the HOST dispatches on main's behalf and no orchestrator chose one:
+ * the highest-tier model under workerCostCeiling on main's own provider, cheapest on a tie.
+ * The plan revalidation verifier had no modelId and inherited main's model: all 23 such jobs
+ * in the 2026-11 delegation records ran step-5-preview (premium). Main's provider only, because
+ * the host hands main's credential to the worker (StartDelegationOptions.workerApiKey).
+ */
+export async function hostWorkerModel(orchestratorModelId: string): Promise<string> {
+  const provider = getModelInfo(orchestratorModelId)?.provider as ProviderId | undefined;
+  if (!provider) return orchestratorModelId;
+  const allowed = (await eligibleWorkerModels(provider, orchestratorModelId)).filter((m) => m.provider === provider);
+  allowed.sort(
+    (a, b) =>
+      tierRank[b.tier ?? "fast"] - tierRank[a.tier ?? "fast"] ||
+      a.outputPrice - b.outputPrice ||
+      a.inputPrice - b.inputPrice,
+  );
+  return allowed[0]?.id ?? orchestratorModelId;
+}
+
+export async function workerModelInventory(
+  currentProvider?: ProviderId,
+  orchestratorModelId?: string,
+): Promise<Array<Record<string, unknown>>> {
+  return (await eligibleWorkerModels(currentProvider, orchestratorModelId)).map((row) => ({
     modelId: row.id,
     provider: row.provider,
     name: row.name,
@@ -101,9 +159,12 @@ export async function workerModelInventory(currentProvider?: ProviderId): Promis
  * schema then stays a free string and validateWorkerSelection still refuses
  * an ineligible id at dispatch.
  */
-export async function liveWorkerModelIds(currentProvider?: ProviderId): Promise<string[] | undefined> {
+export async function liveWorkerModelIds(
+  currentProvider?: ProviderId,
+  orchestratorModelId?: string,
+): Promise<string[] | undefined> {
   try {
-    const ids = (await workerModelInventory(currentProvider)).map((row) => String(row.modelId));
+    const ids = (await workerModelInventory(currentProvider, orchestratorModelId)).map((row) => String(row.modelId));
     return ids.length ? ids : undefined;
   } catch (err) {
     logger.warn("orchestrator", "Worker model inventory unavailable for the modelId schema", {
@@ -128,6 +189,7 @@ export function workerModelIdSchema(ids?: readonly string[]): Record<string, unk
 export async function validateWorkerSelection(
   request: TaskRequest,
   currentProvider?: ProviderId,
+  orchestratorModelId?: string,
 ): Promise<TaskRequest> {
   const grantError = workerMcpGrantError(request) ?? workerWriteScopeRequiredError(request);
   if (grantError) throw new Error(grantError);
@@ -143,6 +205,12 @@ export async function validateWorkerSelection(
   if (!providers.has(model.provider as ProviderId)) {
     throw new Error(
       `worker_provider_unconfigured: authenticate provider "${model.provider}" before selecting "${model.id}".`,
+    );
+  }
+  const allowed = await eligibleWorkerModels(currentProvider, orchestratorModelId);
+  if (!allowed.some((row) => row.id === model.id)) {
+    throw new Error(
+      `worker_model_above_orchestrator: "${model.id}" (${model.tier ?? "no tier"}) does not cost less than the orchestrator model "${orchestratorModelId}". No worker was started. Choose one of: ${allowed.map((row) => `${row.id} (${row.tier})`).join(", ")}.`,
     );
   }
   if (

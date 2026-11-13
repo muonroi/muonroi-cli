@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { asSchema } from "ai";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { registerTestProviderFactories } from "../__test-helpers__/catalog-fixtures.js";
-import { loadCatalog, MODELS } from "../models/registry.js";
+import { getModelInfo, loadCatalog, MODELS } from "../models/registry.js";
 import { getProviderCapabilities } from "../providers/capabilities.js";
 import * as keychain from "../providers/keychain.js";
 import { buildTurnProviderOptions, resolveModelRuntime } from "../providers/runtime.js";
@@ -12,7 +12,14 @@ import type { ProviderId } from "../providers/types.js";
 import { BashTool } from "../tools/bash.js";
 import { createBuiltinTools } from "../tools/registry.js";
 import * as settings from "../utils/settings.js";
-import { selectOrchestratorModel, validateWorkerSelection } from "./orchestration-policy.js";
+import {
+  hostWorkerModel,
+  isWorkerModelEligible,
+  selectOrchestratorModel,
+  validateWorkerSelection,
+  workerCostCeiling,
+  workerModelInventory,
+} from "./orchestration-policy.js";
 import { Agent } from "./orchestrator.js";
 
 beforeAll(async () => {
@@ -193,6 +200,60 @@ describe("orchestrator runtime integration", () => {
     await expect(
       validateWorkerSelection({ ...request, modelId: chosen.id }, chosen.provider as ProviderId),
     ).rejects.toThrow("worker_model_unavailable");
+  });
+
+  it("workers cost less than the orchestrator: lower tier, no higher price, else only main's own model", async () => {
+    vi.spyOn(settings, "isModelDisabled").mockReturnValue(false);
+    vi.spyOn(settings, "isProviderDisabled").mockReturnValue(false);
+    vi.spyOn(keychain, "getConfiguredProviders").mockResolvedValue([]);
+    const rank = { fast: 0, balanced: 1, premium: 2 } as const;
+    const eligible = MODELS.filter((row) => row.provider && row.tier && isWorkerModelEligible(row));
+    const cheaperThan = (parent: (typeof MODELS)[number]) =>
+      eligible.filter(
+        (row) =>
+          row.provider === parent.provider &&
+          rank[row.tier!] < rank[parent.tier!] &&
+          row.inputPrice <= parent.inputPrice &&
+          row.outputPrice <= parent.outputPrice,
+      );
+    // A premium orchestrator whose provider also serves a cheaper lower-tier model.
+    const premium = eligible.find((row) => row.tier === "premium" && cheaperThan(row).length > 0)!;
+    expect(premium).toBeDefined();
+    const provider = premium.provider as ProviderId;
+    const cheap = cheaperThan(premium)[0]!;
+    const request = { agent: "general", description: "Bounded work", prompt: "Inspect assigned scope", writeScope: [] };
+
+    const listed = (await workerModelInventory(provider, premium.id)).map((row) => String(row.modelId));
+    expect(listed).toContain(cheap.id);
+    expect(listed).not.toContain(premium.id);
+    await expect(validateWorkerSelection({ ...request, modelId: premium.id }, provider, premium.id)).rejects.toThrow(
+      "worker_model_above_orchestrator",
+    );
+    expect((await validateWorkerSelection({ ...request, modelId: cheap.id }, provider, premium.id)).modelId).toBe(
+      cheap.id,
+    );
+
+    // Nothing cheaper than a fast orchestrator: only its own model, never one above it.
+    const fast = eligible.find((row) => row.provider === provider && row.tier === "fast");
+    if (fast) {
+      expect((await workerModelInventory(provider, fast.id)).map((row) => String(row.modelId))).toEqual([fast.id]);
+      await expect(validateWorkerSelection({ ...request, modelId: premium.id }, provider, fast.id)).rejects.toThrow(
+        "worker_model_above_orchestrator",
+      );
+    }
+
+    // A pricier lower-tier model is refused: cheaper means price too, not tier alone.
+    const pricey = { ...cheap, id: "pricey-fixture", outputPrice: premium.outputPrice + 1 };
+    expect(workerCostCeiling(premium.id, [cheap, pricey])!(pricey)).toBe(false);
+    // Unknown orchestrator model: no catalog tier or price to compare, so no ceiling.
+    expect(workerCostCeiling("unresolvable-fixture", eligible)).toBeUndefined();
+
+    // Host-dispatched verifier (plan revalidation): best tier under the ceiling on main's provider.
+    const hostPick = getModelInfo(await hostWorkerModel(premium.id))!;
+    expect(hostPick.provider).toBe(provider);
+    expect(rank[hostPick.tier!]).toBe(Math.max(...cheaperThan(premium).map((row) => rank[row.tier!])));
+    if (fast) expect(await hostWorkerModel(fast.id)).toBe(fast.id);
+    expect(await hostWorkerModel("unresolvable-fixture")).toBe("unresolvable-fixture");
   });
 
   it("native root schemas expose explicit dispatch and forward model/effort/grants in agent and ask modes", async () => {

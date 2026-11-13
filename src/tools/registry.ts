@@ -95,6 +95,8 @@ interface ToolRegistryOpts {
   credentialedProvider?: import("../providers/types.js").ProviderId;
   /** Live worker inventory ids (workerModelIds); task/delegate modelId becomes this enum. */
   workerModelIds?: readonly string[];
+  /** Orchestrator model; worker_models lists only models that cost less (workerCostCeiling). */
+  orchestratorModelId?: string;
   taskContext?: TaskContext;
   runTask?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
   runDelegation?: (request: TaskRequest, abortSignal?: AbortSignal) => Promise<ToolResult>;
@@ -2321,10 +2323,10 @@ export function createBuiltinTools(bash: BashTool, mode: AgentMode, opts?: ToolR
   if (opts?.executionRole === "orchestrator") {
     tools.worker_models = dynamicTool({
       description:
-        "List enabled authenticated tool/text worker models, provider, tier, description, price and supported effort. Main chooses; no automatic router selection.",
+        "List the enabled authenticated tool/text worker models main may dispatch (only models cheaper than main: lower tier, no higher price), with provider, tier, description, price and supported effort. Main chooses per task; no automatic router selection.",
       inputSchema: jsonSchema({ type: "object", properties: { offset: { type: "integer", minimum: 0 } } }),
       execute: async (input: any) => {
-        const models = await workerModelInventory(opts.credentialedProvider);
+        const models = await workerModelInventory(opts.credentialedProvider, opts.orchestratorModelId);
         const offset = Number.isSafeInteger(input?.offset) && input.offset > 0 ? input.offset : 0;
         return {
           models: models.slice(offset, offset + 30),

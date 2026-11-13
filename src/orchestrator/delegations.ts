@@ -52,7 +52,7 @@ import {
 } from "./delegation-mailbox.js";
 import { beginBoundedWorkerWait, endBoundedWorkerWait } from "./interactive-pause.js";
 import { DELEGATION_ID_WORDS } from "./internal-ids.js";
-import { workerMcpGrantError } from "./orchestration-policy.js";
+import { hostWorkerModel, workerMcpGrantError } from "./orchestration-policy.js";
 import {
   assertPlanRevalidationEvidence,
   parsePlanRevalidationVerdict,
@@ -665,6 +665,7 @@ export class DelegationManager {
         agent: "verify",
         description: "Independent current-plan revalidation",
         prompt,
+        modelId: await hostWorkerModel(options.model),
         reviewOf: { jobId: source.id, resultVersion: input.resultVersion },
       },
       options,

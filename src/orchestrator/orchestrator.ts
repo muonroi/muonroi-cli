@@ -2456,7 +2456,7 @@ export class Agent {
       return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
     if (this.executionRole === "orchestrator") {
       try {
-        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined, this.modelId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.file("warn", "orchestrator", "Worker dispatch refused", { error: message });
@@ -2555,7 +2555,7 @@ export class Agent {
       return { success: false, output: "worker_role_refused: ask/plan mode permits read-only exploration only." };
     if (this.executionRole === "orchestrator") {
       try {
-        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined);
+        request = await validateWorkerSelection(request, this.provider ? this.providerId : undefined, this.modelId);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         logger.file("warn", "orchestrator", "Background dispatch refused", { error: message });

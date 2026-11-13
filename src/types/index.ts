@@ -50,7 +50,10 @@ export interface TaskRequest {
   /** Explicit execution workspace; never infer a directory from prose. */
   cwd?: string;
   maxToolRounds?: number;
-  /** When set, bypasses parent-tier cap and uses this model for the sub-agent. */
+  /**
+   * Explicit sub-agent model; skips the implicit tier walk (resolveModelForTask). An orchestrator's
+   * choice must still cost less than the orchestrator itself (workerCostCeiling).
+   */
   modelId?: string;
   /** Explicit worker effort; omitted uses the selected model's saved/catalog default. */
   reasoningEffort?: ReasoningEffort;
