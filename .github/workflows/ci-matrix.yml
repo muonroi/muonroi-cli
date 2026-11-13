@@ -38,8 +38,11 @@ jobs:
     # msys-drive-path, the verify floor's timeout that did not kill a forked
     # gate on win32) the projection is ~18 min of vitest + ~1.3 min of
     # install/typecheck — ~97% of a 20 min budget, which no runner variance
-    # survives. macOS ran the whole suite in 535 s, so 20 stays honest there.
-    timeout-minutes: ${{ matrix.os == 'windows-latest' && 30 || 20 }}
+    # survives. macOS no longer fits 20 either: its vitest step took 937 s on
+    # run 43190380574 (78% of the budget), and run 43356577453 (6276ccdd) was
+    # cancelled at 20m26s after 803 files with no failure, the same 504 files
+    # taking 523 s vs 352 s (x1.48, unrelated files slowed most): runner speed.
+    timeout-minutes: ${{ matrix.os == 'ubuntu-latest' && 20 || 30 }}
     steps:
       - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
